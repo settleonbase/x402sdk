@@ -20,7 +20,7 @@ import { journalReservationWei, requestFingerprint, TxManager, type TxRecord } f
 import { appendDurableJournalLine, parseJournal } from '../src/txJournal'
 import { createVaultJson, openVault } from '../src/vault'
 import { SignerService } from '../src/service'
-import { createLabInitialGasReadProviders, decodeLabInitialGasAdminStatus, encodeLabInitialGasAdminCall, labInitialGasReadOnlyRpc, PM_LAB_INITIAL_GAS_ADMIN_SELECTOR, PM_LAB_INITIAL_GAS_CHAIN_ID, PM_LAB_INITIAL_GAS_CLIENT, PM_LAB_INITIAL_GAS_GAS_LIMIT, PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY, PM_LAB_INITIAL_GAS_MAX_FEE_WEI, PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI, PM_LAB_INITIAL_GAS_RECIPIENT, PM_LAB_INITIAL_GAS_TARGET_WEI, readLabInitialGasSnapshot, requireMatchingLabInitialGasSnapshots, runPmLabInitialGas, type LabInitialGasDeps, type LabInitialGasSnapshot } from '../src/pmLabInitialGas'
+import { createLabInitialGasReadProvider, decodeLabInitialGasAdminStatus, encodeLabInitialGasAdminCall, labInitialGasReadOnlyRpc, PM_LAB_INITIAL_GAS_ADMIN_SELECTOR, PM_LAB_INITIAL_GAS_CHAIN_ID, PM_LAB_INITIAL_GAS_CLIENT, PM_LAB_INITIAL_GAS_GAS_LIMIT, PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY, PM_LAB_INITIAL_GAS_MAX_FEE_WEI, PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI, PM_LAB_INITIAL_GAS_RECIPIENT, PM_LAB_INITIAL_GAS_TARGET_WEI, readLabInitialGasPendingNonce, readLabInitialGasSnapshot, runPmLabInitialGas, type LabInitialGasDeps, type LabInitialGasSnapshot } from '../src/pmLabInitialGas'
 import { PM_GRANT_CLIENT, PM_GRANT_VDR } from '../src/pmGrantAdmin'
 
 const PW = 'unit-test-password-123'
@@ -106,6 +106,21 @@ test('policy: selector, target, arg rules and chain', () => {
 	assert.throws(() => p.checkCall({ ...base, to: Wallet.createRandom().address, data: iface.encodeFunctionData('updateInfo', [1, 2, 3]) }, lists))
 	assert.throws(() => p.checkCall({ ...base, client: 'other', data: iface.encodeFunctionData('updateInfo', [1, 2, 3]) }, lists))
 	assert.throws(() => p.checkCall({ ...base, data: '0x' }, lists))
+	const legacyCompromised = new Policy({
+		version: 1,
+		clients: {
+			dl: {
+				arrays: {
+					epochManagre: {
+						chains: [224422],
+						allow: [{ to: epoch, selectors: ['changeAddressInAdminlist(address,bool)'], args: { '0': { in: '@compromised' }, '1': { eq: false } } }],
+					},
+				},
+			},
+		},
+	})
+	assert.ok(legacyCompromised.checkCall({ ...base, data: iface.encodeFunctionData('changeAddressInAdminlist', [denied, false]) }, lists))
+	assert.throws(() => legacyCompromised.checkCall({ ...base, data: iface.encodeFunctionData('changeAddressInAdminlist', [Wallet.createRandom().address, false]) }, lists))
 })
 
 test('policy: gas cap follows the matched selector, not the first rule for the target', () => {
@@ -322,7 +337,7 @@ test('config: requireMountPoint refuses an unmounted volume and paths outside it
 	const dir = mkdtempSync(join(tmpdir(), 'ws-mnt-'))
 	writeFileSync(join(dir, 'keep'), 'unchanged')
 	const before = readdirSync(dir)
-	const base = { adminSocket: '', policyFile: '', deniedAddressesFile: '', rpc: {}, chains: {}, gasKeeper: { enabled: false, intervalMs: 1, chains: {}, refusedOwners: [] }, pmLabInitialGas: { enabled: false, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0', readRpcUrls: [] }, alerts: {}, scryptN: 1, keyWaitMs: 1 }
+	const base = { adminSocket: '', policyFile: '', deniedAddressesFile: '', rpc: {}, chains: {}, gasKeeper: { enabled: false, intervalMs: 1, chains: {}, refusedOwners: [] }, pmLabInitialGas: { enabled: false, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0', maxPriorityFeePerGasWei: '0' }, alerts: {}, scryptN: 1, keyWaitMs: 1 }
 	// A plain directory is on the same filesystem as its parent: "not mounted".
 	assert.throws(() => assertDataMount({ ...base, requireMountPoint: dir, dataDir: join(dir, 's'), logDir: join(dir, 'l') }), /not mounted/)
 	assert.throws(() => assertDataMount({ ...base, requireMountPoint: join(dir, 'missing'), dataDir: join(dir, 'missing', 's'), logDir: join(dir, 'missing', 'l') }), /not mounted/)
@@ -811,6 +826,48 @@ test('TxManager checks new signatures regardless of client name, marks internal 
 	}
 })
 
+test('TxManager fixed EIP-1559 override is Lab-route-only and never calls the unanchored fee oracle', async () => {
+	const dir = mkdtempSync(join(tmpdir(), 'lab-fixed-fees-'))
+	const hd = HdRoot.fromEntropy(mnemonicToEntropyBytes(newMnemonic()))
+	const keyring = new Keyring()
+	keyring.load(hd, null)
+	const from = keyring.pmAddress
+	let feeOracleCalls = 0
+	let broadcasts = 0
+	const txm = new TxManager({ '224422': { rpcUrls: ['http://127.0.0.1:9'], resendAfterMs: 1000, maxResends: 0, receiptPollMs: 1000 } }, keyring, new AuditLog(join(dir, 'audit.jsonl')), { send() {} }, join(dir, 'txjournal.jsonl'), 1)
+	const ctx = (txm as unknown as { chains: Map<number, { provider: unknown }> }).chains.get(224422)!
+	ctx.provider = {
+		async call() { return '0x' },
+		async estimateGas() { return PM_LAB_INITIAL_GAS_GAS_LIMIT },
+		async getBalance() { return 10n ** 18n },
+		async getTransactionCount() { return 0 },
+		async getFeeData() { feeOracleCalls++; throw new Error('fee oracle must not be called for fixed Lab fees') },
+		async broadcastTransaction(raw: string) { broadcasts++; return { hash: Transaction.from(raw).hash } },
+		async getTransactionReceipt() { return null },
+	} as never
+	const fixedEip1559Fees = { baseFeePerGas: 1_000_000n, maxPriorityFeePerGas: 1_000_000n, maxFeePerGas: PM_LAB_INITIAL_GAS_MAX_FEE_WEI }
+	const base = { client: PM_LAB_INITIAL_GAS_CLIENT, method: 'pm.labInitialGas', array: 'PM', chainId: 224422, candidates: [from], from, to: PM_LAB_INITIAL_GAS_RECIPIENT, data: '0x', value: 50_000_000_000_000_000n, gasLimit: PM_LAB_INITIAL_GAS_GAS_LIMIT, maxGas: PM_LAB_INITIAL_GAS_GAS_LIMIT, maxGasPriceWei: PM_LAB_INITIAL_GAS_MAX_FEE_WEI, maxInflightPerKey: 1, dailyBudgetWei: PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI, expectedNonce: 0, idempotencyKey: 'fixed-lab-fee-test', fixedEip1559Fees }
+	try {
+		const result = await txm.send(base)
+		assert.equal(result.status, 'sent')
+		assert.equal(feeOracleCalls, 0)
+		assert.equal(broadcasts, 1)
+		const record = txm.recent(1)[0]!
+		assert.equal(record.type, 2)
+		assert.equal(record.maxFeePerGas, fixedEip1559Fees.maxFeePerGas.toString())
+		assert.equal(record.maxPriorityFeePerGas, fixedEip1559Fees.maxPriorityFeePerGas.toString())
+		await assert.rejects(txm.send({ ...base, idempotencyKey: 'fixed-fee-wrong-target', to: Wallet.createRandom().address }), /outside the fixed Lab initial-Gas route/)
+		await assert.rejects(txm.send({ ...base, idempotencyKey: 'fixed-fee-bad-base', fixedEip1559Fees: { ...fixedEip1559Fees, baseFeePerGas: 30_000_000n } }), /outside the fixed Lab initial-Gas route/)
+		assert.equal(feeOracleCalls, 0)
+		assert.equal(broadcasts, 1, 'invalid fixed-fee requests are refused before broadcast')
+	} finally {
+		txm.stop()
+		keyring.wipe()
+		hd.wipe()
+		rmSync(dir, { recursive: true, force: true })
+	}
+})
+
 test('worst-case native gas reserve is at least 21000 times the higher fee', () => {
 	assert.equal(worstCaseNativeTransferGasWei(5n, 9n), 21_000n * 9n)
 	assert.equal(worstCaseNativeTransferGasWei(5n, null), 21_000n * 5n)
@@ -1092,10 +1149,11 @@ test('Lab post-sign candidate is explicitly registered but fails closed by defau
 	assert.equal(cfg.pmLabInitialGas.maxSpendWei, '0')
 	assert.equal(cfg.pmLabInitialGas.dailyCapWei, '0')
 	assert.equal(cfg.pmLabInitialGas.maxFeePerGasWei, '0')
-	assert.deepEqual(cfg.pmLabInitialGas.readRpcUrls, ['https://rpc1.conet.network', 'https://publicrpc.conet.network'])
+	assert.equal(cfg.pmLabInitialGas.maxPriorityFeePerGasWei, '0')
+	assert.equal('readRpcUrls' in cfg.pmLabInitialGas, false)
 })
 
-test('Lab initial Gas read RPCs are separate HTTPS-only configuration and required when enabled', () => {
+test('Lab initial Gas uses one existing chain RPC and rejects obsolete readRpcUrls', () => {
 	const { writeFileSync } = require('node:fs') as typeof import('node:fs')
 	const { loadConfig } = require('../src/config') as typeof import('../src/config')
 	const dir = mkdtempSync(join(tmpdir(), 'ws-lab-initial-ro-'))
@@ -1106,16 +1164,14 @@ test('Lab initial Gas read RPCs are separate HTTPS-only configuration and requir
 		const defaulted = loadConfig(path).pmLabInitialGas
 		assert.equal(defaulted.enabled, false)
 		assert.equal(defaulted.dryRun, true)
-		assert.deepEqual(defaulted.readRpcUrls, [])
-		const enabled = { enabled: true, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0', readRpcUrls: ['https://ro-a.invalid/rpc', 'https://ro-b.invalid/rpc'] }
+		assert.equal('readRpcUrls' in defaulted, false)
+		const enabled = { enabled: true, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0', maxPriorityFeePerGasWei: '0' }
 		writeFileSync(path, JSON.stringify({ ...base, pmLabInitialGas: enabled }))
-		assert.deepEqual(loadConfig(path).pmLabInitialGas.readRpcUrls, enabled.readRpcUrls)
-		writeFileSync(path, JSON.stringify({ ...base, pmLabInitialGas: { ...enabled, readRpcUrls: [] } }))
-		assert.throws(() => loadConfig(path), /requires two separate readRpcUrls/)
-		writeFileSync(path, JSON.stringify({ ...base, pmLabInitialGas: { ...enabled, readRpcUrls: ['http://ro-a.invalid', 'https://ro-b.invalid'] } }))
-		assert.throws(() => loadConfig(path), /HTTPS URLs/)
-		writeFileSync(path, JSON.stringify({ ...base, pmLabInitialGas: { ...enabled, readRpcUrls: ['https://ro-a.invalid', 'https://ro-a.invalid'] } }))
-		assert.throws(() => loadConfig(path), /must be distinct/)
+		assert.equal(loadConfig(path).pmLabInitialGas.maxPriorityFeePerGasWei, '0')
+		writeFileSync(path, JSON.stringify({ ...base, pmLabInitialGas: { ...enabled, readRpcUrls: ['https://not-used.invalid'] } }))
+		assert.throws(() => loadConfig(path), /readRpcUrls is obsolete/)
+		writeFileSync(path, JSON.stringify({ ...base, pmLabInitialGas: { ...enabled, maxPriorityFeePerGasWei: '1' } }))
+		assert.throws(() => loadConfig(path), /maxPriorityFeePerGasWei exceeds maxFeePerGasWei/)
 	} finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
@@ -1124,8 +1180,8 @@ function labInitialGasFixture(opts: {
 	balance?: bigint
 	pmBalance?: bigint
 	chainId?: bigint
-	gasPrice?: bigint | null
-	maxFeePerGas?: bigint | null
+	baseFeePerGas?: bigint
+	minedNonce?: bigint
 	nonce?: number
 	pmMatch?: boolean
 	pmAdmin?: boolean
@@ -1148,7 +1204,7 @@ function labInitialGasFixture(opts: {
 		maxSpendWei: PM_LAB_INITIAL_GAS_TARGET_WEI.toString(),
 		dailyCapWei: PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI.toString(),
 		maxFeePerGasWei: PM_LAB_INITIAL_GAS_MAX_FEE_WEI.toString(),
-		readRpcUrls: [],
+		maxPriorityFeePerGasWei: '1000000',
 		...opts.config,
 	}
 	const deps: LabInitialGasDeps = {
@@ -1159,12 +1215,12 @@ function labInitialGasFixture(opts: {
 		reader: {
 			async snapshot() {
 				read.push('snapshot')
+				if (opts.readError === 'eip1898') throw new Error('EIP-1898 unsupported')
 				if (opts.readError === 'chainId') throw new Error('mock chainId failure')
 				if (opts.readError === 'admin') throw new Error('mock admins RPC failure')
 				if (opts.readError === 'balance') throw new Error('mock balance failure')
-				return { chainId: opts.chainId ?? 224422n, blockNumber: 2_235_067n, blockHash: `0x${'77'.repeat(32)}`, pmAdmin: opts.pmAdmin ?? true, labAdmin: opts.labAdmin ?? true, pmBalance: opts.pmBalance ?? 10n ** 18n, labBalance: opts.balance ?? 0n, validatorContractCode: opts.validatorContractCode ?? '0x6000', labRecipientCode: opts.labRecipientCode ?? '0x' }
+				return { chainId: opts.chainId ?? 224422n, blockNumber: 2_235_067n, blockHash: `0x${'77'.repeat(32)}`, baseFeePerGas: opts.baseFeePerGas ?? 1_000_000n, minedNonce: opts.minedNonce ?? 6n, pmAdmin: opts.pmAdmin ?? true, labAdmin: opts.labAdmin ?? true, pmBalance: opts.pmBalance ?? 10n ** 18n, labBalance: opts.balance ?? 0n, validatorContractCode: opts.validatorContractCode ?? '0x6000', labRecipientCode: opts.labRecipientCode ?? '0x' }
 			},
-			async feeData() { read.push('feeData'); if (opts.readError === 'feeData') throw new Error('mock fee failure'); return { gasPrice: opts.gasPrice === undefined ? 1n : opts.gasPrice, maxFeePerGas: opts.maxFeePerGas === undefined ? null : opts.maxFeePerGas } },
 			async pendingNonce() { read.push('nonce'); if (opts.readError === 'nonce') throw new Error('mock nonce failure'); return opts.nonce ?? 7 },
 		},
 		txm: { get() { return journal } } as unknown as TxManager,
@@ -1173,7 +1229,7 @@ function labInitialGasFixture(opts: {
 			if (opts.sendDelayMs) await delay(opts.sendDelayMs)
 			const durableHash = `0x${'ab'.repeat(32)}`
 			const result = { hash: opts.sendHashInvalid ? '' : durableHash, from: pm, nonce: req.expectedNonce, chainId: PM_LAB_INITIAL_GAS_CHAIN_ID, status: 'sent' as const, idempotencyKey: req.idempotencyKey, raw: '0x' }
-			journal = { id: `${req.chainId}:${pm.toLowerCase()}:${req.expectedNonce}`, idempotencyKey: req.idempotencyKey, client: req.client, array: req.array, chainId: req.chainId, from: pm, to: req.to, data: req.data, value: req.value.toString(), nonce: req.expectedNonce, gasLimit: req.gasLimit.toString(), type: 0, hash: durableHash, hashes: [durableHash], raw: '0x', status: 'sent', resends: 0, createdAt: '', updatedAt: '', lastSentAt: 0 } as TxRecord
+			journal = { id: `${req.chainId}:${pm.toLowerCase()}:${req.expectedNonce}`, idempotencyKey: req.idempotencyKey, client: req.client, array: req.array, chainId: req.chainId, from: pm, to: req.to, data: req.data, value: req.value.toString(), nonce: req.expectedNonce, gasLimit: req.gasLimit.toString(), type: 2, maxFeePerGas: req.fixedEip1559Fees?.maxFeePerGas.toString(), maxPriorityFeePerGas: req.fixedEip1559Fees?.maxPriorityFeePerGas.toString(), hash: durableHash, hashes: [durableHash], raw: '0x', status: 'sent', resends: 0, createdAt: '', updatedAt: '', lastSentAt: 0 } as TxRecord
 			return result
 		},
 		audit() {},
@@ -1197,6 +1253,7 @@ test('Lab initial Gas is fixed and dry-run calculates only the difference to 0.1
 			if (result.status === 'dry-run') {
 				assert.equal(result.amountWei, expected.toString())
 				assert.equal(result.nonce, 7)
+				assert.equal(result.canonicalMinedNonce, '6')
 			}
 			assert.equal(fx.sends.length, 0, 'dry-run never calls the sender')
 		}
@@ -1221,6 +1278,7 @@ test('Lab initial Gas sends through the PM TxManager with fixed Lab recipient, e
 	assert.equal(sent.value, PM_LAB_INITIAL_GAS_TARGET_WEI - balance)
 	assert.equal(sent.gasLimit, PM_LAB_INITIAL_GAS_GAS_LIMIT)
 	assert.equal(sent.maxGasPriceWei, PM_LAB_INITIAL_GAS_MAX_FEE_WEI)
+	assert.deepEqual(sent.fixedEip1559Fees, { baseFeePerGas: 1_000_000n, maxPriorityFeePerGas: 1_000_000n, maxFeePerGas: PM_LAB_INITIAL_GAS_MAX_FEE_WEI })
 	assert.equal(sent.expectedNonce, 7)
 	assert.equal(sent.idempotencyKey, PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY)
 	assert.equal(sent.maxInflightPerKey, 1)
@@ -1270,6 +1328,7 @@ test('Lab initial Gas refuses unknown send status and malformed existing journal
 test('Lab initial Gas refuses RPC, chain, PM binding, fee, nonce, max-spend, daily-cap and PM-balance failures without send', async () => {
 	const cases: Array<{ name: string; options: Parameters<typeof labInitialGasFixture>[0]; pattern: RegExp }> = [
 		{ name: 'recipient RPC failure', options: { readError: 'balance' }, pattern: /mock balance failure/ },
+		{ name: 'provider rejects EIP-1898', options: { readError: 'eip1898' }, pattern: /EIP-1898 unsupported/ },
 		{ name: 'admin status RPC failure', options: { readError: 'admin' }, pattern: /mock admins RPC failure/ },
 		{ name: 'chain mismatch', options: { chainId: 1n }, pattern: /chainId mismatch/ },
 		{ name: 'PM admin false', options: { pmAdmin: false }, pattern: /both be admins/ },
@@ -1278,11 +1337,10 @@ test('Lab initial Gas refuses RPC, chain, PM binding, fee, nonce, max-spend, dai
 		{ name: 'Lab recipient is not an EOA', options: { labRecipientCode: '0x6000' }, pattern: /code or fixed Lab wallet code/ },
 		{ name: 'PM binding mismatch', options: { pmMatch: false }, pattern: /registered PM key/ },
 		{ name: 'PM locked', options: { unlocked: false }, pattern: /unlocked registered PM key/ },
-		{ name: 'fee RPC failure', options: { readError: 'feeData' }, pattern: /mock fee failure/ },
-		{ name: 'fee unavailable', options: { gasPrice: null, maxFeePerGas: null }, pattern: /fee data is unavailable/ },
-		{ name: 'fee above cap', options: { gasPrice: PM_LAB_INITIAL_GAS_MAX_FEE_WEI + 1n }, pattern: /market fee exceeds/ },
+		{ name: 'base fee plus explicit tip exceeds configured max fee', options: { baseFeePerGas: PM_LAB_INITIAL_GAS_MAX_FEE_WEI }, pattern: /does not cover canonical base fee plus configured priority fee/ },
 		{ name: 'nonce RPC failure', options: { readError: 'nonce' }, pattern: /mock nonce failure/ },
 		{ name: 'invalid pending nonce', options: { nonce: -1 }, pattern: /pending nonce is invalid/ },
+		{ name: 'pending nonce below canonical mined nonce', options: { nonce: 5, minedNonce: 6n }, pattern: /below the canonical mined nonce/ },
 		{ name: 'max spend too small', options: { config: { maxSpendWei: '1' } }, pattern: /exceeds its fixed spend cap/ },
 		{ name: 'daily cap too small', options: { config: { dailyCapWei: '1' } }, pattern: /cap/ },
 		{ name: 'PM balance insufficient', options: { pmBalance: 1n }, pattern: /PM balance does not cover/ },
@@ -1303,62 +1361,57 @@ test('Lab initial Gas encodes only the fixed ValidatorDepositRedeem admins read 
 	assert.throws(() => decodeLabInitialGasAdminStatus('0x01'), /data/)
 })
 
-test('Lab initial Gas requires independent EIP-1898 readers to agree on block and every decision value', () => {
-	const baseline: LabInitialGasSnapshot = { chainId: 224422n, blockNumber: 2_235_067n, blockHash: `0x${'77'.repeat(32)}`, pmAdmin: true, labAdmin: true, pmBalance: 100n, labBalance: 50n, validatorContractCode: '0x6000', labRecipientCode: '0x' }
-	assert.equal(requireMatchingLabInitialGasSnapshots(baseline, { ...baseline, blockHash: baseline.blockHash.toUpperCase().replace('0X', '0x') }), baseline)
-	assert.throws(() => requireMatchingLabInitialGasSnapshots(baseline, { ...baseline, blockNumber: baseline.blockNumber + 1n }), /block anchors differ/)
-	assert.throws(() => requireMatchingLabInitialGasSnapshots(baseline, { ...baseline, labBalance: baseline.labBalance + 1n }), /same-block reads differ/)
-})
-
-test('Lab initial Gas dual-RPC readers pin every decision read to each endpoint block hash and reject malformed values', async () => {
+test('Lab initial Gas uses one read-only provider; state reads and canonical nonce pin EIP-1898, while chainId and pending nonce stay distinct', async () => {
 	const pm = Wallet.createRandom().address
 	const hash = `0x${'66'.repeat(32)}`
-	const endpoint = () => {
-		const calls: Array<{ method: string; params: unknown[] }> = []
-		return {
-			calls,
-			rpc: {
-				async send(method: string, params: unknown[]): Promise<unknown> {
-					calls.push({ method, params })
-					if (method === 'eth_chainId') return `0x${PM_LAB_INITIAL_GAS_CHAIN_ID.toString(16)}`
-					if (method === 'eth_getBlockByNumber') return { number: '0x222', hash }
-					if (method === 'eth_call') return `0x${'0'.repeat(63)}1`
-					if (method === 'eth_getBalance') return params[0] === pm ? '0x100' : '0x20'
-					if (method === 'eth_getCode') return params[0] === PM_GRANT_VDR ? '0x6000' : '0x'
-					throw new Error(`unexpected mock RPC method ${method}`)
-				},
-			},
-		}
+	const calls: Array<{ method: string; params: unknown[] }> = []
+	const underlying = {
+		async send(method: string, params: unknown[]): Promise<unknown> {
+			calls.push({ method, params })
+			if (method === 'eth_chainId') return `0x${PM_LAB_INITIAL_GAS_CHAIN_ID.toString(16)}`
+			if (method === 'eth_getBlockByNumber') return { number: '0x222', hash, baseFeePerGas: '0xf4240' }
+			if (method === 'eth_call') return `0x${'0'.repeat(63)}1`
+			if (method === 'eth_getBalance') return params[0] === pm ? '0x100' : '0x20'
+			if (method === 'eth_getCode') return params[0] === PM_GRANT_VDR ? '0x6000' : '0x'
+			if (method === 'eth_getTransactionCount') return params[1] === 'pending' ? '0x7' : '0x6'
+			throw new Error(`unexpected mock RPC method ${method}`)
+		},
 	}
 	const { loadConfig } = require('../src/config') as typeof import('../src/config')
 	const candidate = loadConfig(join(process.cwd(), 'deploy/lab-mining-pool/config.lab-postsign-candidate-disabled.json'))
-	const readUrls = candidate.pmLabInitialGas.readRpcUrls
-	const broadcastUrls = candidate.chains['224422']!.rpcUrls
-	assert.equal(readUrls.length, 2)
-	assert.equal(broadcastUrls.length, 1)
-	assert.notDeepEqual(readUrls, broadcastUrls, 'read-only verifier URLs are separate from the TxManager broadcast pool')
-	const a = endpoint()
-	const b = endpoint()
-	const createdUrls: string[] = []
-	const readonly = createLabInitialGasReadProviders(readUrls, (url) => { createdUrls.push(url); return url === readUrls[0] ? a.rpc : b.rpc })
-	assert.deepEqual(createdUrls, readUrls, 'service provider factory receives only pmLabInitialGas.readRpcUrls')
-	const [readonlyA, readonlyB] = readonly
-	assert.equal('sendTransaction' in readonlyA, false)
-	assert.throws(() => readonlyA.send('eth_sendRawTransaction', ['0x1234']), /method is not allowed/)
-	const [snapshotA, snapshotB] = await Promise.all([readLabInitialGasSnapshot(readonlyA, pm), readLabInitialGasSnapshot(readonlyB, pm)])
-	assert.deepEqual(requireMatchingLabInitialGasSnapshots(snapshotA, snapshotB), snapshotA)
-	for (const reader of [a, b]) {
-		assert.equal(reader.calls[0]!.method, 'eth_chainId')
-		assert.deepEqual(reader.calls[1], { method: 'eth_getBlockByNumber', params: ['latest', false] })
-		const decisionReads = reader.calls.filter(({ method }) => ['eth_call', 'eth_getBalance', 'eth_getCode'].includes(method))
-		assert.equal(decisionReads.length, 6)
-		for (const call of decisionReads) assert.deepEqual(call.params[1], { blockHash: hash, requireCanonical: true })
-	}
-	assert.equal(a.calls.some(({ method }) => /sendTransaction|sendRawTransaction/.test(method)), false)
-	assert.equal(b.calls.some(({ method }) => /sendTransaction|sendRawTransaction/.test(method)), false)
-	const invalid = endpoint()
-	const invalidRpc = labInitialGasReadOnlyRpc({ async send(method, params) { return method === 'eth_getBalance' && params[0] === pm ? '' : invalid.rpc.send(method, params) } })
-	await assert.rejects(readLabInitialGasSnapshot(invalidRpc, pm), /RPC PM balance response invalid/)
+	assert.equal(candidate.chains['224422']!.rpcUrls.length, 1, 'no second read or write endpoint is added')
+	assert.equal(candidate.pmLabInitialGas.enabled, false)
+	const readonly = createLabInitialGasReadProvider(underlying)
+	assert.equal('sendTransaction' in readonly, false)
+	assert.throws(() => readonly.send('eth_sendRawTransaction', ['0x1234']), /method is not allowed/)
+	assert.throws(() => readonly.send('eth_getBalance', [pm, 'latest']), /canonical EIP-1898 block hash/)
+	assert.throws(() => readonly.send('eth_getCode', [pm, { blockHash: hash, requireCanonical: false }]), /canonical EIP-1898 block hash/)
+	const snapshot = await readLabInitialGasSnapshot(readonly, pm)
+	const pendingNonce = await readLabInitialGasPendingNonce(readonly, pm)
+	assert.equal(snapshot.chainId, 224422n)
+	assert.equal(snapshot.baseFeePerGas, 1_000_000n)
+	assert.equal(snapshot.minedNonce, 6n)
+	assert.equal(pendingNonce, 7)
+	assert.deepEqual(calls[0], { method: 'eth_chainId', params: [] })
+	assert.deepEqual(calls[1], { method: 'eth_getBlockByNumber', params: ['latest', false] })
+	const blockTag = { blockHash: hash, requireCanonical: true }
+	const canonicalStateReads = calls.filter(({ method, params }) => ['eth_call', 'eth_getBalance', 'eth_getCode'].includes(method) || (method === 'eth_getTransactionCount' && params[1] !== 'pending'))
+	assert.equal(canonicalStateReads.length, 7)
+	for (const call of canonicalStateReads) assert.deepEqual(call.params[1], blockTag, `${call.method} must be pinned to one canonical block hash`)
+	assert.deepEqual(calls[calls.length - 1], { method: 'eth_getTransactionCount', params: [getAddress(pm), 'pending'] })
+	assert.deepEqual(calls.filter(({ method }) => method === 'eth_getBlockByNumber').map(({ params }) => params), [['latest', false], ['0x222', false], ['0x222', false]])
+	const invalid = { async send(method: string, params: unknown[]) { if (method === 'eth_getBalance') return ''; return underlying.send(method, params as unknown[]) } }
+	await assert.rejects(readLabInitialGasSnapshot(createLabInitialGasReadProvider(invalid), pm), /RPC PM balance response invalid/)
+	const unsupported = { async send(method: string, params: unknown[]) { if (method === 'eth_getBalance') throw new Error('EIP-1898 unsupported'); return underlying.send(method, params as unknown[]) } }
+	await assert.rejects(readLabInitialGasSnapshot(createLabInitialGasReadProvider(unsupported), pm), /EIP-1898 unsupported/)
+	const reorg = { async send(method: string, params: unknown[]) { if (method === 'eth_getBlockByNumber' && params[0] !== 'latest') return { number: '0x222', hash: `0x${'99'.repeat(32)}`, baseFeePerGas: '0xf4240' }; return underlying.send(method, params as unknown[]) } }
+	await assert.rejects(readLabInitialGasSnapshot(createLabInitialGasReadProvider(reorg), pm), /not the canonical header/)
+	let blockReads = 0
+	const changesDuringRead = { async send(method: string, params: unknown[]) { if (method === 'eth_getBlockByNumber') { blockReads++; return { number: '0x222', hash: blockReads < 3 ? hash : `0x${'99'.repeat(32)}`, baseFeePerGas: '0xf4240' } } return underlying.send(method, params as unknown[]) } }
+	await assert.rejects(readLabInitialGasSnapshot(createLabInitialGasReadProvider(changesDuringRead), pm), /canonical block changed during/)
+	await assert.rejects(readLabInitialGasPendingNonce(createLabInitialGasReadProvider({ async send() { return 'not-a-quantity' } }), pm), /pending nonce response invalid/)
+	const missingBaseFee = { async send(method: string, params: unknown[]) { if (method === 'eth_getBlockByNumber') return { number: '0x222', hash }; return underlying.send(method, params as unknown[]) } }
+	await assert.rejects(readLabInitialGasSnapshot(createLabInitialGasReadProvider(missingBaseFee), pm), /baseFeePerGas response invalid/)
 })
 
 test('gas keeper refuses the oracle contract even when the whitelist names it', async () => {

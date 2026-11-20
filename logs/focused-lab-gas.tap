@@ -1,0 +1,118 @@
+TAP version 13
+# Subtest: post-sign reads the signing wallet, uses the existing whitelist, and funds only below the configured minimum
+ok 1 - post-sign reads the signing wallet, uses the existing whitelist, and funds only below the configured minimum
+  ---
+  duration_ms: 29.115208
+  type: 'test'
+  ...
+# Subtest: post-sign balance RPC failure stays unavailable and never falls through to a zero balance
+ok 2 - post-sign balance RPC failure stays unavailable and never falls through to a zero balance
+  ---
+  duration_ms: 5.867458
+  type: 'test'
+  ...
+# Subtest: post-sign still reads while signer is locked but does not fund
+ok 3 - post-sign still reads while signer is locked but does not fund
+  ---
+  duration_ms: 5.061834
+  type: 'test'
+  ...
+# Subtest: post-sign concurrent checks serialize and a mined old intent gets a fresh attempt key
+ok 4 - post-sign concurrent checks serialize and a mined old intent gets a fresh attempt key
+  ---
+  duration_ms: 6.326291
+  type: 'test'
+  ...
+# Subtest: post-sign refreshes a balance after a mined pending row and does not create another attempt when the top-up arrived
+ok 5 - post-sign refreshes a balance after a mined pending row and does not create another attempt when the top-up arrived
+  ---
+  duration_ms: 4.750667
+  type: 'test'
+  ...
+# Subtest: post-sign releases a hashless intent when refreshed balance is sufficient and recalculates a later attempt
+ok 6 - post-sign releases a hashless intent when refreshed balance is sufficient and recalculates a later attempt
+  ---
+  duration_ms: 5.7475
+  type: 'test'
+  ...
+# Subtest: post-sign service checks each newly created signature but not typed-data replay or wait reuse
+ok 7 - post-sign service checks each newly created signature but not typed-data replay or wait reuse
+  ---
+  duration_ms: 17.193209
+  type: 'test'
+  ...
+# Subtest: TxManager fixed EIP-1559 override is Lab-route-only and never calls the unanchored fee oracle
+ok 8 - TxManager fixed EIP-1559 override is Lab-route-only and never calls the unanchored fee oracle
+  ---
+  duration_ms: 39.783334
+  type: 'test'
+  ...
+# Subtest: Lab post-sign candidate is explicitly registered but fails closed by default and all caps are zero
+ok 9 - Lab post-sign candidate is explicitly registered but fails closed by default and all caps are zero
+  ---
+  duration_ms: 0.587584
+  type: 'test'
+  ...
+# Subtest: Lab initial Gas uses one existing chain RPC and rejects obsolete readRpcUrls
+ok 10 - Lab initial Gas uses one existing chain RPC and rejects obsolete readRpcUrls
+  ---
+  duration_ms: 0.749542
+  type: 'test'
+  ...
+# Subtest: Lab initial Gas is fixed and dry-run calculates only the difference to 0.1 CNET at 0/0.05/0.1 boundaries
+ok 11 - Lab initial Gas is fixed and dry-run calculates only the difference to 0.1 CNET at 0/0.05/0.1 boundaries
+  ---
+  duration_ms: 8.110625
+  type: 'test'
+  ...
+# Subtest: Lab initial Gas sends through the PM TxManager with fixed Lab recipient, exact delta, fee cap, nonce and idempotency
+ok 12 - Lab initial Gas sends through the PM TxManager with fixed Lab recipient, exact delta, fee cap, nonce and idempotency
+  ---
+  duration_ms: 2.102083
+  type: 'test'
+  ...
+# Subtest: Lab initial Gas is idempotent across concurrent and repeated calls and refuses prior pending intent
+ok 13 - Lab initial Gas is idempotent across concurrent and repeated calls and refuses prior pending intent
+  ---
+  duration_ms: 14.946583
+  type: 'test'
+  ...
+# Subtest: Lab initial Gas refuses an unhashable sender result and blocks retries from the durable journal
+ok 14 - Lab initial Gas refuses an unhashable sender result and blocks retries from the durable journal
+  ---
+  duration_ms: 2.306875
+  type: 'test'
+  ...
+# Subtest: Lab initial Gas refuses unknown send status and malformed existing journal records without retry
+ok 15 - Lab initial Gas refuses unknown send status and malformed existing journal records without retry
+  ---
+  duration_ms: 5.930209
+  type: 'test'
+  ...
+# Subtest: Lab initial Gas refuses RPC, chain, PM binding, fee, nonce, max-spend, daily-cap and PM-balance failures without send
+ok 16 - Lab initial Gas refuses RPC, chain, PM binding, fee, nonce, max-spend, daily-cap and PM-balance failures without send
+  ---
+  duration_ms: 34.924166
+  type: 'test'
+  ...
+# Subtest: Lab initial Gas encodes only the fixed ValidatorDepositRedeem admins read and strictly decodes bool
+ok 17 - Lab initial Gas encodes only the fixed ValidatorDepositRedeem admins read and strictly decodes bool
+  ---
+  duration_ms: 0.882583
+  type: 'test'
+  ...
+# Subtest: Lab initial Gas uses one read-only provider; state reads and canonical nonce pin EIP-1898, while chainId and pending nonce stay distinct
+ok 18 - Lab initial Gas uses one read-only provider; state reads and canonical nonce pin EIP-1898, while chainId and pending nonce stay distinct
+  ---
+  duration_ms: 3.440125
+  type: 'test'
+  ...
+1..18
+# tests 18
+# suites 0
+# pass 18
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 272.74025

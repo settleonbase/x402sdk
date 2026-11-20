@@ -11,7 +11,7 @@ import { denied } from './errors'
 export type ArgRule = {
 	eq?: string | number | boolean
 	/** '@denied' = denied-address list; '@registry' = any address the signer derived. */
-	in?: '@denied' | '@registry' | string[]
+	in?: '@denied' | '@compromised' | '@registry' | string[]
 	/** Inclusive length bounds. Only ABI arrays can satisfy them. */
 	minItems?: number
 	maxItems?: number
@@ -314,7 +314,7 @@ function checkArg(
 	if (rule.in !== undefined) {
 		const v = String(value).toLowerCase()
 		const set =
-			rule.in === '@denied'
+			rule.in === '@denied' || rule.in === '@compromised'
 				? lists.denied
 				: rule.in === '@registry'
 					? lists.registry

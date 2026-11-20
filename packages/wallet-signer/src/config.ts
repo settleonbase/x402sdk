@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { getAddress, isAddress } from 'ethers'
+import { normalizePmOneShot, type PmOneShotConfig } from './pmOneShotTopup'
 
 export type ChainConfig = {
 	rpcUrls: string[]
@@ -41,8 +42,7 @@ export type PmLabInitialGasConfig = {
 	maxSpendWei: string
 	dailyCapWei: string
 	maxFeePerGasWei: string
-	/** Separate HTTPS-only read endpoints. Never shared with or used for transaction broadcast. */
-	readRpcUrls: string[]
+	maxPriorityFeePerGasWei: string
 }
 
 export type TlsListen = { host: string; port: number; cert: string; key: string; ca: string }
@@ -88,6 +88,8 @@ export type Config = {
 	/** PM-issued addAdmin for reviewed dedicated wallets. Off by default. */
 	pmGrantAdmin?: { enabled: boolean; targets: string[]; denyAddresses?: string[]; maxGasPriceWei?: string }
 	pmLabInitialGas: PmLabInitialGasConfig
+	/** Legacy VDR 0.1 CNET one-shot. Omitted means disabled; its admin commands remain available. */
+	pmOneShot?: PmOneShotConfig
 	alerts: { webhookUrl?: string; host?: string }
 	/** Fresh vaults use this scrypt N. 2^18 in production. */
 	scryptN: number
@@ -100,7 +102,7 @@ export type Config = {
 /** Top-level keys this loader consumes. Any other key is refused at load time. */
 const KNOWN_CONFIG_KEYS: ReadonlySet<string> = new Set([
 	'dataDir', 'logDir', 'requireMountPoint', 'requireMountSource', 'adminSocket', 'adminSocketMode', 'policyFile',
-	'deniedAddressesFile', 'rpc', 'chains', 'gasKeeper', 'pmGrantAdmin', 'pmLabInitialGas', 'pmOneShot', 'alerts', 'scryptN', 'keyWaitMs', 'allowUnsafeTestInit',
+	'deniedAddressesFile', 'compromisedFile', 'rpc', 'chains', 'gasKeeper', 'pmGrantAdmin', 'pmLabInitialGas', 'pmOneShot', 'alerts', 'scryptN', 'keyWaitMs', 'allowUnsafeTestInit',
 ])
 
 export function loadConfig(path: string): Config {
@@ -114,6 +116,14 @@ export function loadConfig(path: string): Config {
 	if (!raw.policyFile) throw new Error('config: policyFile required')
 	if (!raw.chains || Object.keys(raw.chains).length === 0) throw new Error('config: chains required')
 	if (raw.rpc?.proxied) checkProxied(raw.rpc.proxied)
+	const legacyDenied = (raw as { compromisedFile?: unknown }).compromisedFile
+	const modernDenied = raw.deniedAddressesFile
+	if (typeof legacyDenied === 'string' && typeof modernDenied === 'string' && legacyDenied !== modernDenied) {
+		throw new Error('config: compromisedFile and deniedAddressesFile disagree; refusing to start')
+	}
+	const deniedAddressesFile = (typeof modernDenied === 'string' ? modernDenied : undefined)
+		?? (typeof legacyDenied === 'string' ? legacyDenied : undefined)
+		?? join(raw.dataDir, 'denied-addresses.json')
 	return {
 		dataDir: raw.dataDir,
 		logDir: raw.logDir ?? raw.dataDir,
@@ -122,12 +132,13 @@ export function loadConfig(path: string): Config {
 		adminSocket: raw.adminSocket,
 		adminSocketMode: normalizeAdminMode(raw.adminSocketMode),
 		policyFile: raw.policyFile,
-		deniedAddressesFile: raw.deniedAddressesFile ?? join(raw.dataDir, 'denied-addresses.json'),
+		deniedAddressesFile,
 		rpc: raw.rpc ?? {},
 		chains: raw.chains,
 		gasKeeper: normalizeGasKeeper(raw.gasKeeper),
 		pmGrantAdmin: normalizePmGrant(raw.pmGrantAdmin),
 		pmLabInitialGas: normalizePmLabInitialGas(raw.pmLabInitialGas),
+		pmOneShot: normalizePmOneShot((raw as { pmOneShot?: unknown }).pmOneShot),
 		alerts: raw.alerts ?? {},
 		scryptN: raw.scryptN ?? 2 ** 18,
 		keyWaitMs: raw.keyWaitMs ?? 30_000,
@@ -136,33 +147,27 @@ export function loadConfig(path: string): Config {
 }
 
 function normalizePmLabInitialGas(raw: unknown): PmLabInitialGasConfig {
-	if (raw === undefined) return { enabled: false, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0', readRpcUrls: [] }
+	if (raw === undefined) return { enabled: false, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0', maxPriorityFeePerGasWei: '0' }
 	const r = raw as Partial<PmLabInitialGasConfig>
 	if (typeof r.enabled !== 'boolean' || typeof r.dryRun !== 'boolean') throw new Error('config: pmLabInitialGas.enabled and dryRun must be booleans')
-	for (const field of ['maxSpendWei', 'dailyCapWei', 'maxFeePerGasWei'] as const) {
+	if ('readRpcUrls' in (raw as Record<string, unknown>)) throw new Error('config: pmLabInitialGas.readRpcUrls is obsolete; reads use the configured chain RPC')
+	for (const field of ['maxSpendWei', 'dailyCapWei', 'maxFeePerGasWei', 'maxPriorityFeePerGasWei'] as const) {
 		if (typeof r[field] !== 'string' || !/^\d+$/.test(r[field])) throw new Error(`config: pmLabInitialGas.${field} must be a wei integer string`)
 	}
 	const maxSpendWei = r.maxSpendWei!
 	const dailyCapWei = r.dailyCapWei!
 	const maxFeePerGasWei = r.maxFeePerGasWei!
-	const readRpcUrls = r.readRpcUrls ?? []
-	if (!Array.isArray(readRpcUrls) || readRpcUrls.some((url) => typeof url !== 'string')) throw new Error('config: pmLabInitialGas.readRpcUrls must be a string array')
-	if (readRpcUrls.length !== 0 && readRpcUrls.length !== 2) throw new Error('config: pmLabInitialGas.readRpcUrls must be empty or contain exactly two endpoints')
-	for (const url of readRpcUrls) {
-		let parsed: URL
-		try { parsed = new URL(url) } catch { throw new Error('config: pmLabInitialGas.readRpcUrls entries must be valid HTTPS URLs') }
-		if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password || parsed.hash) throw new Error('config: pmLabInitialGas.readRpcUrls entries must be credential-free HTTPS URLs without fragments')
-	}
-	if (readRpcUrls.length === 2 && readRpcUrls[0] === readRpcUrls[1]) throw new Error('config: pmLabInitialGas read RPC endpoints must be distinct')
-	if (r.enabled && readRpcUrls.length !== 2) throw new Error('config: enabled pmLabInitialGas requires two separate readRpcUrls')
+	const maxPriorityFeePerGasWei = r.maxPriorityFeePerGasWei!
 	const maxSpend = BigInt(maxSpendWei)
 	const dailyCap = BigInt(dailyCapWei)
 	const feeCap = BigInt(maxFeePerGasWei)
+	const priorityFee = BigInt(maxPriorityFeePerGasWei)
 	if (maxSpend > 100_000_000_000_000_000n) throw new Error('config: pmLabInitialGas.maxSpendWei exceeds fixed 0.1 CNET target')
 	if (dailyCap > 100_000_000_000_630_000n) throw new Error('config: pmLabInitialGas.dailyCapWei exceeds fixed target plus hard worst-case fee')
 	if (feeCap > 30_000_000n) throw new Error('config: pmLabInitialGas.maxFeePerGasWei exceeds hard 0.03 Gwei ceiling')
+	if (priorityFee > feeCap) throw new Error('config: pmLabInitialGas.maxPriorityFeePerGasWei exceeds maxFeePerGasWei')
 	if (r.enabled && !r.dryRun && (maxSpend === 0n || dailyCap === 0n || feeCap === 0n)) throw new Error('config: live pmLabInitialGas requires non-zero spend, daily, and fee caps')
-	return { enabled: r.enabled, dryRun: r.dryRun, maxSpendWei, dailyCapWei, maxFeePerGasWei, readRpcUrls }
+	return { enabled: r.enabled, dryRun: r.dryRun, maxSpendWei, dailyCapWei, maxFeePerGasWei, maxPriorityFeePerGasWei }
 }
 
 function normalizeAdminMode(raw: unknown): number {
@@ -328,4 +333,5 @@ export const paths = (c: Config) => ({
 	typedDataReplay: join(c.logDir, 'typed-data-replay.jsonl'),
 	gasState: join(c.dataDir, 'gaskeeper-state.json'),
 	clientState: join(c.dataDir, 'clients-disabled.json'),
+	pmOneShotState: join(c.dataDir, 'pm-oneshot-vdr-gas-0.1.json'),
 })

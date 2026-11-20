@@ -230,14 +230,18 @@ async function dispatch(svc: SignerService, client: string, r: RpcRequest): Prom
 	const p = r.params
 	const obj = (Array.isArray(p) ? p[0] : p) as Record<string, unknown> | undefined
 	switch (r.method) {
-		case 'signer_status':
-			return { state: svc.state, version: svc.status().version, arrays: svc.policy.arraysOf(client), denied: svc.deniedList() }
+		case 'signer_status': {
+			const denied = svc.deniedList()
+			return { state: svc.state, version: svc.status().version, arrays: svc.policy.arraysOf(client), denied, compromised: denied }
+		}
 		case 'signer_accounts':
 			return svc.accounts(client, obj?.keyArray as string | undefined, obj?.chainId !== undefined ? Number(obj.chainId) : undefined)
 		case 'eth_accounts':
 			return svc.accounts(client)
 		case 'signer_denied':
 			return svc.deniedList()
+		case 'signer_compromised':
+			return svc.compromisedList()
 		case 'signer_getAddress':
 			return svc.boundAddress(client, obj?.keyArray as string | undefined)
 		case 'signer_sendTransaction':

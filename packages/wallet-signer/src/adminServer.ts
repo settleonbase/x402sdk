@@ -105,8 +105,26 @@ async function exec(svc: SignerService, cmd: string, a: Record<string, unknown>)
 		}
 		case 'tx.list':
 			return svc.txm.recent(Number(a.limit ?? 20)).map(({ raw: _r, data: _d, ...rest }) => rest)
+		case 'compromised.list':
+			return svc.compromisedList()
 		case 'denied.list':
 			return svc.deniedList()
+		case 'pm.oneshot.status':
+			return svc.pmOneShotStatus()
+		case 'pm.oneshot.vdr-gas-0.1': {
+			const ownerPassword = typeof a.ownerPassword === 'string' ? a.ownerPassword : typeof a.password === 'string' ? a.password : ''
+			delete a.ownerPassword
+			delete a.password
+			if (!ownerPassword) throw new SignerError(ErrorCode.INVALID_PARAMS, 'ownerPassword required for pm oneshot')
+			return svc.pmOneShotVdrGas0_1(ownerPassword)
+		}
+		case 'pm.oneshot.abort-unsent': {
+			const ownerPassword = typeof a.ownerPassword === 'string' ? a.ownerPassword : typeof a.password === 'string' ? a.password : ''
+			delete a.ownerPassword
+			delete a.password
+			if (!ownerPassword) throw new SignerError(ErrorCode.INVALID_PARAMS, 'ownerPassword required for pm oneshot')
+			return svc.pmOneShotAbortUnsent(ownerPassword)
+		}
 		default:
 			throw new SignerError(ErrorCode.METHOD_NOT_FOUND, `unknown command ${cmd}`)
 	}

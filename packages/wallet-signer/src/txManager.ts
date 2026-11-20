@@ -36,6 +36,8 @@ export type SendRequest = {
 	skipPostSignCheck?: boolean
 	/** Internal-only preflight assertion used by fixed, reviewed PM send flows. */
 	expectedNonce?: number
+	/** Internal-only, canonical-header-derived EIP-1559 fees for the fixed Lab initial-Gas route. */
+	fixedEip1559Fees?: { baseFeePerGas: bigint; maxPriorityFeePerGas: bigint; maxFeePerGas: bigint }
 }
 
 export type TxStatus = 'sent' | 'mined' | 'reverted' | 'stuck' | 'rejected'
@@ -201,6 +203,13 @@ export class TxManager {
 	}
 
 	async send(req: SendRequest): Promise<SendResult> {
+		if (req.fixedEip1559Fees) {
+			const fee = req.fixedEip1559Fees
+			const fixedLabRoute = req.client === 'pm-lab-initial-gas' && req.method === 'pm.labInitialGas' && req.chainId === 224422 && req.array === 'PM' && req.to.toLowerCase() === '0xcfaf85e6c1765da01a4dc58c81b28cd572067135' && req.data === '0x'
+			if (!fixedLabRoute || fee.baseFeePerGas < 0n || fee.maxPriorityFeePerGas < 0n || fee.maxFeePerGas <= 0n || fee.maxPriorityFeePerGas > fee.maxFeePerGas || fee.baseFeePerGas + fee.maxPriorityFeePerGas > fee.maxFeePerGas || req.maxGasPriceWei !== fee.maxFeePerGas) {
+				throw new SignerError(ErrorCode.INVALID_PARAMS, 'fixed EIP-1559 fee override is invalid or outside the fixed Lab initial-Gas route')
+			}
+		}
 		const key = req.idempotencyKey
 		if (!key) return this.doSend(req)
 		const scope = idempotencyScopeId(req.client, key)
@@ -254,7 +263,7 @@ export class TxManager {
 			if (req.maxGas !== undefined && gasLimit > req.maxGas) {
 				throw new SignerError(ErrorCode.POLICY_DENIED, `gas ${gasLimit} above policy max ${req.maxGas}`)
 			}
-			const fees = await this.fees(ctx, req.maxGasPriceWei)
+			const fees = await this.fees(ctx, req.maxGasPriceWei, req.fixedEip1559Fees)
 			const priceForBudget = fees.maxFeePerGas ?? fees.gasPrice ?? 0n
 			const budgetCost = gasLimit * priceForBudget
 			const worstCaseWei = gasLimit * priceForBudget + req.value
@@ -528,7 +537,12 @@ export class TxManager {
 	private async fees(
 		ctx: ChainCtx,
 		cap?: bigint,
+		fixed?: { baseFeePerGas: bigint; maxPriorityFeePerGas: bigint; maxFeePerGas: bigint },
 	): Promise<{ type: number; gasPrice?: bigint; maxFeePerGas?: bigint; maxPriorityFeePerGas?: bigint }> {
+		if (fixed) {
+			if (cap === undefined || fixed.maxFeePerGas > cap || fixed.baseFeePerGas + fixed.maxPriorityFeePerGas > fixed.maxFeePerGas) throw new SignerError(ErrorCode.GAS_PRICE_TOO_HIGH, 'fixed EIP-1559 fee is incompatible with canonical base fee or configured cap')
+			return { type: 2, maxFeePerGas: fixed.maxFeePerGas, maxPriorityFeePerGas: fixed.maxPriorityFeePerGas }
+		}
 		let fee
 		try {
 			fee = await ctx.provider.getFeeData()

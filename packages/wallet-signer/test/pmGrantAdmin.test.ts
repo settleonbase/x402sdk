@@ -404,7 +404,7 @@ test('derive: private config missing, malformed or without deny list fails close
 test('derive: minimal candidate from copies; inputs untouched; preflight passes; refusals hold', () => {
 	const dir = mkdtempSync(join(tmpdir(), 'pmder-'))
 	try {
-		const live = { dataDir: dir, logDir: dir, adminSocket: join(dir, 'a.sock'), adminSocketMode: 432, policyFile: join(dir, 'live-policy.json'), rpc: { unix: [{ path: join(dir, 'o.sock'), client: 'oracle-daemon', mode: 432 }, { path: join(dir, 'v.sock'), client: 'vdr-payout' }] }, chains: { '224422': { rpcUrls: ['http://127.0.0.1:1'] } }, gasKeeper: { enabled: false, intervalMs: 60000, chains: {} }, pmOneShot: { enabled: true } }
+		const live = { dataDir: dir, logDir: dir, adminSocket: join(dir, 'a.sock'), adminSocketMode: 432, policyFile: join(dir, 'live-policy.json'), rpc: { unix: [{ path: join(dir, 'o.sock'), client: 'oracle-daemon', mode: 432 }, { path: join(dir, 'v.sock'), client: 'vdr-payout' }] }, chains: { '224422': { rpcUrls: ['http://127.0.0.1:1'] } }, gasKeeper: { enabled: false, intervalMs: 60000, chains: {} }, pmOneShot: { enabled: true, maxGasPriceWei: '30000000' } }
 		const livePolicy = { version: 1, clients: { 'oracle-daemon': { arrays: {} }, 'vdr-payout': { arrays: {} } } }
 		writeFileSync(join(dir, 'live-config.json'), JSON.stringify(live))
 		writeFileSync(join(dir, 'live-policy.json'), JSON.stringify(livePolicy))

@@ -215,6 +215,20 @@ async function main(): Promise<void> {
 			return call('tx.list', { limit: Number(opt('--limit') ?? 20) })
 		case 'denied':
 			return call('denied.list')
+		case 'compromised':
+			return call('compromised.list')
+		case 'pm': {
+			if (sub === 'oneshot-status' || sub === 'status') return call('pm.oneshot.status')
+			if (sub === 'oneshot-vdr-gas-0.1') {
+				const ownerPassword = await readPassword('Project-owner vault password for PM oneshot (hidden): ')
+				return call('pm.oneshot.vdr-gas-0.1', { ownerPassword })
+			}
+			if (sub === 'oneshot-abort-unsent') {
+				const ownerPassword = await readPassword('Project-owner vault password for PM oneshot (hidden): ')
+				return call('pm.oneshot.abort-unsent', { ownerPassword })
+			}
+			throw new Error('pm oneshot-status | oneshot-vdr-gas-0.1 | oneshot-abort-unsent')
+		}
 		default:
 			process.stdout.write(
 				[
@@ -224,7 +238,8 @@ async function main(): Promise<void> {
 					'  status | unlock | lock',
 					'  array list | add <name> --count N --chains 224422 | grow <name> --count N | rotate <name>',
 					'  policy reload | client disable|enable <name>',
-					'  gas status | gas run | tx list [--limit N] | denied',
+					'  gas status | gas run | tx list [--limit N] | denied | compromised',
+					'  pm oneshot-status | oneshot-vdr-gas-0.1 | oneshot-abort-unsent',
 					'',
 				].join('\n'),
 			)

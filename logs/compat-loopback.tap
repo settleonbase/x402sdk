@@ -1,0 +1,203 @@
+TAP version 13
+# [alert] info unlocked wallet-signer unlocked (PM 0xB2ca54b39b951ce218138e0579b30935275dA4F0)
+# Subtest: four local sockets stay up and the three old entries reconnect with the old deny-list names
+ok 1 - four local sockets stay up and the three old entries reconnect with the old deny-list names
+  ---
+  duration_ms: 139.196541
+  type: 'test'
+  ...
+# Subtest: target rules: disabled, not allowlisted, zero, deny list, VDR, PM, bad format
+ok 2 - target rules: disabled, not allowlisted, zero, deny list, VDR, PM, bad format
+  ---
+  duration_ms: 1.020875
+  type: 'test'
+  ...
+# Subtest: success: one send through TxManager path with addAdmin(target), value 0, PM as candidate; audit has pre-reads
+ok 3 - success: one send through TxManager path with addAdmin(target), value 0, PM as candidate; audit has pre-reads
+  ---
+  duration_ms: 9.175334
+  type: 'test'
+  ...
+# Subtest: the send request carries the fixed contract, selector calldata, value 0 and PM as the only candidate
+ok 4 - the send request carries the fixed contract, selector calldata, value 0 and PM as the only candidate
+  ---
+  duration_ms: 7.5475
+  type: 'test'
+  ...
+# Subtest: one-shot: same target refused once any record exists
+ok 5 - one-shot: same target refused once any record exists
+  ---
+  duration_ms: 7.329541
+  type: 'test'
+  ...
+# Subtest: concurrency: same target fired twice in parallel sends exactly once
+ok 6 - concurrency: same target fired twice in parallel sends exactly once
+  ---
+  duration_ms: 89.429917
+  type: 'test'
+  ...
+# Subtest: concurrency: different targets in parallel never overlap in signing and each is sent once
+ok 7 - concurrency: different targets in parallel never overlap in signing and each is sent once
+  ---
+  duration_ms: 139.945625
+  type: 'test'
+  ...
+# Subtest: reads refuse before any send: PM not admin, target already admin (state marked aborted)
+ok 8 - reads refuse before any send: PM not admin, target already admin (state marked aborted)
+  ---
+  duration_ms: 2.158084
+  type: 'test'
+  ...
+# Subtest: simulation revert, gas cap and balance refuse before any send
+ok 9 - simulation revert, gas cap and balance refuse before any send
+  ---
+  duration_ms: 2.803917
+  type: 'test'
+  ...
+# Subtest: signer check: a send that reports a non-PM signer is refused and marked uncertain
+ok 10 - signer check: a send that reports a non-PM signer is refused and marked uncertain
+  ---
+  duration_ms: 7.777458
+  type: 'test'
+  ...
+# Subtest: lost receipt: send throws, target uncertain, no second send; reconcile by key finds the hash and never re-sends
+ok 11 - lost receipt: send throws, target uncertain, no second send; reconcile by key finds the hash and never re-sends
+  ---
+  duration_ms: 8.385208
+  type: 'test'
+  ...
+# Subtest: reconcile: receipt status 0x0 marks failed; admin already true marks confirmed; never re-sends
+ok 12 - reconcile: receipt status 0x0 marks failed; admin already true marks confirmed; never re-sends
+  ---
+  duration_ms: 7.907584
+  type: 'test'
+  ...
+# Subtest: disabled config refuses without touching state
+ok 13 - disabled config refuses without touching state
+  ---
+  duration_ms: 0.236583
+  type: 'test'
+  ...
+# Subtest: admin wiring: pm.reconcile is routed on the admin socket and not on the business socket
+ok 14 - admin wiring: pm.reconcile is routed on the admin socket and not on the business socket
+  ---
+  duration_ms: 0.16675
+  type: 'test'
+  ...
+# Subtest: Lab initial Gas is an admin-only no-argument operation and has no RPC caller-supplied target route
+ok 15 - Lab initial Gas is an admin-only no-argument operation and has no RPC caller-supplied target route
+  ---
+  duration_ms: 0.142584
+  type: 'test'
+  ...
+# Subtest: retry: a read failure before broadcast aborts; retry then succeeds with exactly one send
+ok 16 - retry: a read failure before broadcast aborts; retry then succeeds with exactly one send
+  ---
+  duration_ms: 7.368125
+  type: 'test'
+  ...
+# Subtest: retry: PM-not-admin refusal before broadcast is retryable once the chain state changes
+ok 17 - retry: PM-not-admin refusal before broadcast is retryable once the chain state changes
+  ---
+  duration_ms: 8.947875
+  type: 'test'
+  ...
+# Subtest: retry: an ambiguous send (uncertain) is never retried; only reconcile may resolve it
+ok 18 - retry: an ambiguous send (uncertain) is never retried; only reconcile may resolve it
+  ---
+  duration_ms: 8.242958
+  type: 'test'
+  ...
+# Subtest: preflight: a candidate with the required listeners, Lab gid and a clean policy passes
+ok 19 - preflight: a candidate with the required listeners, Lab gid and a clean policy passes
+  ---
+  duration_ms: 3.520166
+  type: 'test'
+  ...
+# Subtest: listener gid: the Lab socket is re-grouped to the declared gid after listen
+ok 20 - listener gid: the Lab socket is re-grouped to the declared gid after listen
+  ---
+  duration_ms: 54.179208
+  type: 'test'
+  ...
+# Subtest: gas price cap: the grant send carries the 0.03 Gwei cap; the Lab grant policy carries maxGasPriceGwei 0.03
+ok 21 - gas price cap: the grant send carries the 0.03 Gwei cap; the Lab grant policy carries maxGasPriceGwei 0.03
+  ---
+  duration_ms: 0.269208
+  type: 'test'
+  ...
+# Subtest: price cap refusal before broadcast is retryable (aborted), not uncertain
+ok 22 - price cap refusal before broadcast is retryable (aborted), not uncertain
+  ---
+  duration_ms: 9.860708
+  type: 'test'
+  ...
+# Subtest: gas price cap: default 0.03 Gwei reaches the send request; a config override replaces it
+ok 23 - gas price cap: default 0.03 Gwei reaches the send request; a config override replaces it
+  ---
+  duration_ms: 15.435042
+  type: 'test'
+  ...
+# Subtest: derive: private config missing, malformed or without deny list fails closed
+ok 24 - derive: private config missing, malformed or without deny list fails closed
+  ---
+  duration_ms: 1.1445
+  type: 'test'
+  ...
+# Subtest: derive: minimal candidate from copies; inputs untouched; preflight passes; refusals hold
+ok 25 - derive: minimal candidate from copies; inputs untouched; preflight passes; refusals hold
+  ---
+  duration_ms: 1.929875
+  type: 'test'
+  ...
+# Subtest: isolation: a Lab bind failure (EACCES) closes only the Lab listener; vdr and oracle keep listening
+ok 26 - isolation: a Lab bind failure (EACCES) closes only the Lab listener; vdr and oracle keep listening
+  ---
+  duration_ms: 23.455875
+  type: 'test'
+  ...
+# Subtest: group mismatch: a declared gid that the socket does not carry closes only the Lab listener
+ok 27 - group mismatch: a declared gid that the socket does not carry closes only the Lab listener
+  ---
+  duration_ms: 304.599125
+  type: 'test'
+  ...
+# Subtest: derive refusals: output equal to or inside an input location, existing pmGrantAdmin, existing output files
+ok 28 - derive refusals: output equal to or inside an input location, existing pmGrantAdmin, existing output files
+  ---
+  duration_ms: 1.813375
+  type: 'test'
+  ...
+# Subtest: derive refusals: existing pmGrantAdmin in the live config is refused; existing output files are refused
+ok 29 - derive refusals: existing pmGrantAdmin in the live config is refused; existing output files are refused
+  ---
+  duration_ms: 2.214791
+  type: 'test'
+  ...
+# Subtest: preflight: pmGrantAdmin.maxGasPriceWei above 0.03 Gwei is refused
+ok 30 - preflight: pmGrantAdmin.maxGasPriceWei above 0.03 Gwei is refused
+  ---
+  duration_ms: 2.13725
+  type: 'test'
+  ...
+# Subtest: listener sink: bind failure is written to stderr and to the audit log
+ok 31 - listener sink: bind failure is written to stderr and to the audit log
+  ---
+  duration_ms: 1.793167
+  type: 'test'
+  ...
+# Subtest: preflight: lab maxGasPriceGwei above 0.03 is refused; derive refuses output inside an input tree
+ok 32 - preflight: lab maxGasPriceGwei above 0.03 is refused; derive refuses output inside an input tree
+  ---
+  duration_ms: 2.851541
+  type: 'test'
+  ...
+1..32
+# tests 32
+# suites 0
+# pass 32
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1486.624834

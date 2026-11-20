@@ -1,17 +1,24 @@
 import { runPmGrantAdmin, reconcilePmGrant, PM_GRANT_CHAIN_ID, PM_GRANT_CLIENT, type PmGrantDeps } from './pmGrantAdmin'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { JsonRpcProvider, Network, Transaction, TypedDataEncoder, getAddress, isAddress, type TypedDataField } from 'ethers'
+import { Transaction, TypedDataEncoder, getAddress, isAddress, type TypedDataField } from 'ethers'
 import { DefaultAlerter, type Alerter } from './alerts'
 import { AuditLog } from './audit'
 import { canonicalHash } from './canonical'
 import { paths, type Config } from './config'
 import { ErrorCode, SignerError, denied } from './errors'
 import { GasKeeper } from './gasKeeper'
-import { createLabInitialGasReadProviders, PM_LAB_INITIAL_GAS_CHAIN_ID, requireMatchingLabInitialGasSnapshots, readLabInitialGasSnapshot, runPmLabInitialGas } from './pmLabInitialGas'
+import { createLabInitialGasReadProvider, PM_LAB_INITIAL_GAS_CHAIN_ID, readLabInitialGasPendingNonce, readLabInitialGasSnapshot, runPmLabInitialGas } from './pmLabInitialGas'
 import { HdRoot } from './hd'
 import { Keyring } from './keyring'
 import { Policy } from './policy'
+import {
+	abortPmOneShotIfUnsent,
+	pmOneShotStatus as readPmOneShotStatus,
+	runPmOneShotVdrGas0_1,
+	PM_ONESHOT_CHAIN_ID,
+	PM_ONESHOT_FROM,
+} from './pmOneShotTopup'
 import { RateLimiter } from './rateLimit'
 import {
 	addArray,
@@ -117,6 +124,7 @@ export class SignerService {
 			arrays: (this.registry?.arrays ?? []).map((a) => ({ name: a.name, account: a.account, count: a.count, chains: a.chains, status: a.status })),
 			disabledClients: [...this.disabledClients],
 			deniedCount: this.denied.size,
+			compromisedCount: this.denied.size,
 			stuckTx: this.txm.stuck().map((r) => ({ id: r.id, hash: r.hash, array: r.array })),
 		}
 	}
@@ -241,6 +249,68 @@ export class SignerService {
 		return [...this.denied].map((a) => getAddress(a))
 	}
 
+	/** Legacy name for the same deny list; this does not create a second state source. */
+	compromisedList(): string[] {
+		return this.deniedList()
+	}
+
+	pmOneShotStatus(): Record<string, unknown> {
+		return readPmOneShotStatus(this.p.pmOneShotState, this.config.pmOneShot?.enabled === true, this.config.pmOneShot?.maxGasPriceWei)
+	}
+
+	async assertPmOneShotOwnerAuth(ownerPassword: string): Promise<void> {
+		if (typeof ownerPassword !== 'string' || !ownerPassword) {
+			throw new SignerError(ErrorCode.INVALID_PARAMS, 'ownerPassword required for pm oneshot')
+		}
+		let pmFromVault: string
+		try {
+			const opened = await openVault(readVaultFile(this.p.vault), ownerPassword)
+			pmFromVault = opened.pmAddress
+			opened.entropy.fill(0)
+		} catch {
+			this.audit.write({ event: 'pm.oneshot.owner_auth', ok: false })
+			throw new SignerError(ErrorCode.UNAUTHORIZED, 'project-owner authorization failed')
+		}
+		const expected = getAddress(this.registry?.pm || this.keyring.pmAddress || PM_ONESHOT_FROM)
+		if (getAddress(pmFromVault) !== expected) {
+			this.audit.write({ event: 'pm.oneshot.owner_auth', ok: false, reason: 'pm_mismatch' })
+			throw denied('vault password ok but PM address mismatch', { vaultPm: getAddress(pmFromVault), expected })
+		}
+		this.audit.write({ event: 'pm.oneshot.owner_auth', ok: true })
+	}
+
+	async pmOneShotVdrGas0_1(ownerPassword: string): Promise<Record<string, unknown>> {
+		await this.assertPmOneShotOwnerAuth(ownerPassword)
+		const provider = this.txm.provider(PM_ONESHOT_CHAIN_ID)
+		return runPmOneShotVdrGas0_1({
+			enabled: this.config.pmOneShot?.enabled === true,
+			maxGasPriceWei: this.config.pmOneShot?.maxGasPriceWei ?? '0',
+			statePath: this.p.pmOneShotState,
+			unlocked: this.state === 'unlocked',
+			ownerAuthVerified: true,
+			pmAddress: this.registry?.pm ?? this.keyring.pmAddress,
+			keyring: this.keyring,
+			txm: this.txm,
+			reader: {
+				getBalance: (address) => provider.getBalance(address),
+				getTransactionCount: (address, tag) => provider.getTransactionCount(address, tag),
+				getCode: (address) => provider.getCode(address),
+				getFeeData: async () => {
+					const fee = await provider.getFeeData()
+					return { gasPrice: fee.gasPrice ?? null, maxFeePerGas: fee.maxFeePerGas ?? null }
+				},
+			},
+			audit: this.audit,
+		})
+	}
+
+	async pmOneShotAbortUnsent(ownerPassword: string): Promise<Record<string, unknown>> {
+		await this.assertPmOneShotOwnerAuth(ownerPassword)
+		const result = abortPmOneShotIfUnsent(this.p.pmOneShotState)
+		this.audit.write({ event: 'pm.oneshot.abort', aborted: result.aborted === true, safeToResend: false })
+		return result
+	}
+
 	// ---------- client ops ----------
 
 	authorizeClient(name: string): void {
@@ -345,10 +415,8 @@ export class SignerService {
 		const reg = this.requireUnlocked()
 		const pm = getAddress(reg.pm)
 		if (this.keyring.info(pm)?.role !== 'pm') throw denied('Lab initial Gas requires the registered PM key')
-		const urls = this.config.pmLabInitialGas.readRpcUrls
-		if (urls.length !== 2 || urls[0] === urls[1]) throw denied('Lab initial Gas requires two distinct reviewed read-only RPC endpoints for same-block preflight')
-		const providers = createLabInitialGasReadProviders(urls, (url) => new JsonRpcProvider(url, Network.from(PM_LAB_INITIAL_GAS_CHAIN_ID), { staticNetwork: Network.from(PM_LAB_INITIAL_GAS_CHAIN_ID), batchMaxCount: 1 }))
 		const provider = this.txm.provider(PM_LAB_INITIAL_GAS_CHAIN_ID)
+		const readProvider = createLabInitialGasReadProvider(provider)
 		const audit = this.audit
 		return runPmLabInitialGas({
 			cfg: this.config.pmLabInitialGas,
@@ -357,16 +425,11 @@ export class SignerService {
 			unlocked: this.keyring.unlocked,
 			reader: {
 				async snapshot() {
-					const [first, second] = await Promise.all(providers.map((rpc) => readLabInitialGasSnapshot(rpc, pm)))
-					const matched = requireMatchingLabInitialGasSnapshots(first, second)
-					audit.write({ event: 'pm.labInitialGas.preflight', chainId: matched.chainId.toString(), blockNumber: matched.blockNumber.toString(), blockHash: matched.blockHash, pmAdmin: matched.pmAdmin, labAdmin: matched.labAdmin, pmBalanceWei: matched.pmBalance.toString(), labBalanceWei: matched.labBalance.toString() })
-					return matched
+					const snapshot = await readLabInitialGasSnapshot(readProvider, pm)
+					audit.write({ event: 'pm.labInitialGas.preflight', chainId: snapshot.chainId.toString(), chainIdSemantics: 'same configured provider, not block-hash anchored', blockNumber: snapshot.blockNumber.toString(), blockHash: snapshot.blockHash, baseFeePerGasWei: snapshot.baseFeePerGas.toString(), minedNonce: snapshot.minedNonce.toString(), minedNonceSemantics: 'EIP-1898 canonical block-hash anchored', pmAdmin: snapshot.pmAdmin, labAdmin: snapshot.labAdmin, pmBalanceWei: snapshot.pmBalance.toString(), labBalanceWei: snapshot.labBalance.toString(), reader: 'single configured chain RPC; state reads use EIP-1898 requireCanonical; header number/hash checked before and after reads' })
+					return snapshot
 				},
-				async feeData() {
-					const f = await provider.getFeeData()
-					return { gasPrice: f.gasPrice, maxFeePerGas: f.maxFeePerGas }
-				},
-				pendingNonce: (address) => provider.getTransactionCount(address, 'pending'),
+				pendingNonce: (address) => readLabInitialGasPendingNonce(readProvider, address),
 			},
 			txm: this.txm,
 			send: (req) => this.txm.send({ ...req, skipPostSignCheck: true }),
