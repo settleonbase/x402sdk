@@ -32,6 +32,8 @@ export type SendRequest = {
 	args?: string[]
 	/** Skip eth_call simulation (plain value transfers from the gas keeper). */
 	skipSimulation?: boolean
+	/** Internal-only: do not run the post-sign wallet check for the check's own PM transfer. */
+	skipPostSignCheck?: boolean
 }
 
 export type TxStatus = 'sent' | 'mined' | 'reverted' | 'stuck' | 'rejected'
@@ -80,6 +82,8 @@ export type TxRecord = {
 	feeCapWei?: string
 	dailyBudgetWei?: string
 	method?: string
+	/** Internal-only durable marker preventing a GasKeeper transfer from recursively triggering itself. */
+	skipPostSignCheck?: boolean
 }
 
 export type SendResult = Pick<TxRecord, 'hash' | 'from' | 'nonce' | 'chainId' | 'status' | 'idempotencyKey' | 'raw'> & {
@@ -103,6 +107,7 @@ export class TxManager {
 	private unpriced = new Set<string>()
 	private timer?: ReturnType<typeof setInterval>
 	private ticking = false
+	private postSignHook?: (client: string, address: string, internal: boolean) => Promise<void>
 
 	constructor(
 		chainCfg: Record<string, ChainConfig>,
@@ -124,6 +129,19 @@ export class TxManager {
 			})
 		}
 		this.loadJournal()
+	}
+
+	setPostSignHook(hook: (client: string, address: string, internal: boolean) => Promise<void>): void {
+		this.postSignHook = hook
+	}
+
+	private async notifyPostSign(client: string, address: string, internal = false): Promise<void> {
+		try {
+			await this.postSignHook?.(client, address, internal)
+		} catch (e) {
+			// A completed signature remains valid if the follow-up balance read is unavailable.
+			process.stderr.write(`[tx] post-sign check unavailable for ${address}: ${errorMessage(e)}\n`)
+		}
 	}
 
 	provider(chainId: number): JsonRpcProvider {
@@ -321,6 +339,7 @@ export class TxManager {
 						feeCapWei: req.maxGasPriceWei?.toString(),
 						dailyBudgetWei: req.dailyBudgetWei?.toString(),
 						method: req.method,
+						skipPostSignCheck: req.skipPostSignCheck,
 					}
 					st.inflight.delete(reservation)
 					reserved = false
@@ -333,6 +352,7 @@ export class TxManager {
 						throw err
 					}
 					budgetHeld = 0n
+					await this.notifyPostSign(req.client, from, signed.skipPostSignCheck === true)
 					await this.broadcastOrRecover(ctx, st, signed)
 					return signed
 				})
@@ -618,6 +638,7 @@ export class TxManager {
 		})
 		const raw = this.keyring.signTransaction(rec.from, tx)
 		const hash = Transaction.from(raw).hash!
+		await this.notifyPostSign(rec.client, rec.from, rec.skipPostSignCheck === true)
 		try {
 			await ctx.provider.broadcastTransaction(raw)
 		} catch (e) {

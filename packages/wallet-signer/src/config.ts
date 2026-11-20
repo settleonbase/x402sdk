@@ -73,7 +73,7 @@ export type Config = {
 	deniedAddressesFile: string
 	rpc: { tls?: TlsListen; unix?: UnixListen[]; proxied?: ProxiedListen }
 	chains: Record<string, ChainConfig>
-	gasKeeper: { enabled: boolean; intervalMs: number; chains: Record<string, GasKeeperChain>; refusedOwners: string[] }
+	gasKeeper: { enabled: boolean; postSignEnabled?: boolean; intervalMs: number; chains: Record<string, GasKeeperChain>; refusedOwners: string[] }
 	/** PM-issued addAdmin for reviewed dedicated wallets. Off by default. */
 	pmGrantAdmin?: { enabled: boolean; targets: string[]; denyAddresses?: string[]; maxGasPriceWei?: string }
 	alerts: { webhookUrl?: string; host?: string }
@@ -151,6 +151,9 @@ function normalizePmGrant(raw: unknown): { enabled: boolean; targets: string[]; 
 
 function normalizeGasKeeper(raw: Config['gasKeeper'] | undefined): Config['gasKeeper'] {
 	const gk = raw ?? { enabled: false, intervalMs: 60_000, chains: {} }
+	if ((gk as { postSignEnabled?: unknown }).postSignEnabled !== undefined && typeof (gk as { postSignEnabled?: unknown }).postSignEnabled !== 'boolean') {
+		throw new Error('config: gasKeeper.postSignEnabled must be a boolean')
+	}
 	const chains: Record<string, GasKeeperChain> = {}
 	for (const [id, chain] of Object.entries(gk.chains ?? {})) chains[id] = normalizeGasKeeperChain(id, chain)
 	const refusedRaw = (gk as { refusedOwners?: unknown }).refusedOwners
@@ -166,6 +169,7 @@ function normalizeGasKeeper(raw: Config['gasKeeper'] | undefined): Config['gasKe
 	if (enabled && refusedOwners.length === 0) throw new Error('config: gasKeeper.refusedOwners is required when gasKeeper is enabled (fail closed)')
 	return {
 		enabled,
+		postSignEnabled: (gk as { postSignEnabled?: unknown }).postSignEnabled === true,
 		intervalMs: gk.intervalMs ?? 60_000,
 		chains,
 		refusedOwners,
@@ -173,6 +177,12 @@ function normalizeGasKeeper(raw: Config['gasKeeper'] | undefined): Config['gasKe
 }
 
 function normalizeGasKeeperChain(id: string, chain: GasKeeperChain): GasKeeperChain {
+	for (const field of ['minWei', 'targetWei', 'perAddressDailyWei', 'globalDailyWei', 'pmWarnWei', 'pmCriticalWei'] as const) {
+		if (typeof chain[field] !== 'string' || !/^\d+$/.test(chain[field])) {
+			throw new Error(`config: gasKeeper.chains.${id}.${field} must be a wei integer`)
+		}
+	}
+	if (BigInt(chain.targetWei) <= BigInt(chain.minWei)) throw new Error(`config: gasKeeper.chains.${id}.targetWei must be above minWei`)
 	const wallets: string[] = []
 	const seen = new Set<string>()
 	for (const [index, raw] of (chain.wallets ?? []).entries()) {

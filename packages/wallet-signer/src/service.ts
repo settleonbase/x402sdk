@@ -84,7 +84,11 @@ export class SignerService {
 			this.alerter,
 			this.audit,
 			this.p.gasState,
+			config.gasKeeper.postSignEnabled === true,
 		)
+		this.txm.setPostSignHook(async (_client, address, internal) => {
+			if (!internal) await this.postSignBalanceCheck(address)
+		})
 		this.audit.write({ event: 'service.start', version: VERSION, policyHash: this.policy.hash })
 	}
 
@@ -381,8 +385,17 @@ export class SignerService {
 		})
 	}
 
+	private async postSignBalanceCheck(address: string): Promise<void> {
+		try {
+			await this.gasKeeper.afterSuccessfulSignature(address)
+		} catch (e) {
+			// The signature is already complete; a follow-up RPC failure cannot revoke it.
+			process.stderr.write(`[signer] post-sign check unavailable for ${address}\n`)
+		}
+	}
+
 	/** Sign-only: the caller owns nonce and fees. Needs allowSignOnly in policy. */
-	signTransaction(client: string, txReq: Record<string, unknown>): string {
+	async signTransaction(client: string, txReq: Record<string, unknown>): Promise<string> {
 		this.requireUnlocked()
 		const from = String(txReq.from ?? '')
 		const info = isAddress(from) ? this.keyring.info(from) : undefined
@@ -399,6 +412,7 @@ export class SignerService {
 		this.takeRate(client, info.array, g.rate)
 		const raw = this.keyring.signTransaction(from, tx)
 		this.audit.write({ event: 'sign.tx', client, array: info.array, chainId, from, to: tx.to, nonce: tx.nonce, hash: Transaction.from(raw).hash })
+		await this.postSignBalanceCheck(from)
 		return raw
 	}
 
@@ -448,6 +462,7 @@ export class SignerService {
 			this.typedDataReplay.commit(binding, reserved.token, sig)
 			reserved.resolve(sig)
 			this.audit.write({ event: 'sign.typed', client, array: info.array, address, primaryType: derived, verifyingContract: typed.domain.verifyingContract, chainId: typed.domain.chainId })
+			await this.postSignBalanceCheck(address)
 			return sig
 		} catch (e) {
 			this.typedDataReplay.abort(binding.id, reserved.token)
@@ -456,7 +471,7 @@ export class SignerService {
 		}
 	}
 
-	personalSign(client: string, message: string, address: string): string {
+	async personalSign(client: string, message: string, address: string): Promise<string> {
 		this.requireUnlocked()
 		const info = isAddress(address) ? this.keyring.info(address) : undefined
 		if (!info || info.role !== 'array' || !info.array) throw denied('address is not a key array address')
@@ -465,6 +480,7 @@ export class SignerService {
 		this.takeRate(client, info.array, g.rate)
 		const sig = this.keyring.signMessage(address, message.startsWith('0x') ? Buffer.from(message.slice(2), 'hex') : message)
 		this.audit.write({ event: 'sign.message', client, array: info.array, address })
+		await this.postSignBalanceCheck(address)
 		return sig
 	}
 
