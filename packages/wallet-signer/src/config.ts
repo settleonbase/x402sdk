@@ -34,6 +34,15 @@ export type GasKeeperChain = {
 	maxFeePerGasWei?: string
 }
 
+/** One fixed Lab initial-Gas operation. Disabled and dry-run by default; no caller target is accepted. */
+export type PmLabInitialGasConfig = {
+	enabled: boolean
+	dryRun: boolean
+	maxSpendWei: string
+	dailyCapWei: string
+	maxFeePerGasWei: string
+}
+
 export type TlsListen = { host: string; port: number; cert: string; key: string; ca: string }
 /** gid: numeric group applied to the socket after listen. The process must already be a member of it. */
 export type UnixListen = { path: string; client: string; mode?: number; gid?: number }
@@ -76,6 +85,7 @@ export type Config = {
 	gasKeeper: { enabled: boolean; postSignEnabled?: boolean; intervalMs: number; chains: Record<string, GasKeeperChain>; refusedOwners: string[] }
 	/** PM-issued addAdmin for reviewed dedicated wallets. Off by default. */
 	pmGrantAdmin?: { enabled: boolean; targets: string[]; denyAddresses?: string[]; maxGasPriceWei?: string }
+	pmLabInitialGas: PmLabInitialGasConfig
 	alerts: { webhookUrl?: string; host?: string }
 	/** Fresh vaults use this scrypt N. 2^18 in production. */
 	scryptN: number
@@ -88,7 +98,7 @@ export type Config = {
 /** Top-level keys this loader consumes. Any other key is refused at load time. */
 const KNOWN_CONFIG_KEYS: ReadonlySet<string> = new Set([
 	'dataDir', 'logDir', 'requireMountPoint', 'requireMountSource', 'adminSocket', 'adminSocketMode', 'policyFile',
-	'deniedAddressesFile', 'rpc', 'chains', 'gasKeeper', 'pmGrantAdmin', 'pmOneShot', 'alerts', 'scryptN', 'keyWaitMs', 'allowUnsafeTestInit',
+	'deniedAddressesFile', 'rpc', 'chains', 'gasKeeper', 'pmGrantAdmin', 'pmLabInitialGas', 'pmOneShot', 'alerts', 'scryptN', 'keyWaitMs', 'allowUnsafeTestInit',
 ])
 
 export function loadConfig(path: string): Config {
@@ -115,11 +125,32 @@ export function loadConfig(path: string): Config {
 		chains: raw.chains,
 		gasKeeper: normalizeGasKeeper(raw.gasKeeper),
 		pmGrantAdmin: normalizePmGrant(raw.pmGrantAdmin),
+		pmLabInitialGas: normalizePmLabInitialGas(raw.pmLabInitialGas),
 		alerts: raw.alerts ?? {},
 		scryptN: raw.scryptN ?? 2 ** 18,
 		keyWaitMs: raw.keyWaitMs ?? 30_000,
 		allowUnsafeTestInit: raw.allowUnsafeTestInit === true,
 	}
+}
+
+function normalizePmLabInitialGas(raw: unknown): PmLabInitialGasConfig {
+	if (raw === undefined) return { enabled: false, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0' }
+	const r = raw as Partial<PmLabInitialGasConfig>
+	if (typeof r.enabled !== 'boolean' || typeof r.dryRun !== 'boolean') throw new Error('config: pmLabInitialGas.enabled and dryRun must be booleans')
+	for (const field of ['maxSpendWei', 'dailyCapWei', 'maxFeePerGasWei'] as const) {
+		if (typeof r[field] !== 'string' || !/^\d+$/.test(r[field])) throw new Error(`config: pmLabInitialGas.${field} must be a wei integer string`)
+	}
+	const maxSpendWei = r.maxSpendWei!
+	const dailyCapWei = r.dailyCapWei!
+	const maxFeePerGasWei = r.maxFeePerGasWei!
+	const maxSpend = BigInt(maxSpendWei)
+	const dailyCap = BigInt(dailyCapWei)
+	const feeCap = BigInt(maxFeePerGasWei)
+	if (maxSpend > 100_000_000_000_000_000n) throw new Error('config: pmLabInitialGas.maxSpendWei exceeds fixed 0.1 CNET target')
+	if (dailyCap > 100_000_000_000_630_000n) throw new Error('config: pmLabInitialGas.dailyCapWei exceeds fixed target plus hard worst-case fee')
+	if (feeCap > 30_000_000n) throw new Error('config: pmLabInitialGas.maxFeePerGasWei exceeds hard 0.03 Gwei ceiling')
+	if (r.enabled && !r.dryRun && (maxSpend === 0n || dailyCap === 0n || feeCap === 0n)) throw new Error('config: live pmLabInitialGas requires non-zero spend, daily, and fee caps')
+	return { enabled: r.enabled, dryRun: r.dryRun, maxSpendWei, dailyCapWei, maxFeePerGasWei }
 }
 
 function normalizeAdminMode(raw: unknown): number {

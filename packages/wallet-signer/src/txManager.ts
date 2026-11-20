@@ -34,6 +34,8 @@ export type SendRequest = {
 	skipSimulation?: boolean
 	/** Internal-only: do not run the post-sign wallet check for the check's own PM transfer. */
 	skipPostSignCheck?: boolean
+	/** Internal-only preflight assertion used by fixed, reviewed PM send flows. */
+	expectedNonce?: number
 }
 
 export type TxStatus = 'sent' | 'mined' | 'reverted' | 'stuck' | 'rejected'
@@ -292,7 +294,17 @@ export class TxManager {
 			}
 			try {
 				const rec = await this.withLock(st, async () => {
-					if (st.next === null) st.next = await ctx.provider.getTransactionCount(from, 'pending')
+					if (req.expectedNonce !== undefined) {
+						if (!Number.isSafeInteger(req.expectedNonce) || req.expectedNonce < 0) throw new SignerError(ErrorCode.INVALID_PARAMS, 'expected nonce is invalid')
+						const pendingNonce = await ctx.provider.getTransactionCount(from, 'pending')
+						if (pendingNonce !== req.expectedNonce || (st.next !== null && st.next !== req.expectedNonce)) {
+							throw new SignerError(ErrorCode.UPSTREAM, 'PM nonce changed after Lab initial-Gas preflight; refusing to sign')
+						}
+						if (st.floor > req.expectedNonce) {
+							throw new SignerError(ErrorCode.UPSTREAM, 'PM journal nonce floor is newer than Lab initial-Gas preflight; refusing to sign')
+						}
+						st.next = pendingNonce
+					} else if (st.next === null) st.next = await ctx.provider.getTransactionCount(from, 'pending')
 					if (st.next < st.floor) st.next = st.floor
 					const nonce = st.next++
 					const tx = Transaction.from({

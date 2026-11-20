@@ -26,6 +26,13 @@
 			}
 		}
 	},
+	"pmLabInitialGas": {
+		"enabled": false,
+		"dryRun": true,
+		"maxSpendWei": "0",
+		"dailyCapWei": "0",
+		"maxFeePerGasWei": "0"
+	},
 	"alerts": { "host": "lab185-postsign-candidate" },
 	"scryptN": 262144,
 	"keyWaitMs": 30000

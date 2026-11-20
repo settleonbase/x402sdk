@@ -64,6 +64,9 @@ async function exec(svc: SignerService, cmd: string, a: Record<string, unknown>)
 	switch (cmd) {
 		case 'pm.grantAdmin':
 			return svc.pmGrantAdmin(a.target)
+		case 'pm.labInitialGas':
+			if (Object.keys(a).length !== 0) throw new SignerError(ErrorCode.INVALID_PARAMS, 'Lab initial Gas takes no arguments')
+			return svc.pmLabInitialGas()
 		case 'pm.reconcile':
 			return svc.pmReconcile(a.target)
 		case 'status':

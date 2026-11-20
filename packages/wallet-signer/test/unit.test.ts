@@ -20,6 +20,8 @@ import { journalReservationWei, requestFingerprint, TxManager, type TxRecord } f
 import { appendDurableJournalLine, parseJournal } from '../src/txJournal'
 import { createVaultJson, openVault } from '../src/vault'
 import { SignerService } from '../src/service'
+import { decodeLabInitialGasAdminStatus, encodeLabInitialGasAdminCall, PM_LAB_INITIAL_GAS_ADMIN_SELECTOR, PM_LAB_INITIAL_GAS_CHAIN_ID, PM_LAB_INITIAL_GAS_CLIENT, PM_LAB_INITIAL_GAS_GAS_LIMIT, PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY, PM_LAB_INITIAL_GAS_MAX_FEE_WEI, PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI, PM_LAB_INITIAL_GAS_RECIPIENT, PM_LAB_INITIAL_GAS_TARGET_WEI, requireMatchingLabInitialGasSnapshots, runPmLabInitialGas, type LabInitialGasDeps, type LabInitialGasSnapshot } from '../src/pmLabInitialGas'
+import { PM_GRANT_CLIENT, PM_GRANT_VDR } from '../src/pmGrantAdmin'
 
 const PW = 'unit-test-password-123'
 
@@ -320,7 +322,7 @@ test('config: requireMountPoint refuses an unmounted volume and paths outside it
 	const dir = mkdtempSync(join(tmpdir(), 'ws-mnt-'))
 	writeFileSync(join(dir, 'keep'), 'unchanged')
 	const before = readdirSync(dir)
-	const base = { adminSocket: '', policyFile: '', deniedAddressesFile: '', rpc: {}, chains: {}, gasKeeper: { enabled: false, intervalMs: 1, chains: {}, refusedOwners: [] }, alerts: {}, scryptN: 1, keyWaitMs: 1 }
+	const base = { adminSocket: '', policyFile: '', deniedAddressesFile: '', rpc: {}, chains: {}, gasKeeper: { enabled: false, intervalMs: 1, chains: {}, refusedOwners: [] }, pmLabInitialGas: { enabled: false, dryRun: true, maxSpendWei: '0', dailyCapWei: '0', maxFeePerGasWei: '0' }, alerts: {}, scryptN: 1, keyWaitMs: 1 }
 	// A plain directory is on the same filesystem as its parent: "not mounted".
 	assert.throws(() => assertDataMount({ ...base, requireMountPoint: dir, dataDir: join(dir, 's'), logDir: join(dir, 'l') }), /not mounted/)
 	assert.throws(() => assertDataMount({ ...base, requireMountPoint: join(dir, 'missing'), dataDir: join(dir, 'missing', 's'), logDir: join(dir, 'missing', 'l') }), /not mounted/)
@@ -776,7 +778,19 @@ test('TxManager checks new signatures regardless of client name, marks internal 
 	txm.setPostSignHook(async (client, address, internal) => { hookCalls.push({ client, address, internal }) })
 	const base = { array: 'PM', chainId: 224422, candidates: [from], from, to, data: '0x', value: 0n, gasLimit: 21_000n, maxInflightPerKey: 4, skipSimulation: true }
 	try {
-		await txm.send({ ...base, client: 'gas-keeper', idempotencyKey: 'same-name-external-client' })
+		let signCalls = 0
+		const sign = keyring.signTransaction.bind(keyring)
+		keyring.signTransaction = ((address: string, tx: never) => { signCalls++; return sign(address, tx) }) as typeof keyring.signTransaction
+		await assert.rejects(txm.send({ ...base, client: 'lab-initial-gas', idempotencyKey: 'nonce-mismatch', expectedNonce: 99 }), /nonce changed/)
+		assert.equal(signCalls, 0, 'nonce mismatch is rejected while holding the PM nonce lock, before signing')
+		assert.equal(hookCalls.length, 0)
+		const pmState = (txm as unknown as { state: (chainId: number, address: string) => { floor: number } }).state(224422, from)
+		pmState.floor = 1
+		await assert.rejects(txm.send({ ...base, client: 'lab-initial-gas', idempotencyKey: 'nonce-floor-ahead', expectedNonce: 0 }), /nonce floor is newer/)
+		assert.equal(signCalls, 0, 'journal floor newer than preflight nonce must fail before signing')
+		assert.equal(broadcasts, 0, 'journal floor newer than preflight nonce must fail before broadcasting')
+		pmState.floor = 0
+		await txm.send({ ...base, client: 'gas-keeper', idempotencyKey: 'same-name-external-client', expectedNonce: 0 })
 		assert.equal(hookCalls.length, 1, 'client text cannot spoof the internal bypass')
 		assert.equal(hookCalls[0]!.internal, false)
 		await txm.send({ ...base, client: 'gas-keeper', idempotencyKey: 'internal-transfer', skipPostSignCheck: true })
@@ -1073,6 +1087,181 @@ test('Lab post-sign candidate is explicitly registered but fails closed by defau
 	assert.equal(chain.perAddressDailyWei, '0')
 	assert.equal(chain.globalDailyWei, '0')
 	assert.equal(chain.maxFeePerGasWei, '0')
+	assert.equal(cfg.pmLabInitialGas.enabled, false)
+	assert.equal(cfg.pmLabInitialGas.dryRun, true)
+	assert.equal(cfg.pmLabInitialGas.maxSpendWei, '0')
+	assert.equal(cfg.pmLabInitialGas.dailyCapWei, '0')
+	assert.equal(cfg.pmLabInitialGas.maxFeePerGasWei, '0')
+})
+
+function labInitialGasFixture(opts: {
+	config?: Partial<LabInitialGasDeps['cfg']>
+	balance?: bigint
+	pmBalance?: bigint
+	chainId?: bigint
+	gasPrice?: bigint | null
+	maxFeePerGas?: bigint | null
+	nonce?: number
+	pmMatch?: boolean
+	pmAdmin?: boolean
+	labAdmin?: boolean
+	validatorContractCode?: string
+	labRecipientCode?: string
+	unlocked?: boolean
+	readError?: string
+	journalRecord?: TxRecord
+	sendDelayMs?: number
+	sendHashInvalid?: boolean
+} = {}) {
+	const pm = getAddress(Wallet.createRandom().address)
+	const read: string[] = []
+	const sends: Array<Parameters<LabInitialGasDeps['send']>[0]> = []
+	let journal = opts.journalRecord
+	const cfg: LabInitialGasDeps['cfg'] = {
+		enabled: true,
+		dryRun: true,
+		maxSpendWei: PM_LAB_INITIAL_GAS_TARGET_WEI.toString(),
+		dailyCapWei: PM_LAB_INITIAL_GAS_MAX_TOTAL_WEI.toString(),
+		maxFeePerGasWei: PM_LAB_INITIAL_GAS_MAX_FEE_WEI.toString(),
+		...opts.config,
+	}
+	const deps: LabInitialGasDeps = {
+		cfg,
+		registryPm: pm,
+		keyringPm: opts.pmMatch === false ? Wallet.createRandom().address : pm,
+		unlocked: opts.unlocked !== false,
+		reader: {
+			async snapshot() {
+				read.push('snapshot')
+				if (opts.readError === 'chainId') throw new Error('mock chainId failure')
+				if (opts.readError === 'admin') throw new Error('mock admins RPC failure')
+				if (opts.readError === 'balance') throw new Error('mock balance failure')
+				return { chainId: opts.chainId ?? 224422n, blockNumber: 2_235_067n, blockHash: `0x${'77'.repeat(32)}`, pmAdmin: opts.pmAdmin ?? true, labAdmin: opts.labAdmin ?? true, pmBalance: opts.pmBalance ?? 10n ** 18n, labBalance: opts.balance ?? 0n, validatorContractCode: opts.validatorContractCode ?? '0x6000', labRecipientCode: opts.labRecipientCode ?? '0x' }
+			},
+			async feeData() { read.push('feeData'); if (opts.readError === 'feeData') throw new Error('mock fee failure'); return { gasPrice: opts.gasPrice === undefined ? 1n : opts.gasPrice, maxFeePerGas: opts.maxFeePerGas === undefined ? null : opts.maxFeePerGas } },
+			async pendingNonce() { read.push('nonce'); if (opts.readError === 'nonce') throw new Error('mock nonce failure'); return opts.nonce ?? 7 },
+		},
+		txm: { get() { return journal } } as unknown as TxManager,
+		async send(req) {
+			sends.push(req)
+			if (opts.sendDelayMs) await delay(opts.sendDelayMs)
+			const durableHash = `0x${'ab'.repeat(32)}`
+			const result = { hash: opts.sendHashInvalid ? '' : durableHash, from: pm, nonce: req.expectedNonce, chainId: PM_LAB_INITIAL_GAS_CHAIN_ID, status: 'sent' as const, idempotencyKey: req.idempotencyKey, raw: '0x' }
+			journal = { id: `${req.chainId}:${pm.toLowerCase()}:${req.expectedNonce}`, idempotencyKey: req.idempotencyKey, client: req.client, array: req.array, chainId: req.chainId, from: pm, to: req.to, data: req.data, value: req.value.toString(), nonce: req.expectedNonce, gasLimit: req.gasLimit.toString(), type: 0, hash: durableHash, hashes: [durableHash], raw: '0x', status: 'sent', resends: 0, createdAt: '', updatedAt: '', lastSentAt: 0 } as TxRecord
+			return result
+		},
+		audit() {},
+	}
+	return { deps, read, sends, get journal() { return journal } }
+}
+
+test('Lab initial Gas is fixed and dry-run calculates only the difference to 0.1 CNET at 0/0.05/0.1 boundaries', async () => {
+	const disabled = labInitialGasFixture({ config: { enabled: false } })
+	assert.deepEqual(await runPmLabInitialGas(disabled.deps), { status: 'disabled' })
+	assert.deepEqual(disabled.read, [])
+	assert.equal(disabled.sends.length, 0)
+	for (const [balance, expected] of [[0n, PM_LAB_INITIAL_GAS_TARGET_WEI], [50_000_000_000_000_000n, 50_000_000_000_000_000n], [PM_LAB_INITIAL_GAS_TARGET_WEI, 0n]] as const) {
+		const fx = labInitialGasFixture({ balance })
+		const result = await runPmLabInitialGas(fx.deps)
+		if (balance === PM_LAB_INITIAL_GAS_TARGET_WEI) {
+			assert.deepEqual(result, { status: 'already-funded', balanceWei: balance.toString() })
+			assert.deepEqual(fx.read, ['snapshot'])
+		} else {
+			assert.equal(result.status, 'dry-run')
+			if (result.status === 'dry-run') {
+				assert.equal(result.amountWei, expected.toString())
+				assert.equal(result.nonce, 7)
+			}
+			assert.equal(fx.sends.length, 0, 'dry-run never calls the sender')
+		}
+	}
+})
+
+test('Lab initial Gas sends through the PM TxManager with fixed Lab recipient, exact delta, fee cap, nonce and idempotency', async () => {
+	const balance = 50_000_000_000_000_000n
+	const fx = labInitialGasFixture({ balance, config: { dryRun: false } })
+	const result = await runPmLabInitialGas(fx.deps)
+	assert.equal(result.status, 'pending')
+	assert.equal(fx.sends.length, 1)
+	const sent = fx.sends[0]!
+	assert.equal(sent.client, PM_LAB_INITIAL_GAS_CLIENT)
+	assert.notEqual(sent.client, PM_GRANT_CLIENT, 'Lab initial Gas is not the VDR/PM grant route')
+	assert.equal(sent.array, 'PM')
+	assert.equal(sent.chainId, 224422)
+	assert.equal(sent.from, fx.deps.registryPm)
+	assert.deepEqual(sent.candidates, [fx.deps.registryPm])
+	assert.equal(sent.to, PM_LAB_INITIAL_GAS_RECIPIENT)
+	assert.notEqual(sent.to, PM_GRANT_VDR)
+	assert.equal(sent.value, PM_LAB_INITIAL_GAS_TARGET_WEI - balance)
+	assert.equal(sent.gasLimit, PM_LAB_INITIAL_GAS_GAS_LIMIT)
+	assert.equal(sent.maxGasPriceWei, PM_LAB_INITIAL_GAS_MAX_FEE_WEI)
+	assert.equal(sent.expectedNonce, 7)
+	assert.equal(sent.idempotencyKey, PM_LAB_INITIAL_GAS_IDEMPOTENCY_KEY)
+	assert.equal(sent.maxInflightPerKey, 1)
+})
+
+test('Lab initial Gas is idempotent across concurrent and repeated calls and refuses prior pending intent', async () => {
+	const fx = labInitialGasFixture({ balance: 1n, config: { dryRun: false }, sendDelayMs: 10 })
+	const results = await Promise.all([runPmLabInitialGas(fx.deps), runPmLabInitialGas(fx.deps)])
+	assert.equal(fx.sends.length, 1)
+	assert.deepEqual(results.map((r) => r.status).sort(), ['already-attempted', 'pending'])
+	const priorReadCount = fx.read.length
+	assert.equal((await runPmLabInitialGas(fx.deps)).status, 'already-attempted')
+	assert.equal(fx.read.length, priorReadCount, 'journaled intent blocks before new reads or sends')
+	assert.equal(fx.sends.length, 1)
+})
+
+test('Lab initial Gas refuses an unhashable sender result and blocks retries from the durable journal', async () => {
+	const fx = labInitialGasFixture({ balance: 1n, config: { dryRun: false }, sendHashInvalid: true })
+	await assert.rejects(runPmLabInitialGas(fx.deps), /no valid transaction hash.*requires reconcile/)
+	assert.ok(fx.journal, 'the mock TxManager has persisted its intent before returning')
+	const reads = fx.read.length
+	assert.equal((await runPmLabInitialGas(fx.deps)).status, 'already-attempted')
+	assert.equal(fx.sends.length, 1)
+	assert.equal(fx.read.length, reads, 'an uncertain result blocks all retry reads and sends')
+})
+
+test('Lab initial Gas refuses RPC, chain, PM binding, fee, nonce, max-spend, daily-cap and PM-balance failures without send', async () => {
+	const cases: Array<{ name: string; options: Parameters<typeof labInitialGasFixture>[0]; pattern: RegExp }> = [
+		{ name: 'recipient RPC failure', options: { readError: 'balance' }, pattern: /mock balance failure/ },
+		{ name: 'admin status RPC failure', options: { readError: 'admin' }, pattern: /mock admins RPC failure/ },
+		{ name: 'chain mismatch', options: { chainId: 1n }, pattern: /chainId mismatch/ },
+		{ name: 'PM admin false', options: { pmAdmin: false }, pattern: /both be admins/ },
+		{ name: 'Lab admin false', options: { labAdmin: false }, pattern: /both be admins/ },
+		{ name: 'Validator contract absent', options: { validatorContractCode: '0x' }, pattern: /code or fixed Lab wallet code/ },
+		{ name: 'Lab recipient is not an EOA', options: { labRecipientCode: '0x6000' }, pattern: /code or fixed Lab wallet code/ },
+		{ name: 'PM binding mismatch', options: { pmMatch: false }, pattern: /registered PM key/ },
+		{ name: 'PM locked', options: { unlocked: false }, pattern: /unlocked registered PM key/ },
+		{ name: 'fee RPC failure', options: { readError: 'feeData' }, pattern: /mock fee failure/ },
+		{ name: 'fee unavailable', options: { gasPrice: null, maxFeePerGas: null }, pattern: /fee data is unavailable/ },
+		{ name: 'fee above cap', options: { gasPrice: PM_LAB_INITIAL_GAS_MAX_FEE_WEI + 1n }, pattern: /market fee exceeds/ },
+		{ name: 'nonce RPC failure', options: { readError: 'nonce' }, pattern: /mock nonce failure/ },
+		{ name: 'invalid pending nonce', options: { nonce: -1 }, pattern: /pending nonce is invalid/ },
+		{ name: 'max spend too small', options: { config: { maxSpendWei: '1' } }, pattern: /exceeds its fixed spend cap/ },
+		{ name: 'daily cap too small', options: { config: { dailyCapWei: '1' } }, pattern: /cap/ },
+		{ name: 'PM balance insufficient', options: { pmBalance: 1n }, pattern: /PM balance does not cover/ },
+	]
+	for (const item of cases) {
+		const fx = labInitialGasFixture({ ...(item.options ?? {}), config: { dryRun: false, ...(item.options?.config ?? {}) } })
+		await assert.rejects(runPmLabInitialGas(fx.deps), item.pattern, item.name)
+		assert.equal(fx.sends.length, 0, `${item.name} must fail before TxManager send`)
+	}
+})
+
+test('Lab initial Gas encodes only the fixed ValidatorDepositRedeem admins read and strictly decodes bool', () => {
+	const call = encodeLabInitialGasAdminCall(PM_LAB_INITIAL_GAS_RECIPIENT)
+	assert.equal(call.to, PM_GRANT_VDR)
+	assert.equal(call.data.slice(0, 10), PM_LAB_INITIAL_GAS_ADMIN_SELECTOR)
+	assert.equal(decodeLabInitialGasAdminStatus('0x' + '0'.repeat(63) + '1'), true)
+	assert.equal(decodeLabInitialGasAdminStatus('0x' + '0'.repeat(64)), false)
+	assert.throws(() => decodeLabInitialGasAdminStatus('0x01'), /data/)
+})
+
+test('Lab initial Gas requires independent EIP-1898 readers to agree on block and every decision value', () => {
+	const baseline: LabInitialGasSnapshot = { chainId: 224422n, blockNumber: 2_235_067n, blockHash: `0x${'77'.repeat(32)}`, pmAdmin: true, labAdmin: true, pmBalance: 100n, labBalance: 50n, validatorContractCode: '0x6000', labRecipientCode: '0x' }
+	assert.equal(requireMatchingLabInitialGasSnapshots(baseline, { ...baseline, blockHash: baseline.blockHash.toUpperCase().replace('0X', '0x') }), baseline)
+	assert.throws(() => requireMatchingLabInitialGasSnapshots(baseline, { ...baseline, blockNumber: baseline.blockNumber + 1n }), /block anchors differ/)
+	assert.throws(() => requireMatchingLabInitialGasSnapshots(baseline, { ...baseline, labBalance: baseline.labBalance + 1n }), /same-block reads differ/)
 })
 
 test('gas keeper refuses the oracle contract even when the whitelist names it', async () => {

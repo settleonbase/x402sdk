@@ -1,13 +1,14 @@
 import { runPmGrantAdmin, reconcilePmGrant, PM_GRANT_CHAIN_ID, PM_GRANT_CLIENT, type PmGrantDeps } from './pmGrantAdmin'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { Transaction, TypedDataEncoder, getAddress, isAddress, type TypedDataField } from 'ethers'
+import { JsonRpcProvider, Network, Transaction, TypedDataEncoder, getAddress, isAddress, type TypedDataField } from 'ethers'
 import { DefaultAlerter, type Alerter } from './alerts'
 import { AuditLog } from './audit'
 import { canonicalHash } from './canonical'
 import { paths, type Config } from './config'
 import { ErrorCode, SignerError, denied } from './errors'
 import { GasKeeper } from './gasKeeper'
+import { decodeLabInitialGasAdminStatus, encodeLabInitialGasAdminCall, PM_LAB_INITIAL_GAS_CHAIN_ID, PM_LAB_INITIAL_GAS_RECIPIENT, requireMatchingLabInitialGasSnapshots, runPmLabInitialGas } from './pmLabInitialGas'
 import { HdRoot } from './hd'
 import { Keyring } from './keyring'
 import { Policy } from './policy'
@@ -336,6 +337,74 @@ export class SignerService {
 	/** Admin-socket only. Issues the fixed addAdmin(target) from the PM key. See pmGrantAdmin.ts. */
 	async pmGrantAdmin(target: unknown): Promise<{ target: string; hash: string | null; status: string }> {
 		return runPmGrantAdmin(this.pmGrantDeps(), target)
+	}
+
+	/** Admin-socket only. Fixed Lab recipient and chain; never accepts a caller-supplied target or amount. */
+	async pmLabInitialGas(): Promise<unknown> {
+		if (!this.config.pmLabInitialGas.enabled) return { status: 'disabled' }
+		const reg = this.requireUnlocked()
+		const pm = getAddress(reg.pm)
+		if (this.keyring.info(pm)?.role !== 'pm') throw denied('Lab initial Gas requires the registered PM key')
+		const chainCfg = this.config.chains[String(PM_LAB_INITIAL_GAS_CHAIN_ID)]
+		const urls = chainCfg?.rpcUrls ?? []
+		if (urls.length < 2 || urls[0] === urls[1]) throw denied('Lab initial Gas requires two distinct reviewed RPC endpoints for same-block preflight')
+		const providers = urls.slice(0, 2).map((url) => new JsonRpcProvider(url, Network.from(PM_LAB_INITIAL_GAS_CHAIN_ID), { staticNetwork: Network.from(PM_LAB_INITIAL_GAS_CHAIN_ID), batchMaxCount: 1 }))
+		const provider = this.txm.provider(PM_LAB_INITIAL_GAS_CHAIN_ID)
+		const audit = this.audit
+		return runPmLabInitialGas({
+			cfg: this.config.pmLabInitialGas,
+			registryPm: pm,
+			keyringPm: this.keyring.pmAddress,
+			unlocked: this.keyring.unlocked,
+			reader: {
+				async snapshot() {
+					const readAtLatestHash = async (rpc: JsonRpcProvider) => {
+						const chainHex = await rpc.send('eth_chainId', [])
+						if (typeof chainHex !== 'string' || !/^0x[0-9a-fA-F]+$/.test(chainHex)) throw new Error('RPC chainId response invalid')
+						const block = await rpc.send('eth_getBlockByNumber', ['latest', false]) as { number?: unknown; hash?: unknown } | null
+						if (!block || typeof block.number !== 'string' || !/^0x[0-9a-fA-F]+$/.test(block.number) || typeof block.hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(block.hash)) throw new Error('RPC latest block response invalid')
+						const blockTag = { blockHash: block.hash, requireCanonical: true }
+						const pmCall = encodeLabInitialGasAdminCall(pm)
+						const labCall = encodeLabInitialGasAdminCall(PM_LAB_INITIAL_GAS_RECIPIENT)
+						const [pmAdminRaw, labAdminRaw, pmBalanceHex, labBalanceHex, validatorCode, labCode] = await Promise.all([
+							rpc.send('eth_call', [pmCall, blockTag]),
+							rpc.send('eth_call', [labCall, blockTag]),
+							rpc.send('eth_getBalance', [pm, blockTag]),
+							rpc.send('eth_getBalance', [PM_LAB_INITIAL_GAS_RECIPIENT, blockTag]),
+							rpc.send('eth_getCode', [pmCall.to, blockTag]),
+							rpc.send('eth_getCode', [PM_LAB_INITIAL_GAS_RECIPIENT, blockTag]),
+						])
+						const parseQuantity = (value: unknown, label: string): bigint => {
+							if (typeof value !== 'string' || !/^0x[0-9a-fA-F]+$/.test(value)) throw new Error(`RPC ${label} response invalid`)
+							return BigInt(value)
+						}
+						return {
+							chainId: parseQuantity(chainHex, 'chainId'),
+							blockNumber: parseQuantity(block.number, 'block number'),
+							blockHash: block.hash,
+							pmAdmin: decodeLabInitialGasAdminStatus(String(pmAdminRaw)),
+							labAdmin: decodeLabInitialGasAdminStatus(String(labAdminRaw)),
+							pmBalance: parseQuantity(pmBalanceHex, 'PM balance'),
+							labBalance: parseQuantity(labBalanceHex, 'Lab balance'),
+							validatorContractCode: String(validatorCode),
+							labRecipientCode: String(labCode),
+						}
+					}
+					const [first, second] = await Promise.all(providers.map(readAtLatestHash))
+					const matched = requireMatchingLabInitialGasSnapshots(first, second)
+					audit.write({ event: 'pm.labInitialGas.preflight', chainId: matched.chainId.toString(), blockNumber: matched.blockNumber.toString(), blockHash: matched.blockHash, pmAdmin: matched.pmAdmin, labAdmin: matched.labAdmin, pmBalanceWei: matched.pmBalance.toString(), labBalanceWei: matched.labBalance.toString() })
+					return matched
+				},
+				async feeData() {
+					const f = await provider.getFeeData()
+					return { gasPrice: f.gasPrice, maxFeePerGas: f.maxFeePerGas }
+				},
+				pendingNonce: (address) => provider.getTransactionCount(address, 'pending'),
+			},
+			txm: this.txm,
+			send: (req) => this.txm.send({ ...req, skipPostSignCheck: true }),
+			audit: (event) => this.audit.write(event as never),
+		})
 	}
 
 	/** Admin-socket only. Reads chain state for a target and never signs. */

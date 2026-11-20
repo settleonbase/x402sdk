@@ -230,6 +230,17 @@ test('admin wiring: pm.reconcile is routed on the admin socket and not on the bu
 	assert.doesNotMatch(rpc, /pm\.reconcile|pm\.grantAdmin/)
 })
 
+test('Lab initial Gas is an admin-only no-argument operation and has no RPC caller-supplied target route', () => {
+	const admin = readFileSync(join(__dirname, '..', '..', 'src', 'adminServer.ts'), 'utf8')
+	assert.match(admin, /case 'pm\.labInitialGas':[\s\S]*?Object\.keys\(a\)\.length !== 0[\s\S]*?svc\.pmLabInitialGas\(\)/)
+	const rpc = readFileSync(join(__dirname, '..', '..', 'src', 'rpcServer.ts'), 'utf8')
+	assert.doesNotMatch(rpc, /pm\.labInitialGas|pmLabInitialGas/)
+	const implementation = readFileSync(join(__dirname, '..', '..', 'src', 'pmLabInitialGas.ts'), 'utf8')
+	assert.match(implementation, /PM_LAB_INITIAL_GAS_RECIPIENT = getAddress\('0xcFAF85E6C1765DA01a4Dc58C81b28Cd572067135'\)/)
+	assert.match(implementation, /to: PM_LAB_INITIAL_GAS_RECIPIENT/)
+	assert.doesNotMatch(implementation, /targetIn|recipientIn|PM_GRANT_CLIENT/)
+})
+
 test('retry: a read failure before broadcast aborts; retry then succeeds with exactly one send', async () => {
 	const h = harness({ readFailTimes: 1 })
 	try {
