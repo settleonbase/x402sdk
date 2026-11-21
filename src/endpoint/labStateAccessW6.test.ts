@@ -65,14 +65,17 @@ test('W6 the WAL-mode modules reach the collections only through the layered cla
 	assert.doesNotMatch(stripComments(coreSrc), /new (Map|Set)<string, PendingEntry>/)
 })
 
-test('W6 ratchet: the legacy reporter still has direct uses (P2c moves them onto the core); the counts may only go down, never up', () => {
-	const hits = directAccessLines(read('validatorLabMiningPoolClPayoutReporter.ts'))
-	const count = (k: string): number => hits.filter((h) => h.kind === k).length
-	const bare = hits.filter((h) => h.kind === 'collection-method').length
-	// baselines measured at the start of P2b-2 (review W6: ~22 pending, ~20 consumed, 6 exited, 15 persistPending); P2c lowers each to 0
-	const BASE = { collectionMethod: 22, legacyRecord: 20, persistPending: 15 }
-	assert.ok(bare <= BASE.collectionMethod, `pending Map method uses grew: ${bare} > ${BASE.collectionMethod}`)
-	assert.ok(count('legacy-record') <= BASE.legacyRecord, `consumedEventKeys/exitedPubkeys uses grew: ${count('legacy-record')} > ${BASE.legacyRecord}`)
-	assert.ok(count('persistPending') <= BASE.persistPending, `persistPending call sites grew: ${count('persistPending')} > ${BASE.persistPending}`)
-	console.log(`# W6 reporter work list for P2c: collection-method ${bare}, legacy-record ${count('legacy-record')}, persistPending ${count('persistPending')}`)
+test('W6: the reporter has NO direct access to the pending / consumed / exited collections and no direct call of the whole-state persistence; it does not import the state store readers or writers (the legacy implementation lives in labLegacyState.ts)', () => {
+	const src = read('validatorLabMiningPoolClPayoutReporter.ts')
+	const hits = directAccessLines(src)
+	assert.deepEqual(hits.map((h) => `${h.line}:${h.kind}:${h.text}`), [], 'no direct collection access, no legacy record, no persistPending call in the reporter')
+	const code = stripComments(src)
+	assert.doesNotMatch(code, /\b(readSegmentedState|writeSegmentedState|inspectSegmentedDir|legacyStateFileExists)\b/, 'the reporter does not use the state store directly')
+	assert.doesNotMatch(code, /\bstate\.pending\b|\.consumedEventKeys\b|\.exitedPubkeys\b/)
+	// the legacy implementation is the ONE place that may touch them
+	const legacy = read('labLegacyState.ts')
+	assert.match(legacy, /readSegmentedState/)
+	assert.match(legacy, /writeSegmentedState/)
+	// the handle's two implementations (legacy now, WAL in P2c-2) are the only other readers of the collections
+	for (const f of ['labStateHandle.ts']) assert.ok(read(f).length > 0)
 })

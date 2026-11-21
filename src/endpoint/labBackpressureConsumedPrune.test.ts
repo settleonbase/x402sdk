@@ -188,7 +188,8 @@ test('R-C safety: the protection is the cursor, not consumed — a cursor regres
 	assert.throws(() => assertCursorMonotonic('historyCursor', 2009519, 2009263), /must only advance|backwards/)
 	assert.doesNotThrow(() => assertCursorMonotonic('historyCursor', 2009263, 2009519))
 	// and the daemon's state writer applies it to both cursors on every write
-	const src = readFileSync(join(__dirname, 'validatorLabMiningPoolClPayoutReporter.ts'), 'utf8')
+	// (the legacy state writer moved out of the reporter into labLegacyState.ts in P2c-1)
+	const src = readFileSync(join(__dirname, 'labLegacyState.ts'), 'utf8')
 	assert.match(src, /assertCursorMonotonic\('lastBackfillProcessedBlock'/)
 	assert.match(src, /assertCursorMonotonic\('lastListeningEndBlock'/)
 })
