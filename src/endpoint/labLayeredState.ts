@@ -171,6 +171,11 @@ export class LayeredMap<K, V> {
 		return { delta: this.delta.size, tombstones: this.tombs.size }
 	}
 
+	/** Keys added (or re-added) since the freeze, in insertion order. Small by construction (the overlay); empty without a snapshot in flight. */
+	deltaKeys(): IterableIterator<K> {
+		return this.delta.keys()
+	}
+
 	/**
 	 * Finish the snapshot: apply the overlay to the frozen map (tombstones first, then delta in order) and make the result the base.
 	 * `extraDeletes` are keys decided at snapshot time (the planned prune of the consumed set); they are applied with the tombstones.
@@ -238,6 +243,9 @@ export class LayeredSet<K> {
 	overlaySize(): { delta: number; tombstones: number } {
 		return this.m.overlaySize()
 	}
+	deltaKeys(): IterableIterator<K> {
+		return this.m.deltaKeys()
+	}
 	merge(token: number, extraDeletes: Iterable<K> = []): void {
 		this.m.merge(token, extraDeletes)
 	}
@@ -280,6 +288,46 @@ export class HistoryBlockCounts {
 
 	get histTotal(): number {
 		return this.total
+	}
+
+	/** Replace the counts from a full pass WITHOUT counting drift: used when the classification itself changed (freezeH moved) and at start-up. */
+	rebuild(poolHistoryBlocks: Iterable<number>): void {
+		this.counts.clear()
+		let total = 0
+		for (const b of poolHistoryBlocks) {
+			this.counts.set(b, (this.counts.get(b) ?? 0) + 1)
+			total++
+		}
+		this.total = total
+	}
+
+	/** A copy of the per-block counts, taken at freeze time (about 125k entries, a few ms). */
+	copyCounts(): Map<number, number> {
+		return new Map(this.counts)
+	}
+
+	/**
+	 * Snapshot-time reconcile that costs the event loop nothing extra (errata W5): the writer counts the history blocks of the FROZEN pending view while it writes the
+	 * file; `atFreeze` is the copy of the counts taken at the same instant, so the two describe the same state and must be equal. Any difference is drift: it is
+	 * counted, reported, and the difference is added to the LIVE counts (which have moved on since the freeze). Returns whether drift was found.
+	 */
+	reconcileFrozen(atFreeze: ReadonlyMap<number, number>, frozenFresh: ReadonlyMap<number, number>): { drifted: boolean; corrected: number } {
+		let corrected = 0
+		const blocks = new Set<number>([...atFreeze.keys(), ...frozenFresh.keys()])
+		for (const b of blocks) {
+			const diff = (frozenFresh.get(b) ?? 0) - (atFreeze.get(b) ?? 0)
+			if (diff === 0) continue
+			corrected += Math.abs(diff)
+			const next = (this.counts.get(b) ?? 0) + diff
+			if (next > 0) this.counts.set(b, next)
+			else this.counts.delete(b)
+			this.total += diff
+		}
+		if (corrected > 0) {
+			this.driftEvents++
+			this.onDrift?.(`snapshot reconcile: ${corrected} entries of difference`)
+		}
+		return { drifted: corrected > 0, corrected }
 	}
 
 	/** Entries in blocks strictly above the cursor. About 0.7 ms for 125k blocks: call it once per tick, never per key. */

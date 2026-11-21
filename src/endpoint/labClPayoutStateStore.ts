@@ -24,13 +24,20 @@ import { createHash, randomBytes } from 'node:crypto'
 
 export const SEGMENTED_STATE_FORMAT = 'beamio-lab-clpayout-state' as const
 export const SEGMENTED_STATE_VERSION = 2 as const
+/**
+ * WAL mode (P2, errata W1): the manifest is version 3 and carries `walSeq` (the last WAL event the snapshot contains) and `walFormat` at the top level. The directory layout
+ * is the same as version 2. A reader that only knows version 2 (df78e6b, P1) refuses a version 3 manifest, which is the point: such a reader would silently lose the WAL events.
+ * A graceful stop writes a version 2 DOWNGRADE snapshot instead; it carries `walSeq` only as the informational scalar `scalars.walSeq` (review Y1).
+ */
+export const SEGMENTED_STATE_VERSION_WAL = 3 as const
+export const WAL_MANIFEST_FORMAT = 1 as const
 export const SEGMENTED_MANIFEST_FILE = 'manifest.json'
 export const DEFAULT_PENDING_SEGMENT_SIZE = 100_000
 /** V8 max string length on 64-bit builds. The legacy single file must stay below this for one JSON.parse. */
 export const V8_MAX_STRING_LENGTH = 536_870_888
 
-const CONSUMED_FILE = 'consumed.jsonl'
-const EXITED_FILE = 'exited.jsonl'
+export const CONSUMED_FILE = 'consumed.jsonl'
+export const EXITED_FILE = 'exited.jsonl'
 const WRITE_BATCH_CHARS = 4 * 1024 * 1024
 const READ_CHUNK_BYTES = 4 * 1024 * 1024
 const GENERATION_RE = /^gen-\d{8}T\d{6}Z-[0-9a-f]{12}$/
@@ -64,7 +71,11 @@ export type InFlightKeysRef = { id: string; count: number; keySetSha256: string;
 
 export type SegmentedManifest = {
 	format: typeof SEGMENTED_STATE_FORMAT
-	version: typeof SEGMENTED_STATE_VERSION
+	version: typeof SEGMENTED_STATE_VERSION | typeof SEGMENTED_STATE_VERSION_WAL
+	/** Version 3 only: the seq of the last WAL event contained in this snapshot. */
+	walSeq?: number
+	/** Version 3 only. */
+	walFormat?: typeof WAL_MANIFEST_FORMAT
 	generation: string
 	previousGeneration: string | null
 	writtenAt: string
@@ -305,7 +316,7 @@ function normalizeForWrite(input: SegmentedStateInput): {
 	return { scalars: extractScalars(input), pending, consumed, exited, inFlightKeys: null, inFlightIdempotencyKey: null }
 }
 
-function normalizeSegmentSize(v: number | undefined): number {
+export function normalizeSegmentSize(v: number | undefined): number {
 	if (v === undefined) return DEFAULT_PENDING_SEGMENT_SIZE
 	if (!isPosInt(v)) throw new Error('labClPayoutStateStore: segmentSize must be a positive integer')
 	return v
@@ -314,7 +325,17 @@ function normalizeSegmentSize(v: number | undefined): number {
 /** Generation ids created by this process. Only these may be pruned by this process. */
 const ownGenerations = new Set<string>()
 
-function newGenerationId(now: Date): string {
+/** For the cooperative snapshot writer: create dir/<new generation>/ and register it as created by this process (so the commit's prune may remove an old one). */
+export function beginGenerationDir(dir: string, now: Date): { generation: string; genDir: string } {
+	const generation = newGenerationId(now)
+	ownGenerations.add(generation)
+	const genDir = path.join(dir, generation)
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+	fs.mkdirSync(genDir, { mode: 0o700 })
+	return { generation, genDir }
+}
+
+export function newGenerationId(now: Date): string {
 	const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
 	return `gen-${stamp.slice(0, 8)}T${stamp.slice(9)}-${randomBytes(6).toString('hex')}`
 }
@@ -340,7 +361,7 @@ function fsyncDirBestEffort(dir: string): void {
 }
 
 /** fsync a directory. Throws on failure. Used before a commit, where a failure must abort it. */
-function fsyncDirStrict(dir: string): void {
+export function fsyncDirStrict(dir: string): void {
 	const fd = fs.openSync(dir, 'r')
 	try {
 		fs.fsyncSync(fd)
@@ -462,7 +483,7 @@ function verifyDigest(label: string, got: FileDigest, expect: FileDigest): void 
 	}
 }
 
-function removeGenerationDir(dir: string, genDir: string): void {
+export function removeGenerationDir(dir: string, genDir: string): void {
 	const name = path.basename(genDir)
 	if (path.dirname(path.resolve(genDir)) !== path.resolve(dir) || !GENERATION_RE.test(name)) return
 	try {
@@ -649,7 +670,13 @@ export function writeSegmentedState(dir: string, input: SegmentedStateInput, opt
 function parseManifest(raw: unknown, label: string): SegmentedManifest {
 	if (!isPlainObject(raw)) throw bad(label, 'manifest is not an object')
 	if (raw.format !== SEGMENTED_STATE_FORMAT) throw bad(label, 'unknown format')
-	if (raw.version !== SEGMENTED_STATE_VERSION) throw bad(label, 'unsupported version')
+	if (raw.version !== SEGMENTED_STATE_VERSION && raw.version !== SEGMENTED_STATE_VERSION_WAL) throw bad(label, 'unsupported version')
+	if (raw.version === SEGMENTED_STATE_VERSION_WAL) {
+		if (!isNonNegInt(raw.walSeq)) throw bad(label, 'version 3 manifest without a valid walSeq')
+		if (raw.walFormat !== WAL_MANIFEST_FORMAT) throw bad(label, 'unsupported walFormat')
+	} else if (raw.walSeq !== undefined || raw.walFormat !== undefined) {
+		throw bad(label, 'a version 2 manifest must not carry walSeq/walFormat at the top level (the downgrade snapshot keeps it in scalars.walSeq)')
+	}
 	if (!isGenerationId(raw.generation)) throw bad(label, 'bad generation id')
 	if (raw.previousGeneration !== null && !isGenerationId(raw.previousGeneration)) {
 		throw bad(label, 'bad previousGeneration')
@@ -660,6 +687,9 @@ function parseManifest(raw: unknown, label: string): SegmentedManifest {
 	if (!isPlainObject(scalars)) throw bad(label, 'scalars missing')
 	for (const k of Object.keys(scalars)) {
 		if (RESERVED_FIELDS.has(k) || k === '__proto__') throw bad(label, 'reserved field inside scalars')
+	}
+	if (raw.version === SEGMENTED_STATE_VERSION && scalars.walSeq !== undefined && !isNonNegInt(scalars.walSeq)) {
+		throw bad(label, 'scalars.walSeq (informational, version 2 downgrade snapshot) is not a non-negative integer')
 	}
 	if (!isSha256Hex(raw.scalarsSha256)) throw bad(label, 'bad scalarsSha256')
 	const pending = raw.pending
@@ -767,7 +797,7 @@ function scanBlobFiles(blobDir: string): { segments: SegmentRef[]; keys: string[
  * with the same id is verified, not rewritten. The result is cached per keys array object, so later ticks
  * that carry the same record reuse it without any I/O.
  */
-function writeInFlightBlob(dir: string, keys: string[], idempotencyKey: string, segmentSize: number): InFlightKeysRef {
+export function writeInFlightBlob(dir: string, keys: string[], idempotencyKey: string, segmentSize: number): InFlightKeysRef {
 	const hit = inflightCache.get(keys)
 	if (hit && hit.dir === dir && pathExistsStrict(path.join(dir, INFLIGHT_DIR, hit.ref.id))) return hit.ref
 	const keySetSha256 = keySetHash(keys)
@@ -895,7 +925,20 @@ export function readGenerationFromManifest(dir: string, manifest: SegmentedManif
  */
 export function readSegmentedState(dir: string): SegmentedState {
 	const manifest = readManifest(dir)
+	if (manifest.version === SEGMENTED_STATE_VERSION_WAL) {
+		// a plain state read would drop every WAL event after the snapshot: only the recovery path (loadCommittedForRecovery) may read a WAL-mode state
+		throw bad(dir, `manifest version ${manifest.version} is a WAL-mode snapshot (walSeq ${manifest.walSeq}); replay the WAL (recovery) or gracefully stop the WAL-mode daemon to get a version 2 snapshot`)
+	}
 	return readGenerationFromManifest(dir, manifest)
+}
+
+/** The state a WAL-aware recovery starts from: the committed snapshot (version 2 or 3) and the seq it contains. Version 2 without walSeq = 0 (the WAL was never on). */
+export function loadCommittedForRecovery(dir: string): { manifest: SegmentedManifest; state: SegmentedState; snapshotSeq: number } {
+	const manifest = readManifest(dir)
+	const state = readGenerationFromManifest(dir, manifest)
+	const informational = manifest.scalars.walSeq
+	const snapshotSeq = manifest.version === SEGMENTED_STATE_VERSION_WAL ? (manifest.walSeq as number) : typeof informational === 'number' ? informational : 0
+	return { manifest, state, snapshotSeq }
 }
 
 // ---------------------------------------------------------------------------
