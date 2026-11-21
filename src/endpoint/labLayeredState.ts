@@ -101,31 +101,30 @@ export class LayeredMap<K, V> {
 		return false
 	}
 
-	/** Insertion order: the underlying maps' order, frozen first (skipping tombstones), then delta. */
-	*keys(): IterableIterator<K> {
-		if (this.frozen === null) {
-			yield* this.base.keys()
-			return
-		}
-		for (const k of this.frozen.keys()) if (!this.tombs.has(k)) yield k
+	/**
+	 * Insertion order: the underlying maps' order, frozen first (skipping tombstones), then delta.
+	 * With no snapshot in flight the plain Map iterator is returned directly (P2c-2 C2: a generator with `yield*` delegation cost +20% over the old direct Map walk on 1.66M entries).
+	 * The choice is made when the iterator is created; an iterator created before a freeze keeps walking the base map, which is exactly the frozen layer (writes after the freeze go to the delta).
+	 */
+	keys(): IterableIterator<K> {
+		return this.frozen === null ? this.base.keys() : this.layeredKeys()
+	}
+	values(): IterableIterator<V> {
+		return this.frozen === null ? this.base.values() : this.layeredValues()
+	}
+	entries(): IterableIterator<[K, V]> {
+		return this.frozen === null ? this.base.entries() : this.layeredEntries()
+	}
+	private *layeredKeys(): IterableIterator<K> {
+		for (const k of this.frozen!.keys()) if (!this.tombs.has(k)) yield k
 		yield* this.delta.keys()
 	}
-
-	*values(): IterableIterator<V> {
-		if (this.frozen === null) {
-			yield* this.base.values()
-			return
-		}
-		for (const [k, v] of this.frozen) if (!this.tombs.has(k)) yield v
+	private *layeredValues(): IterableIterator<V> {
+		for (const [k, v] of this.frozen!) if (!this.tombs.has(k)) yield v
 		yield* this.delta.values()
 	}
-
-	*entries(): IterableIterator<[K, V]> {
-		if (this.frozen === null) {
-			yield* this.base.entries()
-			return
-		}
-		for (const [k, v] of this.frozen) if (!this.tombs.has(k)) yield [k, v]
+	private *layeredEntries(): IterableIterator<[K, V]> {
+		for (const [k, v] of this.frozen!) if (!this.tombs.has(k)) yield [k, v]
 		yield* this.delta.entries()
 	}
 
