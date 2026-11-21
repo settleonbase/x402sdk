@@ -111,6 +111,7 @@ import {
 	startupConfigLine,
 } from './labStartupConfig'
 import { acquireStateDirLock, type StateDirLock } from './labClPayoutStateLock'
+import { assertNoWalEvents } from './labWalGuard'
 import { LabPayoutFailClosedGate } from './labClPayoutFailClosed'
 import {
 	resumeLabWithdrawInFlight,
@@ -1708,6 +1709,8 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	// Refuses to start when another live process holds the state dir (throws, daemon exits).
 	assertPinnedRedeem(process.env.CONET_VALIDATOR_DEPOSIT_REDEEM, CONET_VALIDATOR_DEPOSIT_REDEEM)
 	labStateLock = acquireStateDirLock(resolveSegmentedStateDir())
+	// Forward-compat guard (always on): events in wal/ would be silently ignored by this build, so refuse to start (labWalGuard.ts).
+	assertNoWalEvents(resolveSegmentedStateDir())
 	labSessionState = initLabSessionState()
 	// Start check: a one-shot limit already reached exits cleanly before the first tick.
 	if (shouldStopAfterSettled(labSessionState.settledBatchCount ?? 0, resolveMaxSettledBatches())) {
