@@ -868,6 +868,7 @@ async function submitLabSkimBatch(
 		return false
 	}
 
+	h.openScope('batch') // one flush batch: only the lifecycle's steps may commit inside it (design T1)
 	try {
 		const outcome = await enqueueOnchainTxWork(
 			LAB_MINING_POOL_ONCHAIN_LANE,
@@ -887,6 +888,8 @@ async function submitLabSkimBatch(
 	} catch (e: unknown) {
 		logger(Colors.red(`[labMiningPoolClPayout] withdrawNative failed: ${(e as Error)?.message ?? e}`))
 		return false
+	} finally {
+		h.closeScope()
 	}
 }
 
@@ -1243,7 +1246,26 @@ function logSessionStartIfNeeded(h: LabHandle, liveHead: number, freeze: LabFree
 	)
 }
 
+/** One scan window = one commit scope: all its writes end up in the single commit('scan') at its end (design T1); the scope is closed on every exit, keeping buffered writes if no commit happened. */
 async function scanWindowAndAdvance(
+	provider: ethers.JsonRpcProvider,
+	readContract: ethers.Contract,
+	redeemAddr: string,
+	from: number,
+	to: number,
+	h: LabHandle,
+	line: LabScanLine,
+	counters: LabScanCounters
+): Promise<{ okThrough: number | null; added: number }> {
+	h.openScope('scan')
+	try {
+		return await scanWindowAndAdvanceInner(provider, readContract, redeemAddr, from, to, h, line, counters)
+	} finally {
+		h.closeScope()
+	}
+}
+
+async function scanWindowAndAdvanceInner(
 	provider: ethers.JsonRpcProvider,
 	readContract: ethers.Contract,
 	redeemAddr: string,
@@ -1307,6 +1329,7 @@ async function labPayoutTick(): Promise<void> {
 		return
 	}
 	labInFlight = true
+	let tickHandle: LabHandle | undefined
 	try {
 		if (!loadManifestIfNeeded()) return
 
@@ -1316,6 +1339,8 @@ async function labPayoutTick(): Promise<void> {
 
 		const state = getLabSessionState()
 		const h: LabHandle = legacyStore.newHandle(state)
+		tickHandle = h
+		h.enterTick()
 		const liveHead = Number(await provider.getBlockNumber())
 		const floor = resolveLabScanFloorBlock()
 		if (!Number.isFinite(liveHead) || liveHead < floor) return
@@ -1414,6 +1439,7 @@ async function labPayoutTick(): Promise<void> {
 	} catch (e: unknown) {
 		logger(Colors.red(`[labMiningPoolClPayout] tick error: ${(e as Error)?.message ?? e}`))
 	} finally {
+		tickHandle?.exitTick()
 		labInFlight = false
 	}
 }

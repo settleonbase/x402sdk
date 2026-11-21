@@ -16,7 +16,56 @@ export type PendingLike = { eventKey: string; blockNumber: number; withdrawalInd
 /** What a commit is for (WAL event labels; the legacy implementation ignores it). */
 export type StateCommitLabel = 'scan' | 'intent' | 'hash' | 'settle' | 'release' | 'drop' | 'scalars' | 'halt'
 
+/**
+ * Commit scopes (design DESIGN-P2c-T1, replacing the C1 "tx round guard"): a scope marks a stretch of work whose writes must end up in ONE atomic event or in events of the allowed labels only.
+ * 'scan'  - one scan window (writes span many awaits, one commit('scan') at the end); no other label may commit while it is open.
+ * 'batch' - one flush batch; only the lifecycle's steps (intent, hash, settle, release) may commit inside it.
+ * With no scope open any label may commit. A scope ends with commit(its own label) for 'scan', or closeScope() (always in a finally); leaving a scope without a commit KEEPS the buffered writes
+ * (they are already applied in memory; the next commit of any label carries them, exactly as the legacy "persist later" did).
+ */
+export type ScopeLabel = 'scan' | 'batch'
+const SCOPE_ALLOWS: Record<ScopeLabel, readonly StateCommitLabel[]> = { scan: ['scan'], batch: ['intent', 'hash', 'settle', 'release'] }
+
+/** The guard both implementations share: scope rules and the serial-tick assertion. */
+export class HandleGuard {
+	private scope: ScopeLabel | null = null
+	private inTick = false
+	openScope(label: ScopeLabel): void {
+		if (this.scope !== null) throw new Error(`labStateHandle: scope '${this.scope}' is already open; cannot open '${label}'`)
+		this.scope = label
+	}
+	closeScope(): void {
+		this.scope = null
+	}
+	get openScopeLabel(): ScopeLabel | null {
+		return this.scope
+	}
+	/** Throws when a commit of another kind is attempted inside an open scope; a commit with the scope's own label ('scan') closes it. */
+	protected guardCommit(label: StateCommitLabel): void {
+		if (this.scope !== null && !SCOPE_ALLOWS[this.scope].includes(label)) throw new Error(`labStateHandle: commit scope '${this.scope}' is open; commit '${label}' refused`)
+	}
+	protected scopeCommitted(label: StateCommitLabel): void {
+		if (this.scope === 'scan' && label === 'scan') this.scope = null
+	}
+	enterTick(): void {
+		if (this.inTick) throw new Error('labStateHandle: a tick is already running on this handle (ticks must be serial)')
+		this.inTick = true
+	}
+	exitTick(): void {
+		this.inTick = false
+	}
+	/** For paths that write outside a tick (shutdown): refuse while a tick is running instead of writing in parallel. */
+	requireIdle(): void {
+		if (this.inTick) throw new Error('labStateHandle: a tick is still running; refusing to write in parallel with it')
+	}
+}
+
 export interface LabStateHandle<E extends PendingLike, S extends object> {
+	openScope(label: ScopeLabel): void
+	closeScope(): void
+	enterTick(): void
+	exitTick(): void
+	requireIdle(): void
 	// ---- reads
 	readonly pendingSize: number
 	pendingHas(key: string): boolean
@@ -57,8 +106,10 @@ export type LegacyHandleDeps<E extends PendingLike> = {
 	persist: () => void
 }
 
-export class LegacyStateHandle<E extends PendingLike, S extends object> implements LabStateHandle<E, S> {
-	constructor(private readonly d: LegacyHandleDeps<E>) {}
+export class LegacyStateHandle<E extends PendingLike, S extends object> extends HandleGuard implements LabStateHandle<E, S> {
+	constructor(private readonly d: LegacyHandleDeps<E>) {
+		super()
+	}
 
 	get pendingSize(): number {
 		return this.d.pending.size
@@ -112,10 +163,11 @@ export class LegacyStateHandle<E extends PendingLike, S extends object> implemen
 	haltFlush(): void {
 		this.d.persist()
 	}
-	commit(_label: StateCommitLabel): Promise<void> {
-		void _label
+	commit(label: StateCommitLabel): Promise<void> {
 		try {
+			this.guardCommit(label)
 			this.d.persist()
+			this.scopeCommitted(label)
 		} catch (e) {
 			return Promise.reject(e)
 		}
