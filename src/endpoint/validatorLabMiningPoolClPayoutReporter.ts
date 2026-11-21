@@ -842,7 +842,7 @@ async function submitLabSkimBatch(
 	line: LabScanLine
 ): Promise<boolean> {
 	if (!entries.length) return true
-	const total = entries.reduce((a, e) => a + e.amount, 0n)
+	const total = entries.reduce((a, e) => a + BigInt(e.amount), 0n)
 	if (total <= 0n) return true
 	// B-3: after a persist failure this process never sends another withdrawNative.
 	labGate.assertOpen('withdrawNative')

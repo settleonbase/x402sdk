@@ -61,7 +61,8 @@ export type LabClPayoutState = {
 
 export type SkimEntry = {
 	eventKey: string
-	amount: bigint
+	/** bigint in the legacy in-memory pool; a decimal string when the entry comes from the WAL state (JSON events carry no bigint). Convert with BigInt(e.amount) where a number is needed. */
+	amount: bigint | string
 	blockNumber: number
 	withdrawalIndex: number
 	pubkey: string
