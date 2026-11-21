@@ -224,6 +224,59 @@ function dfFreeBytes(dir: string): number {
 	return Number(st.bavail) * Number(st.bsize)
 }
 
+type CurveCell = { ok: boolean; n: number; releasePeakGB?: { median: number; max: number; all: number[] }; heapAfterGcGB?: number; rssAfterOneGcGB?: number; recoverMs?: number; gcMaxPauseMs?: number; failedWith?: string }
+
+/**
+ * Consumed-count curve at a fixed pending size (and, with several --pendings, a grid): for every size the state is generated once (v2 and WAL snapshot), then recovered with the streaming loader, the
+ * whole-state loader and the old path's read, each under every heap setting ("default" = Node's own default old-space limit on this host; a number = --max-old-space-size in MB). A child that
+ * dies (V8 out of memory = SIGABRT) is recorded as a failed cell, not an error. Release peak = max(OS high-water, /usr/bin/time -l, 20 ms sample). Data sets are deleted after every size.
+ */
+async function curveRun(out: string, pendings: number[], consumeds: number[], heaps: string[], repeats: number): Promise<void> {
+	if (!path.resolve(out).includes('/claudeTemp/lab-p2d')) throw new Error('p2d: the output directory must be under claudeTemp/lab-p2d')
+	fs.mkdirSync(out, { recursive: true })
+	const freeBefore = dfFreeBytes(out)
+	process.stderr.write(`curve: uptime at start: ${execFileSync('uptime', { encoding: 'utf8' }).trim()}\ncurve: disk free before: ${gb(freeBefore)} GB\n`)
+	const G = 1024 ** 3
+	const cells: Record<string, CurveCell> = {}
+	for (const pending of pendings) {
+		for (const consumed of consumeds) {
+			const name = `c_${pending}_${consumed}`
+			TIERS[name] = { pending, consumed, exited: 2_000, historyShare: pending >= 1_900_000 ? 1_800_000 / pending : 1_609_706 / 1_683_285 }
+			const dirOut = path.join(out, name)
+			const g = await generate({ tier: name, forms: ['v2', 'wal'], out: dirOut, seed: 1, tail: 0 })
+			for (const heap of heaps) {
+				const args = heap === 'default' ? [] : [`--max-old-space-size=${heap}`]
+				for (const [label, mode, dir] of [['stream', 'recover-wal', g.dirs.wal!], ['whole', 'recover-wal-whole', g.dirs.wal!], ['oldpath', 'read-legacy', g.dirs.v2!]] as const) {
+					const runsOk: Extract<ChildRun, { ok: true }>[] = []
+					let failed: string | undefined
+					for (let i = 0; i < repeats; i++) {
+						const r = await runChild(mode, dir, args, true)
+						if (r.ok) runsOk.push(r)
+						else {
+							failed = `${r.code}/${r.signal}`
+							break
+						}
+					}
+					const key = `${pending}|${consumed}|${heap}|${label}`
+					if (failed || runsOk.length === 0) cells[key] = { ok: false, n: runsOk.length, failedWith: failed }
+					else {
+						const peaks = runsOk.map((r) => r.releasePeakBytes / G)
+						cells[key] = { ok: true, n: runsOk.length, releasePeakGB: { median: med(peaks), max: Math.max(...peaks), all: peaks }, heapAfterGcGB: runsOk[0]!.report.heapUsedAfterGcBytes / G, rssAfterOneGcGB: med(runsOk.map((r) => r.report.rssAfterOneGcBytes / G)), recoverMs: med(runsOk.map((r) => r.report.phases.recoverMs ?? r.report.phases.readStateMs! + r.report.phases.pendingMapMs!)), gcMaxPauseMs: med(runsOk.map((r) => r.report.gc.maxPauseMs)) }
+					}
+					process.stderr.write(`curve: pending ${pending} consumed ${consumed} heap ${heap} ${label}: ${cells[key]!.ok ? `peak ${cells[key]!.releasePeakGB!.median.toFixed(3)} GB` : `FAILED ${cells[key]!.failedWith}`}\n`)
+				}
+			}
+			fs.rmSync(dirOut, { recursive: true, force: true })
+			process.stderr.write(`curve: ${name} done; disk free ${gb(dfFreeBytes(out))} GB\n`)
+		}
+	}
+	const summary = { platform: `${process.platform}/${process.arch} node ${process.version}`, pendings, consumeds, heaps, repeats, cells }
+	const raw = path.join(out, `results-curve-${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
+	fs.writeFileSync(raw, JSON.stringify(summary, null, 2))
+	process.stdout.write(JSON.stringify(summary, null, 2) + '\n')
+	process.stderr.write(`curve: uptime at end: ${execFileSync('uptime', { encoding: 'utf8' }).trim()}\ncurve: raw results ${raw}\ncurve: disk free after cleanup: ${gb(dfFreeBytes(out))} GB (before ${gb(freeBefore)} GB)\n`)
+}
+
 async function tierRun(tier: string, out: string, repeats: number, keep: boolean, tail: number, heapFloor: boolean): Promise<void> {
 	if (!path.resolve(out).includes('/claudeTemp/lab-p2d')) throw new Error('p2d: the output directory must be under claudeTemp/lab-p2d')
 	const t = TIERS[tier]
@@ -302,7 +355,8 @@ if (require.main === module && !process.env.NODE_TEST_CONTEXT) {
 		if (a[0] === '--child') return childMain(get('--child'), get('--dir'))
 		if (a[0] === 'm0') return tierRun('A', get('--out'), Number(get('--repeats', '5')), a.includes('--keep'), 0, false)
 		if (a[0] === 'tier') return tierRun(get('--tier'), get('--out'), Number(get('--repeats', '5')), a.includes('--keep'), Number(get('--tail', '100000')), a.includes('--heapfloor'))
-		throw new Error('usage: measure.test.ts tier --tier A|P0|B2 --out <dir> | m0 --out <dir> | --child <mode> --dir <dir>')
+		if (a[0] === 'curve') return curveRun(get('--out'), get('--pendings', '2050000').split(',').map(Number), get('--consumeds', '250000,500000,1000000,2000000,3000000').split(',').map(Number), get('--heaps', 'default,1536').split(','), Number(get('--repeats', '3')))
+		throw new Error('usage: measure.test.ts tier --tier A|P0|B2 --out <dir> | curve --out <dir> [--pendings a,b] [--consumeds a,b,c] [--heaps default,1536] | m0 --out <dir> | --child <mode> --dir <dir>')
 	})().catch((e) => {
 		process.stderr.write(`measure: ${e instanceof Error ? e.stack : String(e)}\n`)
 		process.exit(2)
