@@ -9,7 +9,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
-import { WAL_DIR, WAL_HEADER_BYTES, WalMidCorruptionError, decodeFrameAt, encodeFrame, scanWal, segmentFileName, type WalEvent, type WalOp } from './labWal'
+import { createHash } from 'node:crypto'
+import { chmodSync, statSync } from 'node:fs'
+import { acquireStateDirLock } from './labClPayoutStateLock'
+import { WAL_DIR, WAL_HEADER_BYTES, WalMidCorruptionError, WalWriter, decodeFrameAt, encodeFrame, formatWalMidCorruptionAlert, scanWal, segmentFileName, type WalEvent, type WalOp } from './labWal'
 import { RUN_ID_RE, repairMidCorruption } from './labWalRepair'
 
 const key = (i: number): string => `0x${i.toString(16).padStart(64, '0')}`
@@ -210,6 +213,143 @@ test('repair CLI: without --run-id it exits 2 and touches nothing; with the argu
 		assert.equal(JSON.parse(ok.stdout).status, 'repaired')
 		assert.equal(readFileSync(w.file).length, w.starts[2])
 		assert.ok(existsSync(join(w.auditDir, `wal-midcorruption-${RUN}.json`)))
+	} finally {
+		done(w.root)
+	}
+})
+
+// ------------------------------------------------------------ the extra gates (independent review points 1-6)
+test('repair gate 1: it takes the state-directory lock and refuses while that lock is held (a running daemon); dry-run does not need it; the lock is released afterwards', () => {
+	const w = world()
+	try {
+		const held = acquireStateDirLock(w.stateDir)
+		try {
+			assert.throws(
+				() => repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' }),
+				/cannot take the state directory lock.*stop the daemon first.*Nothing was changed/s
+			)
+			assert.deepEqual(readFileSync(w.file), w.damaged, 'nothing was cut while the lock was held')
+			assert.equal(existsSync(w.auditDir), false, 'no audit was written either')
+			// a dry run only reads
+			assert.equal(repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01', dryRun: true }).status, 'dry-run')
+		} finally {
+			held.release()
+		}
+		const r = repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' })
+		assert.equal(r.status, 'repaired')
+		// the repair released its lock: the daemon (or anyone) can take it now
+		const again = acquireStateDirLock(w.stateDir)
+		again.release()
+	} finally {
+		done(w.root)
+	}
+})
+
+test('repair gate 2: the cut bytes are stored whole beside the audit (sha256 in the audit); the audit says the dropped seqs are reused and that the approval is not verifiable', async () => {
+	const w = world()
+	try {
+		const r = repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' })
+		assert.equal(r.status, 'repaired')
+		if (r.status !== 'repaired') return
+		const a = JSON.parse(readFileSync(r.auditFile, 'utf8'))
+		const tailPath = join(w.auditDir, a.tailFile)
+		assert.equal(a.tailFile, `wal-midcorruption-${RUN}.tail.bin`)
+		const tail = readFileSync(tailPath)
+		assert.deepEqual(tail, w.damaged.subarray(w.starts[2]!), 'the raw bytes from the bad offset to the end of the segment')
+		assert.equal(a.tailBytes, tail.length)
+		assert.equal(a.tailSha256, createHash('sha256').update(tail).digest('hex'))
+		assert.equal(a.lastGoodSeq, 2)
+		assert.deepEqual(a.droppedSeqs, { first: 4, last: 5, count: 2 })
+		assert.match(a.seqReuseNote, /next event written gets seq 3.*REUSED/s)
+		assert.equal(a.approvalVerified, false)
+		assert.match(a.approvalNote, /plain string.*cannot verify it technically/s)
+		// the dropped seq is really reused: the next event gets seq 3 and the log stays consistent
+		const wr = new WalWriter({ stateDir: w.stateDir, lastSeq: 2 })
+		const ap = wr.append('scan', [{ op: 'consumedAdd', key: key(77) }])
+		assert.equal(ap.seq, 3)
+		await ap.durable
+		await wr.close()
+		const seqs: number[] = []
+		scanWal(w.stateDir, { afterSeq: 0, onEvent: (e) => seqs.push(e.seq) })
+		assert.deepEqual(seqs, [1, 2, 3])
+	} finally {
+		done(w.root)
+	}
+})
+
+test('repair gate 3: a failed audit write, an existing audit file, or a crash between the audit and the cut leaves the log untouched; a repeated run id is refused', () => {
+	const w = world()
+	try {
+		// (a) the audit directory cannot be created (a file is in the way): fails before anything is cut
+		const blocker = join(w.root, 'blocker')
+		writeFileSync(blocker, 'x')
+		assert.throws(() => repairMidCorruption({ stateDir: w.stateDir, auditDir: join(blocker, 'audit'), runId: RUN, approval: 'PM-2026-11-21-01' }))
+		assert.deepEqual(readFileSync(w.file), w.damaged)
+		// (b) the audit directory is not writable
+		mkdirSync(w.auditDir, { recursive: true })
+		chmodSync(w.auditDir, 0o500)
+		let wrote = true
+		try {
+			writeFileSync(join(w.auditDir, 'probe'), 'x')
+		} catch {
+			wrote = false
+		}
+		if (!wrote) {
+			assert.throws(() => repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' }))
+			assert.deepEqual(readFileSync(w.file), w.damaged, 'an unwritable audit directory cuts nothing')
+		}
+		chmodSync(w.auditDir, 0o700)
+		// (c) a crash after the audit is durable and before the cut: the log is untouched, the audit and the raw bytes exist
+		assert.throws(
+			() =>
+				repairMidCorruption({
+					stateDir: w.stateDir,
+					auditDir: w.auditDir,
+					runId: RUN,
+					approval: 'PM-2026-11-21-01',
+					hooks: {
+						beforeTruncate: () => {
+							throw new Error('simulated crash before the cut')
+						},
+					},
+				}),
+			/simulated crash before the cut/
+		)
+		assert.deepEqual(readFileSync(w.file), w.damaged)
+		assert.ok(existsSync(join(w.auditDir, `wal-midcorruption-${RUN}.json`)))
+		assert.equal(statSync(join(w.auditDir, `wal-midcorruption-${RUN}.tail.bin`)).size, w.damaged.length - w.starts[2]!)
+		// (d) the same run id again is refused (audit exists) and cuts nothing; a new run id works
+		assert.throws(() => repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' }), /EEXIST/)
+		assert.deepEqual(readFileSync(w.file), w.damaged)
+		assert.equal(repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: 'run-20261121-02', approval: 'PM-2026-11-21-01' }).status, 'repaired')
+	} finally {
+		done(w.root)
+	}
+})
+
+test('repair gate 4: after a repair the log starts cleanly and equals the reference for the intact prefix; the daemon-side alert text names the damage and says there is no automatic repair', () => {
+	const w = world()
+	try {
+		// the alert text the daemon prints (it only refuses to start and alerts)
+		let mid: WalMidCorruptionError | null = null
+		try {
+			scanWal(w.stateDir, { afterSeq: 0, onEvent: () => undefined })
+		} catch (e) {
+			mid = e as WalMidCorruptionError
+		}
+		assert.ok(mid instanceof WalMidCorruptionError)
+		const alert = formatWalMidCorruptionAlert(mid!)
+		assert.match(alert, /^\[labMiningPoolClPayout\] ALERT WAL damaged in the middle: wal-0000000000000001\.log offset \d+ \(bad-crc\), 2 valid frame\(s\) after it, last intact seq 2\./)
+		assert.match(alert, /Refusing to start; nothing was truncated; no automatic repair\./)
+		assert.match(alert, /Offline only: labWalRepair with a run id and the PM written approval/)
+		// repair, then a clean start equal to the intact prefix
+		repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' })
+		const got: WalEvent[] = []
+		const res = scanWal(w.stateDir, { afterSeq: 0, onEvent: (e) => got.push(e) })
+		assert.equal(res.truncatedBytes, 0)
+		assert.deepEqual(got.map((e) => [e.seq, e.t]), [[1, 'scan'], [2, 'intent']])
+		const reference = Buffer.concat([encodeFrame(ev(1, [{ op: 'pendingAdd', entry: { eventKey: key(1), blockNumber: 10 } }], 'scan')), encodeFrame(ev(2, [{ op: 'inFlightSet', record: { batchId: 'b1', idempotencyKey: 'lab-withdrawNative:abc', line: 'history', amountWei: '1000', eventKeys: [key(1), key(2), key(3)] } }], 'intent'))])
+		assert.deepEqual(readFileSync(w.file), reference, 'the file equals the encoding of the intact prefix, byte for byte')
 	} finally {
 		done(w.root)
 	}

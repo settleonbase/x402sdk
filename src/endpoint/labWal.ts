@@ -85,7 +85,9 @@ export class WalMidCorruptionError extends WalCorruptError {
 		readonly file: string,
 		readonly badOffset: number,
 		readonly reason: string,
-		readonly laterFrameOffsets: number[]
+		readonly laterFrameOffsets: number[],
+		/** Seq of the last intact frame before the damage (0 if none): the next event written after any repair gets lastGoodSeq + 1, so the dropped seqs are reused. */
+		readonly lastGoodSeq: number
 	) {
 		super(message)
 		this.name = 'WalMidCorruptionError'
@@ -266,7 +268,8 @@ export function scanWal(
 					path.join(walDir, seg.file),
 					at,
 					r.reason,
-					later
+					later,
+					lastSeq
 				)
 			}
 			truncatedBytes = buf.length - at
@@ -578,4 +581,15 @@ export function applyOps(target: WalApplyTarget, ops: readonly WalOp[]): void {
 			}
 		}
 	}
+}
+
+/**
+ * The journal line the daemon prints when the log has mid-log damage (P2c uses it; the daemon only refuses to start and alerts, it never calls the repair command).
+ */
+export function formatWalMidCorruptionAlert(e: WalMidCorruptionError): string {
+	return (
+		`[labMiningPoolClPayout] ALERT WAL damaged in the middle: ${path.basename(e.file)} offset ${e.badOffset} (${e.reason}), ${e.laterFrameOffsets.length} valid frame(s) after it, ` +
+		`last intact seq ${e.lastGoodSeq}. Refusing to start; nothing was truncated; no automatic repair. ` +
+		'Offline only: labWalRepair with a run id and the PM written approval, after checking every intent in the cut frames against the signer record and the chain.'
+	)
 }
