@@ -51,3 +51,8 @@ src/localDB.db
 
 # Local temp / scratch
 .tmp-*/
+
+# Editor / sed -i leftovers must never be committed (a labWalRollback.test.ts.bak once was)
+*.bak
+*.orig
+*.rej
