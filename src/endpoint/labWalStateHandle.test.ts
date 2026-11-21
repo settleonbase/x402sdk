@@ -100,11 +100,16 @@ test('scopes (T1): scan scope refuses other labels and a commit(scan) closes it;
 		h.openScope('scan')
 		h.pendingAdd([entry(1, 10)])
 		await assert.rejects(h.commit('settle'), /commit scope 'scan' is open; commit 'settle' refused/)
+		for (const l of ['intent', 'hash', 'release', 'drop', 'scalars'] as const) await assert.rejects(h.commit(l), /commit scope 'scan' is open/, `scan scope refuses '${l}'`)
 		await h.commit('scan')
 		assert.equal(h.openScopeLabel, null)
 		h.openScope('batch')
-		await assert.rejects(h.commit('scan'), /commit scope 'batch' is open/)
-		await h.commit('intent')
+		for (const l of ['scan', 'scalars'] as const) await assert.rejects(h.commit(l), /commit scope 'batch' is open/, `batch scope refuses '${l}'`)
+		h.pendingAdd([entry(50, 10)])
+		for (const l of ['intent', 'hash', 'settle', 'release', 'drop'] as const) {
+			h.consumedAdd(key(100 + ['intent', 'hash', 'settle', 'release', 'drop'].indexOf(l)))
+			await h.commit(l) // S1: every lifecycle label (and drop) may commit inside a batch scope
+		}
 		h.closeScope()
 		h.openScope('scan')
 		h.consumedAdd(key(9)) // the window throws here: the finally closes the scope without a commit
@@ -221,6 +226,44 @@ test('differential: the same scripted operations through the legacy handle and t
 		const rec = recoverPayoutState(w.stateDir, { readOnly: true })
 		const recovered = norm(new WalStateHandle<E, Record<string, unknown>>({ core: rec.core, wal: w.wal, onFatal: fatal }) as never, [...rec.core.consumedKeys()], [...rec.core.exited.keys()])
 		assert.equal(recovered, a, 'and so does the state recovered from the log')
+	} finally {
+		await w.wal.close()
+		fs.rmSync(w.dir, { recursive: true, force: true })
+	}
+})
+
+test('S3: writes left in a scope that was aborted by an exception are carried by the next commit, announced in the log, and a replay from the log equals the legacy implementation key by key', async () => {
+	const w = await world()
+	const logs: string[] = []
+	try {
+		const wal = new WalStateHandle<E, Record<string, unknown>>({ core: w.core, wal: w.wal, onFatal: fatal, log: (l) => logs.push(l) })
+		const legacyState: Record<string, unknown> = { consumedEventKeys: {}, exitedPubkeys: {}, freezeH: { height: 500 } }
+		const legacy = new LegacyStateHandle<E, Record<string, unknown>>({ state: legacyState as never, pending: new Map(), persist: () => undefined })
+		const both = (f: (h: LegacyStateHandle<E, Record<string, unknown>> | WalStateHandle<E, Record<string, unknown>>) => void): void => {
+			f(legacy)
+			f(wal)
+		}
+		both((h) => h.pendingAdd([entry(1, 10), entry(2, 11)]))
+		await wal.commit('scan')
+		// a scan window that throws half way: 2 adds, 1 consumed, 1 cursor move, then the finally closes the scope without a commit
+		both((h) => h.openScope('scan'))
+		both((h) => h.pendingAdd([entry(3, 12), entry(4, 13)]))
+		both((h) => h.consumedAdd(key(1)))
+		both((h) => h.setScalar('historyCursor', 13))
+		both((h) => h.closeScope())
+		assert.deepEqual(logs, [], 'nothing is said until a commit carries the writes')
+		both((h) => h.pendingDel(key(2)))
+		await wal.commit('scalars') // another label carries the kept writes
+		assert.equal(logs.length, 1)
+		assert.match(logs[0]!, /carried 4 ops from an aborted scope into the 'scalars' commit/)
+		await wal.commit('scalars')
+		assert.equal(logs.length, 1, 'said once')
+		const keys = (h: { pendingValues(): IterableIterator<E> }): string[] => [...h.pendingValues()].map((e) => e.eventKey.toLowerCase()).sort()
+		const rec = recoverPayoutState(w.stateDir, { readOnly: true })
+		const replayed = new WalStateHandle<E, Record<string, unknown>>({ core: rec.core, wal: w.wal, onFatal: fatal })
+		assert.deepEqual(keys(replayed), keys(legacy), 'pending set after the replay equals the legacy implementation')
+		assert.deepEqual([...rec.core.consumedKeys()], Object.keys(legacyState.consumedEventKeys as object), 'consumed keys, in order')
+		assert.equal(replayed.scalar('historyCursor'), legacyState.historyCursor)
 	} finally {
 		await w.wal.close()
 		fs.rmSync(w.dir, { recursive: true, force: true })

@@ -24,7 +24,7 @@ export type StateCommitLabel = 'scan' | 'intent' | 'hash' | 'settle' | 'release'
  * (they are already applied in memory; the next commit of any label carries them, exactly as the legacy "persist later" did).
  */
 export type ScopeLabel = 'scan' | 'batch'
-const SCOPE_ALLOWS: Record<ScopeLabel, readonly StateCommitLabel[]> = { scan: ['scan'], batch: ['intent', 'hash', 'settle', 'release'] }
+const SCOPE_ALLOWS: Record<ScopeLabel, readonly StateCommitLabel[]> = { scan: ['scan'], batch: ['intent', 'hash', 'settle', 'release', 'drop'] }
 
 /** The guard both implementations share: scope rules and the serial-tick assertion. */
 export class HandleGuard {

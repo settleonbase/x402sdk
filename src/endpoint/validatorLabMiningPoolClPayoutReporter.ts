@@ -1469,6 +1469,8 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	// Refuses to start when another live process holds the state dir (throws, daemon exits).
 	assertPinnedRedeem(process.env.CONET_VALIDATOR_DEPOSIT_REDEEM, CONET_VALIDATOR_DEPOSIT_REDEEM)
 	labStateLock = acquireStateDirLock(resolveSegmentedStateDir())
+	// S4: start-up alignment (initLabSessionState / the WAL session's alignment) is only legal before any tick has begun; a tick already running here is a bug, not a race to tolerate
+	if (labInFlight) throw new Error('[labMiningPoolClPayout] start while a tick is running')
 	if (labWalMode()) {
 		void startWalMode()
 		return
@@ -1493,6 +1495,12 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	void labPayoutTick().finally(() => scheduleNextLabTick())
 }
 
+/** Test/ops tunable: refuse (fatally) any single log event above this many bytes; unset = the log's 16 MiB. */
+function resolveWalMaxFrameBytes(): number | undefined {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_WAL_MAX_FRAME_BYTES)
+	return Number.isFinite(n) && n >= 256 ? Math.floor(n) : undefined
+}
+
 /** WAL-mode start: recover (or bootstrap) the state, then the same start check and first tick as the legacy path. A failure refuses to start (exit 1). */
 async function startWalMode(): Promise<void> {
 	try {
@@ -1501,6 +1509,7 @@ async function startWalMode(): Promise<void> {
 			legacyStateFile: resolveStateFile(),
 			scanFloor: resolveLabScanFloorBlock(),
 			log: (line) => logger(line.includes('ALERT') ? Colors.red(line) : Colors.cyan(line)),
+			maxFrameBytes: resolveWalMaxFrameBytes(),
 		})
 		sessionBackfillFloor = labWalSession.sessionBackfillFloor
 		if (shouldStopAfterSettled(labWalSession.settledBatchCount, resolveMaxSettledBatches())) {

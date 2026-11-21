@@ -75,6 +75,8 @@ export async function openWalSession(opts: {
 	scanFloor: number
 	log: (line: string) => void
 	segmentBytes?: number
+	/** Refuse (fatally) any single event above this size; default the log's 16 MiB. Tunable so the over-limit stop can be exercised end to end. */
+	maxFrameBytes?: number
 }): Promise<WalSession> {
 	let status = inspectSegmentedDir(opts.stateDir)
 	const markerPath = path.join(opts.stateDir, WAL_BOOTSTRAP_MARKER)
@@ -98,24 +100,30 @@ export async function openWalSession(opts: {
 	const rec = recoverOrRefuse(opts.stateDir, { log: opts.log })
 	for (const w of rec.warnings) opts.log(`[labMiningPoolClPayout] ALERT WAL recovery warning: ${w}`)
 	if (rec.warnings.length > 0) throw new Error('[labMiningPoolClPayout] WAL recovery reported warnings; refusing to start (operator check required)')
-	const wal = new WalWriter({ stateDir: opts.stateDir, lastSeq: rec.writerLastSeq, segmentBytes: opts.segmentBytes })
-	const handle = new WalStateHandle<SkimEntry, LabClPayoutState>({ core: rec.core, wal })
+	const wal = new WalWriter({ stateDir: opts.stateDir, lastSeq: rec.writerLastSeq, segmentBytes: opts.segmentBytes, maxFrameBytes: opts.maxFrameBytes })
+	const handle = new WalStateHandle<SkimEntry, LabClPayoutState>({ core: rec.core, wal, log: opts.log })
 	opts.log(`[labMiningPoolClPayout] WAL mode: snapshotSeq=${rec.snapshotSeq} replayed=${rec.replayed} pending=${rec.core.pendingSize} consumed=${rec.core.consumedSize} nextSeq=${rec.writerLastSeq + 1}`)
 
-	// start-up alignment, through the handle (the legacy path did this on its in-memory state)
-	const hw = (handle.scalar('cursorHighWater') ?? {}) as { backfill?: number; listen?: number }
-	assertCursorMonotonic('lastBackfillProcessedBlock (startup vs high-water)', hw.backfill, handle.scalar('lastBackfillProcessedBlock'))
-	assertCursorMonotonic('lastListeningEndBlock (startup vs high-water)', hw.listen, handle.scalar('lastListeningEndBlock'))
-	const lastListen = norm(handle.scalar('lastListeningEndBlock'))
-	const sessionBackfillFloor = lastListen != null ? lastListen + 1 : opts.scanFloor
-	if (handle.scalar('lastBackfillProcessedBlock') == null) {
-		const legacy = norm((handle.scalar as (n: string) => unknown)('lastProcessedBlock'))
-		handle.setScalar('lastBackfillProcessedBlock', legacy != null ? legacy : sessionBackfillFloor - 1)
+	// start-up alignment, through the handle (the legacy path did this on its in-memory state). S4: it happens before the first tick; enterTick makes that an assertion (no tick may be running).
+	handle.enterTick()
+	let sessionBackfillFloor = opts.scanFloor
+	try {
+		const hw = (handle.scalar('cursorHighWater') ?? {}) as { backfill?: number; listen?: number }
+		assertCursorMonotonic('lastBackfillProcessedBlock (startup vs high-water)', hw.backfill, handle.scalar('lastBackfillProcessedBlock'))
+		assertCursorMonotonic('lastListeningEndBlock (startup vs high-water)', hw.listen, handle.scalar('lastListeningEndBlock'))
+		const lastListen = norm(handle.scalar('lastListeningEndBlock'))
+		sessionBackfillFloor = lastListen != null ? lastListen + 1 : opts.scanFloor
+		if (handle.scalar('lastBackfillProcessedBlock') == null) {
+			const legacy = norm((handle.scalar as (n: string) => unknown)('lastProcessedBlock'))
+			handle.setScalar('lastBackfillProcessedBlock', legacy != null ? legacy : sessionBackfillFloor - 1)
+		}
+		if ((handle.scalar as (n: string) => unknown)('lastProcessedBlock') !== undefined) (handle.delScalar as (n: string) => void)('lastProcessedBlock')
+		// R1: a scan floor above the history seed would silently skip blocks between them. Refuse to start instead.
+		assertNoSkippedHistory(opts.scanFloor, handle.scalar('lastBackfillProcessedBlock'))
+		if (handle.scalar('lastBackfillProcessedBlock') < sessionBackfillFloor - 1) handle.setScalar('lastBackfillProcessedBlock', sessionBackfillFloor - 1)
+		await handle.commit('scalars')
+	} finally {
+		handle.exitTick()
 	}
-	if ((handle.scalar as (n: string) => unknown)('lastProcessedBlock') !== undefined) (handle.delScalar as (n: string) => void)('lastProcessedBlock')
-	// R1: a scan floor above the history seed would silently skip blocks between them. Refuse to start instead.
-	assertNoSkippedHistory(opts.scanFloor, handle.scalar('lastBackfillProcessedBlock'))
-	if (handle.scalar('lastBackfillProcessedBlock') < sessionBackfillFloor - 1) handle.setScalar('lastBackfillProcessedBlock', sessionBackfillFloor - 1)
-	await handle.commit('scalars')
 	return { handle, core: rec.core, wal, sessionBackfillFloor, settledBatchCount: (handle.scalar('settledBatchCount') as number | undefined) ?? 0, recovery: { snapshotSeq: rec.snapshotSeq, replayed: rec.replayed, warnings: rec.warnings } }
 }

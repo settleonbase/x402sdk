@@ -21,6 +21,7 @@ test('scan scope: only commit(scan) is allowed while it is open and it closes th
 	h.openScope('scan')
 	await assert.rejects(h.commit('settle'), /commit scope 'scan' is open; commit 'settle' refused/)
 	await assert.rejects(h.commit('scalars'), /commit scope 'scan' is open/)
+	for (const l of ['intent', 'hash', 'release', 'drop', 'halt'] as const) await assert.rejects(h.commit(l), /commit scope 'scan' is open/, `scan scope refuses '${l}'`)
 	await h.commit('scan')
 	assert.equal(h.openScopeLabel, null, 'a commit with the scope\'s own label closes it')
 	await h.commit('scalars') // fine now
@@ -29,12 +30,12 @@ test('scan scope: only commit(scan) is allowed while it is open and it closes th
 test('batch scope: only the lifecycle steps may commit; it stays open across them and is closed by closeScope', async () => {
 	const { h } = make()
 	h.openScope('batch')
-	for (const l of ['intent', 'hash', 'settle', 'release'] as const) await h.commit(l)
+	// S1: the allowed label set of a batch scope is exactly {intent, hash, settle, release, drop}; each polarity is tested
+	for (const l of ['intent', 'hash', 'settle', 'release', 'drop'] as const) await h.commit(l)
 	assert.equal(h.openScopeLabel, 'batch', 'a batch scope covers several steps')
-	await assert.rejects(h.commit('scan'), /commit scope 'batch' is open; commit 'scan' refused/)
-	await assert.rejects(h.commit('drop'), /refused/)
+	for (const l of ['scan', 'scalars', 'halt'] as const) await assert.rejects(h.commit(l), new RegExp(`commit scope 'batch' is open; commit '${l}' refused`), `batch scope refuses '${l}'`)
 	h.closeScope()
-	await h.commit('drop')
+	await h.commit('scalars')
 })
 
 test('a scope cannot be opened twice; closing is idempotent; leaving a scope without a commit keeps the writes (the next commit of any label carries them)', async () => {

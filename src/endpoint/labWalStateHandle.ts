@@ -17,6 +17,8 @@ export type WalHandleDeps = {
 	wal: { append(t: string, ops: WalOp[]): { seq: number; durable: Promise<void> }; whenDurable(seq: number): Promise<void>; readonly lastSeq: number }
 	/** Called when the log refused an append (the memory is ahead of the log). Default: log and exit(70). */
 	onFatal?: (err: Error) => void
+	/** Operator log line sink (S3: "carried N ops from an aborted scope"). */
+	log?: (line: string) => void
 }
 
 const IN_FLIGHT = 'inFlightWithdraw'
@@ -29,6 +31,8 @@ export class WalStateHandle<E extends PendingLike, S extends object> extends Han
 	/** undefined = not read yet; null = no record; object = the live mutable copy of the in-flight record. */
 	private live: Record<string, unknown> | null | undefined = undefined
 	private readonly onFatal: (err: Error) => void
+	/** Ops that were still buffered when a scope was left without its commit (an exception inside the window): the next commit of any label carries them (S3). */
+	private carried = 0
 
 	constructor(private readonly d: WalHandleDeps) {
 		super()
@@ -128,6 +132,15 @@ export class WalStateHandle<E extends PendingLike, S extends object> extends Han
 		this.d.core.deleteScalar(n)
 	}
 
+	/**
+	 * S3: leaving a scope with uncommitted writes keeps them (they are already applied to the core, so dropping them would put memory ahead of the log); the next commit of any label carries them
+	 * into its event, and says so in the log.
+	 */
+	override closeScope(): void {
+		if (this.openScopeLabel !== null) this.carried += this.buf.length + Object.keys(this.patch).length + this.dels.size
+		super.closeScope()
+	}
+
 	// ------------------------------------------------------------------ durability
 	private pendingOps(): WalOp[] {
 		const ops = this.buf.slice()
@@ -156,6 +169,10 @@ export class WalStateHandle<E extends PendingLike, S extends object> extends Han
 	async commit(label: StateCommitLabel): Promise<void> {
 		this.guardCommit(label)
 		const ops = this.pendingOps()
+		if (this.carried > 0) {
+			this.d.log?.(`[labMiningPoolClPayout] carried ${this.carried} ops from an aborted scope into the '${label}' commit`)
+			this.carried = 0
+		}
 		if (ops.length === 0) {
 			// no event, but still a barrier: everything applied before this point is durable when it resolves (the log is ordered, so this is cheap)
 			await this.d.wal.whenDurable(this.d.wal.lastSeq)
