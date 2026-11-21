@@ -17,7 +17,7 @@ import { readSegmentedState } from '../labClPayoutStateStore'
 import { BASELINE_ROOT, DEPLOY_BLOCK, PATCHED_ROOT, checkPayments, quantiles, seedValidators, strip, synthetic, ticksOf, ticksOfBaseline, withWorld, parseEvents } from './harness.test'
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
-const FIELD_FACTOR = 100
+let FIELD_FACTOR = 100 // 1 real second = FIELD_FACTOR field seconds (1 for a real-time run)
 
 export type VariantResult = {
 	variant: 'baseline-df78e6b' | 'patched'
@@ -25,7 +25,7 @@ export type VariantResult = {
 	rep: number
 	runMs: number
 	latencyMs: number
-	waitMs: number
+	waitMs: number | 'real'
 	blockMs: number
 	freezeHeight: number
 	realtimeCursorEnd: number
@@ -45,8 +45,8 @@ export type VariantResult = {
 	historyCursorEnd: number
 }
 
-export async function measure(variant: VariantResult['variant'], root: string, rep: number, o: { runMs: number; latencyMs: number; waitMs: number; blockMs: number; every: number; outDir?: string }): Promise<VariantResult> {
-	return withWorld(`tp-${variant}`, root, { E2E_WAIT_MS: String(o.waitMs), E2E_RUN_MS: String(o.runMs) }, async (w) => {
+export async function measure(variant: VariantResult['variant'], root: string, rep: number, o: { runMs: number; latencyMs: number; waitMs: number | 'real'; blockMs: number; every: number; outDir?: string; tickMs?: number }): Promise<VariantResult> {
+	return withWorld(`tp-${variant}`, root, { E2E_WAIT_MS: String(o.waitMs), E2E_RUN_MS: String(o.runMs), ...(o.tickMs ? { CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MS: String(o.tickMs) } : {}) }, async (w) => {
 		seedValidators(w)
 		const syn = synthetic(w, o.every)
 		w.chain.head = DEPLOY_BLOCK + 4900 // 4 900 history blocks of backlog: the history line never finishes inside the run, the realtime line follows the growing head
@@ -116,19 +116,24 @@ async function cli(): Promise<void> {
 		return d
 	}
 	const out = arg('out')
-	const o = { runMs: Number(arg('runMs', '72000')), latencyMs: Number(arg('latencyMs', '20')), waitMs: Number(arg('waitMs', '600')), blockMs: Number(arg('blockMs', '60')), every: Number(arg('every', '3')), outDir: out }
+	FIELD_FACTOR = Number(arg('fieldFactor', '100'))
+	const waitArg = arg('waitMs', '600')
+	const o = { runMs: Number(arg('runMs', '72000')), latencyMs: Number(arg('latencyMs', '20')), waitMs: (waitArg === 'real' ? 'real' : Number(waitArg)) as number | 'real', tickMs: a.includes('--tickMs') ? Number(arg('tickMs')) : undefined, blockMs: Number(arg('blockMs', '60')), every: Number(arg('every', '3')), outDir: out }
 	const reps = Number(arg('reps', '1'))
 	fs.mkdirSync(out, { recursive: true })
 	const results: VariantResult[] = []
 	for (let rep = 1; rep <= reps; rep++) {
 		// alternate the order per repetition so a drifting machine load does not favour one variant
 		const order: [VariantResult['variant'], string][] = rep % 2 ? [['baseline-df78e6b', BASELINE_ROOT], ['patched', PATCHED_ROOT]] : [['patched', PATCHED_ROOT], ['baseline-df78e6b', BASELINE_ROOT]]
-		for (const [v, root] of order) {
-			console.log(`[throughput] rep ${rep} ${v} start ${new Date().toISOString()} uptime-load=${(await import('node:os')).loadavg().map((x) => x.toFixed(2)).join('/')}`)
-			results.push(await measure(v, root, rep, o))
+		const one = async ([v, root]: [VariantResult['variant'], string]): Promise<VariantResult> => {
+			console.log(`[throughput] rep ${rep} ${v} start ${new Date().toISOString()} load=${(await import('node:os')).loadavg().map((x) => x.toFixed(2)).join('/')}`)
+			return measure(v, root, rep, o)
 		}
+		// --parallel: both variants run at the same time on separate worlds (the same wall-clock window, so a drifting machine load hits both alike)
+		if (a.includes('--parallel')) results.push(...(await Promise.all(order.map(one))))
+		else for (const x of order) results.push(await one(x))
 	}
-	fs.writeFileSync(path.join(out, 'throughput.json'), JSON.stringify({ params: o, fieldFactor: FIELD_FACTOR, results }, null, 2) + '\n')
+	fs.writeFileSync(path.join(out, 'throughput.json'), JSON.stringify({ params: o, fieldFactor: FIELD_FACTOR, parallel: a.includes('--parallel'), startedAtUtc: new Date().toISOString(), results }, null, 2) + '\n')
 	const t = table(results)
 	fs.writeFileSync(path.join(out, 'throughput.txt'), t + '\n')
 	console.log(t)
