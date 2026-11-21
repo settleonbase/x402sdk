@@ -16,6 +16,7 @@ import {
 	WAL_HEADER_BYTES,
 	WAL_MAX_MERGE_SCALARS,
 	WalCorruptError,
+	WalMidCorruptionError,
 	WalWriter,
 	applyOps,
 	crc32c,
@@ -140,7 +141,7 @@ test('writer: events appended in one turn share one fsync; the promise resolves 
 		const got: number[] = []
 		const r = scanWal(dir, { afterSeq: 0, onEvent: (e) => got.push(e.seq) })
 		assert.deepEqual(got, [1, 2, 3, 4, 5])
-		assert.deepEqual(r, { droppedValidFrames: 0, applied: 5, lastSeq: 5, truncatedBytes: 0, segments: 1 })
+		assert.deepEqual(r, { applied: 5, lastSeq: 5, truncatedBytes: 0, segments: 1 })
 	} finally {
 		done(dir)
 	}
@@ -269,7 +270,7 @@ function writeSeg(dir: string, firstSeq: number, seqs: number[], extra?: Buffer)
 test('recovery: events at or below afterSeq are skipped; an empty log and a missing wal/ are fine', () => {
 	const dir = tmp()
 	try {
-		assert.deepEqual(scanWal(dir, { afterSeq: 0, onEvent: () => assert.fail('no events') }), { droppedValidFrames: 0, applied: 0, lastSeq: 0, truncatedBytes: 0, segments: 0 })
+		assert.deepEqual(scanWal(dir, { afterSeq: 0, onEvent: () => assert.fail('no events') }), { applied: 0, lastSeq: 0, truncatedBytes: 0, segments: 0 })
 		writeSeg(dir, 1, [1, 2, 3, 4, 5])
 		const got: number[] = []
 		const r = scanWal(dir, { afterSeq: 3, onEvent: (e) => got.push(e.seq) })
@@ -561,14 +562,11 @@ test('Z1: damage in the MIDDLE of the last segment with valid frames after it re
 		const got: number[] = []
 		const r = scanWal(dir, { afterSeq: 0, onEvent: (e) => got.push(e.seq) })
 		assert.deepEqual(got, [1, 2])
-		assert.equal(r.droppedValidFrames, 0)
 		assert.equal(r.truncatedBytes, starts[3]! - starts[2]!)
-		// the operator override: accepts the loss, truncates, and reports how many valid frames were dropped
+		// there is no override in scanWal any more (PM decision): the only way past mid-log damage is the offline audited repair command (labWalRepair.test.ts)
 		writeFileSync(f, damaged)
-		const r2 = scanWal(dir, { afterSeq: 0, onEvent: () => undefined, acceptMidCorruptionTruncation: true })
-		assert.equal(r2.droppedValidFrames, 2)
-		assert.equal(r2.lastSeq, 2)
-		assert.equal(readFileSync(f).length, starts[2]!)
+		assert.throws(() => scanWal(dir, { afterSeq: 0, onEvent: () => undefined, ...({ acceptMidCorruptionTruncation: true } as object) }), WalMidCorruptionError)
+		assert.deepEqual(readFileSync(f), damaged, 'an unknown option does not turn truncation on')
 		// a bad HEADER (not payload) in the middle is caught the same way
 		writeFileSync(f, intact)
 		const hdr = Buffer.from(intact)
@@ -591,7 +589,6 @@ test('Z1: a torn tail that merely ends the last segment is still truncated (no v
 		writeFileSync(f, Buffer.concat([good, junk]))
 		const res = scanWal(dir, { afterSeq: 0, onEvent: () => undefined })
 		assert.equal(res.truncatedBytes, 500)
-		assert.equal(res.droppedValidFrames, 0)
 		assert.deepEqual(readFileSync(f), good)
 	} finally {
 		done(dir)

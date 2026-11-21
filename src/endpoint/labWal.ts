@@ -75,6 +75,23 @@ export class WalCorruptError extends Error {
 	}
 }
 
+/**
+ * Damage in the middle of the last segment with valid frames after it (review Z1). scanWal ALWAYS refuses this and never truncates: the only way past it is the
+ * offline, one-shot, audited repair command (labWalRepair.ts), which needs a run id and a written approval and is never driven by an environment variable.
+ */
+export class WalMidCorruptionError extends WalCorruptError {
+	constructor(
+		message: string,
+		readonly file: string,
+		readonly badOffset: number,
+		readonly reason: string,
+		readonly laterFrameOffsets: number[]
+	) {
+		super(message)
+		this.name = 'WalMidCorruptionError'
+	}
+}
+
 // ------------------------------------------------------------------ frame codec
 export function encodeFrame(event: WalEvent, maxFrameBytes = WAL_DEFAULT_MAX_FRAME_BYTES): Buffer {
 	const payload = Buffer.from(JSON.stringify(event), 'utf8')
@@ -152,8 +169,6 @@ function fsyncDir(dir: string): void {
 
 // ------------------------------------------------------------------ recovery scan
 export type ScanResult = {
-	/** Valid frames found AFTER a bad one in the last segment and dropped because acceptMidCorruptionTruncation was set (0 normally). */
-	droppedValidFrames: number
 	/** Events handed to onEvent (seq > afterSeq). */
 	applied: number
 	/** Highest valid seq found in the log (0 when empty); may be <= afterSeq. */
@@ -197,8 +212,6 @@ export function scanWal(
 		onEvent: (e: WalEvent) => void
 		maxFrameBytes?: number
 		repair?: boolean
-		/** Operator override, default off: truncate even when valid frames follow the damage (they are dropped and counted in droppedValidFrames). */
-		acceptMidCorruptionTruncation?: boolean
 	}
 ): ScanResult {
 	const walDir = path.join(stateDir, WAL_DIR)
@@ -207,7 +220,6 @@ export function scanWal(
 	let applied = 0
 	let lastSeq = 0
 	let truncatedBytes = 0
-	let droppedValidFrames = 0
 	let expected: number | null = null
 	if (segs.length > 0 && segs[0]!.firstSeq > opts.afterSeq + 1) {
 		throw new WalCorruptError(`labWal: the first segment starts at seq ${segs[0]!.firstSeq} but the snapshot ends at seq ${opts.afterSeq}: events ${opts.afterSeq + 1}..${segs[0]!.firstSeq - 1} are missing`)
@@ -247,13 +259,15 @@ export function scanWal(
 			// Z1: a valid frame after the damage is mid-log corruption, not a torn tail: refuse (unless the operator accepts the loss)
 			const later = probeValidFramesAfter(buf, at, maxFrame)
 			if (later.length > 0) {
-				if (!opts.acceptMidCorruptionTruncation) {
-					throw new WalCorruptError(
-						`labWal: ${seg.file} offset ${at}: ${r.reason}, and ${later.length} valid frame(s) follow it (first at offset ${later[0]}). ` +
-							'That is damage in the middle of the log, not a torn tail: those frames may be acknowledged events. Refusing to start and not truncating.'
-					)
-				}
-				droppedValidFrames = later.length
+				throw new WalMidCorruptionError(
+					`labWal: ${seg.file} offset ${at}: ${r.reason}, and ${later.length} valid frame(s) follow it (first at offset ${later[0]}). ` +
+						'That is damage in the middle of the log, not a torn tail: those frames may be acknowledged events. Refusing to start and not truncating. ' +
+						'The only way forward is the offline audited repair command (labWalRepair) with a run id and the written approval.',
+					path.join(walDir, seg.file),
+					at,
+					r.reason,
+					later
+				)
 			}
 			truncatedBytes = buf.length - at
 			if (opts.repair !== false) {
@@ -269,7 +283,7 @@ export function scanWal(
 		}
 		expected = next
 	}
-	return { droppedValidFrames, applied, lastSeq, truncatedBytes, segments: segs.length }
+	return { applied, lastSeq, truncatedBytes, segments: segs.length }
 }
 
 // ------------------------------------------------------------------ writer with group commit
