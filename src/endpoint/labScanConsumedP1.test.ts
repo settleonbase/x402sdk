@@ -132,7 +132,7 @@ test('matrix: only "non-Lab key already consumed on chain" differs, and only in 
 	c.blocks = 1; c.from = B; c.through = B; c.added = newR.entries.length
 	assert.equal(
 		formatScanSummary('history', c),
-		'scan-summary line=history blocks=100-100 n=1 proxyWithdrawals=9 invalid=2 localHit=0 nonLab=2 labChainConsumed=1 nonSkim=1 nonActive=1 guardianBeneficiary=1 added=1 consumedDelta=2 fetchFailed=0 unconfirmed=0'
+		'scan-summary line=history blocks=100-100 n=1 proxyWithdrawals=9 invalid=2 localHit=0 nonLab=2 labChainConsumed=1 nonSkim=1 nonActive=1 guardianBeneficiary=1 added=1 consumedDelta=2 fetchFailed=0 unconfirmed=0 paused=0'
 	)
 })
 
@@ -243,7 +243,7 @@ test('scan-summary and flush-summary: integers only, no key, no pubkey, identity
 	assert.equal(formatScanSummary('history', c), null)
 	Object.assign(c, { blocks: 256, from: 2009263, through: 2009519, proxyWithdrawals: 4110, invalid: 0, nonLab: 708, labChainConsumed: 226, nonSkim: 1, nonActive: 2, guardianBeneficiary: 3, added: 3170, localHit: 0 })
 	const line = formatScanSummary('history', c)!
-	assert.match(line, /^scan-summary line=history blocks=2009263-2009519 n=256 proxyWithdrawals=4110 invalid=0 localHit=0 nonLab=708 labChainConsumed=226 nonSkim=1 nonActive=2 guardianBeneficiary=3 added=3170 consumedDelta=227 fetchFailed=0 unconfirmed=0$/)
+	assert.match(line, /^scan-summary line=history blocks=2009263-2009519 n=256 proxyWithdrawals=4110 invalid=0 localHit=0 nonLab=708 labChainConsumed=226 nonSkim=1 nonActive=2 guardianBeneficiary=3 added=3170 consumedDelta=227 fetchFailed=0 unconfirmed=0 paused=0$/)
 	assert.doesNotMatch(line, /0x/)
 	const f = newLabFlushCounters()
 	assert.equal(formatFlushSummary(f, 0), null)

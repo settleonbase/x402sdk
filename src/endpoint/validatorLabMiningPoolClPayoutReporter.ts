@@ -62,7 +62,6 @@ import {
 	assertNoSkippedHistory,
 	resolveConsumedKeysCap,
 	shouldStopAfterSettled,
-	pruneOrder,
 	assertCursorMonotonic,
 	assertNoRemigration,
 	historyHeldFor,
@@ -83,6 +82,8 @@ import {
 	formatFlushSummary,
 	type LabScanCounters,
 } from './labScanSummary'
+import { planPrune, consumedArchiveDir, appendConsumedArchive } from './labConsumedPrune'
+import { resolvePendingHighWater, decideLinePauses } from './labBackpressure'
 import {
 	inspectSegmentedDir,
 	legacyStateFileExists,
@@ -268,6 +269,9 @@ let labMiningPool = ''
 let labManifestMtime = 0
 let labPhaseLogged = false
 let labSessionState: LabClPayoutState | undefined
+/** Back-pressure state of the two scan lines (labBackpressure.ts). */
+let labHistoryPaused = false
+let labRealtimePaused = false
 /** Entries marked consumed by settled batches since the process started (flush-summary settledEntries is a delta of this). */
 let labSettledEntriesTotal = 0
 /** Single-writer lock on the v2 state dir, held from start until process exit. */
@@ -428,7 +432,7 @@ function resolveReviewHoldBeforeBlock(): number | null {
  * pending unless an explicit release is set. Realtime lines are not held here.
  */
 function historyReviewHeld(state: LabClPayoutState): boolean {
-	// The cap no longer holds history: oldest consumed keys are pruned instead (see pruneOrder).
+	// The cap no longer holds history: oldest consumed keys are pruned instead (see labConsumedPrune.planPrune: soft cap, prune to 90%, cold archive).
 	return historyHeldFor(
 		Object.keys(state.consumedEventKeys || {}).length,
 		resolveConsumedKeysPersistMax(),
@@ -436,12 +440,25 @@ function historyReviewHeld(state: LabClPayoutState): boolean {
 	)
 }
 
-function pruneConsumedEventKeys(state: LabClPayoutState): number {
+export function pruneConsumedEventKeys(state: LabClPayoutState): number {
 	const max = resolveConsumedKeysPersistMax()
 	const keys = Object.keys(state.consumedEventKeys || {})
 	if (keys.length <= max) return 0
 	const pendingKeys = new Set((state.pending || []).map((e) => e.eventKey.toLowerCase()))
-	const drop = new Set(pruneOrder(keys, pendingKeys, max))
+	const dropList = planPrune(keys, pendingKeys, max)
+	if (!dropList.length) return 0
+	// The dropped keys go to the cold archive first. If that fails nothing is pruned this time (retried at the next write).
+	try {
+		appendConsumedArchive(consumedArchiveDir(resolveStateFile()), dropList)
+	} catch (err: unknown) {
+		logger(
+			Colors.red(
+				`[labMiningPoolClPayout] ALERT consumed archive failed (${dropList.length} keys not archived, nothing pruned): ${(err as Error)?.message ?? err}`
+			)
+		)
+		return 0
+	}
+	const drop = new Set(dropList)
 	const next: Record<string, true> = {}
 	for (const k of keys) if (!drop.has(k)) next[k] = true
 	state.consumedEventKeys = next
@@ -1484,9 +1501,16 @@ async function labPayoutTick(): Promise<void> {
 		const chunk = resolveChunkBlocks()
 		const chunksPerTick = resolveChunksPerTick()
 
+		// Back-pressure: the pending pool must stay below its memory ceiling. A paused line only postpones scanning.
+		const highWater = resolvePendingHighWater()
+		const pauses = decideLinePauses({ history: labHistoryPaused, realtime: labRealtimePaused }, pending.size, highWater)
+		labHistoryPaused = pauses.history
+		labRealtimePaused = pauses.realtime
+
 		// 1) Realtime line first (tip-fill) — reserved capacity for latency.
 		const rtCounters = newLabScanCounters()
-		{
+		if (labRealtimePaused) rtCounters.paused = true
+		if (!labRealtimePaused) {
 			let windows = 0
 			while (windows < chunksPerTick) {
 				const w = nextRealtimeWindow(state.realtimeCursor ?? freeze.height, freeze.height, liveHead, chunk)
@@ -1510,7 +1534,8 @@ async function labPayoutTick(): Promise<void> {
 
 		// 2) History line keeps advancing toward H (must not stall forever behind realtime).
 		const hiCounters = newLabScanCounters()
-		{
+		if (labHistoryPaused) hiCounters.paused = true
+		if (!labHistoryPaused) {
 			let windows = 0
 			while (windows < chunksPerTick) {
 				const w = nextHistoryWindow(state.historyCursor ?? floor - 1, freeze.height, chunk)

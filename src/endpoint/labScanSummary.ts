@@ -38,6 +38,8 @@ export type LabScanCounters = {
 	through: number | null
 	fetchFailed: boolean
 	unconfirmed: boolean
+	/** The line did not scan this tick because the pending pool is at its back-pressure level. */
+	paused: boolean
 }
 
 export function newLabScanCounters(): LabScanCounters {
@@ -56,6 +58,7 @@ export function newLabScanCounters(): LabScanCounters {
 		through: null,
 		fetchFailed: false,
 		unconfirmed: false,
+		paused: false,
 	}
 }
 
@@ -63,15 +66,15 @@ export function scanConsumedDelta(c: LabScanCounters): number {
 	return c.labChainConsumed + c.nonSkim
 }
 
-/** One line per scan line and tick. Empty ticks (no block processed, no failure) print nothing. */
+/** One line per scan line and tick. Empty ticks (no block processed, no failure, not paused) print nothing. */
 export function formatScanSummary(line: LabScanLine, c: LabScanCounters): string | null {
-	if (c.blocks === 0 && !c.fetchFailed && !c.unconfirmed) return null
+	if (c.blocks === 0 && !c.fetchFailed && !c.unconfirmed && !c.paused) return null
 	return (
 		`scan-summary line=${line} blocks=${c.from ?? '-'}-${c.through ?? '-'} n=${c.blocks} ` +
 		`proxyWithdrawals=${c.proxyWithdrawals} invalid=${c.invalid} localHit=${c.localHit} nonLab=${c.nonLab} ` +
 		`labChainConsumed=${c.labChainConsumed} nonSkim=${c.nonSkim} nonActive=${c.nonActive} ` +
 		`guardianBeneficiary=${c.guardianBeneficiary} added=${c.added} consumedDelta=${scanConsumedDelta(c)} ` +
-		`fetchFailed=${c.fetchFailed ? 1 : 0} unconfirmed=${c.unconfirmed ? 1 : 0}`
+		`fetchFailed=${c.fetchFailed ? 1 : 0} unconfirmed=${c.unconfirmed ? 1 : 0} paused=${c.paused ? 1 : 0}`
 	)
 }
 
