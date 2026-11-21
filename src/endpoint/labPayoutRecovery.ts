@@ -48,6 +48,7 @@ export function recoverPayoutState(
 		/**
 		 * How the snapshot is loaded. 'stream' (default, P2d M3): every entry goes straight into the layered structures, no whole-state copies. 'whole': the original loader that reads the whole
 		 * state into arrays and a Record first; kept so that the two can be compared on the same directories (differential tests) and as a fallback for offline tools.
+		 * It can be deleted (with labStreamRecovery.test.ts's differential part) once the streaming loader has run in production for a release cycle and no offline tool passes 'whole'.
 		 */
 		loader?: 'stream' | 'whole'
 	} = {}
@@ -108,6 +109,8 @@ export function recoverPayoutState(
 		const loaded = streamCommittedForRecovery(stateDir, sink)
 		manifest = loaded.manifest
 		snapshotSeq = loaded.snapshotSeq
+		// the seq was computed twice (before the entries are read, to create the core, and by the store afterwards): they must agree
+		if (snapshotSeq !== seq) throw new Error(`labPayoutRecovery: snapshot seq ${seq} (manifest read before the entries) != ${snapshotSeq} (after); the manifest changed while it was read`)
 		core = c!
 	}
 	let replayed = 0
