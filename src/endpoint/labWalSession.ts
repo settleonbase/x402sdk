@@ -142,7 +142,7 @@ export async function openWalSession(opts: {
 		handle.exitTick()
 	}
 	const snapshotOpts = opts.snapshot ?? {}
-	const scheduler = new WalSnapshotScheduler({ core: rec.core, wal, stateDir: opts.stateDir, log: opts.log, ...snapshotOpts })
+	const scheduler = new WalSnapshotScheduler({ core: rec.core, wal, stateDir: opts.stateDir, log: opts.log, quiet: () => !handle.hasUncommittedWrites(), ...snapshotOpts })
 	scheduler.start()
 	return { handle, core: rec.core, wal, scheduler, snapshotOpts, sessionBackfillFloor, settledBatchCount: (handle.scalar('settledBatchCount') as number | undefined) ?? 0, recovery: { snapshotSeq: rec.snapshotSeq, replayed: rec.replayed, warnings: rec.warnings } }
 }

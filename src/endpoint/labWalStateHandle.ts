@@ -141,6 +141,16 @@ export class WalStateHandle<E extends PendingLike, S extends object> extends Han
 		super.closeScope()
 	}
 
+	/**
+	 * K4: true when something applied to the core is NOT yet in the log (buffered adds/dels/scalars, or an in-flight record changed in place). A snapshot freezes the core as it is, so the scheduler
+	 * freezes only when this is false: otherwise the snapshot could contain a write whose event a crash would lose.
+	 */
+	hasUncommittedWrites(): boolean {
+		if (this.buf.length > 0 || Object.keys(this.patch).length > 0 || this.dels.size > 0) return true
+		if (this.live !== undefined && JSON.stringify(this.live) !== JSON.stringify(this.d.core.getInFlight())) return true
+		return false
+	}
+
 	// ------------------------------------------------------------------ durability
 	private pendingOps(): WalOp[] {
 		const ops = this.buf.slice()

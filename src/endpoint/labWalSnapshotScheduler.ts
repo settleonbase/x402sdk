@@ -31,6 +31,11 @@ export type SchedulerOptions = {
 	log: (line: string) => void
 	intervalMs?: number
 	walMaxBytes?: number
+	/**
+	 * K4 quiet gate: returns true when nothing applied to the state is still uncommitted to the log. A snapshot is only frozen while it is true (checked and frozen in the same synchronous step, so
+	 * nothing can interleave); otherwise this poke is skipped and the next poke (heartbeat 1-30 s, tick end) tries again. Absent = always quiet (the unit tests that drive the core directly).
+	 */
+	quiet?: () => boolean
 	/** ALERT when no snapshot committed for this many intervals (default 3). */
 	staleIntervals?: number
 	consumedCap?: number
@@ -51,6 +56,8 @@ export type SchedulerStats = {
 	archiveFailed: number
 	/** The snapshot committed but trimming the log failed (K1); bookkeepingFailed: finishSnapshot(true) threw after the commit. */
 	truncateFailed: number
+	/** Pokes that found a snapshot due but uncommitted writes on the handle (K4): skipped, retried at the next poke. */
+	deferredNotQuiet: number
 	bookkeepingFailed: number
 	staleAlerts: number
 	lastCommittedAt: number | null
@@ -71,7 +78,7 @@ export function walTotalBytes(stateDir: string): number {
 }
 
 export class WalSnapshotScheduler {
-	readonly stats: SchedulerStats = { started: 0, committed: 0, failed: 0, skippedBusy: 0, archiveFailed: 0, truncateFailed: 0, bookkeepingFailed: 0, staleAlerts: 0, lastCommittedAt: null, lastError: null }
+	readonly stats: SchedulerStats = { started: 0, committed: 0, failed: 0, skippedBusy: 0, archiveFailed: 0, truncateFailed: 0, deferredNotQuiet: 0, bookkeepingFailed: 0, staleAlerts: 0, lastCommittedAt: null, lastError: null }
 	private cur: Promise<void> | null = null
 	private stopped = false
 	private readonly intervalMs: number
@@ -114,7 +121,7 @@ export class WalSnapshotScheduler {
 			if (age > limit && t - this.lastStaleAlertAt >= Math.max(STALE_FLOOR_MS, this.intervalMs)) {
 				this.lastStaleAlertAt = t
 				this.stats.staleAlerts++
-				this.o.log(`[labMiningPoolClPayout] ALERT no snapshot has committed for ${Math.round(age / 1000)}s (more than ${this.o.staleIntervals ?? 3} intervals of ${Math.round(this.intervalMs / 1000)}s): committed=${this.stats.committed} failed=${this.stats.failed} truncateFailed=${this.stats.truncateFailed} skippedBusy=${this.stats.skippedBusy} inFlight=${this.cur !== null}; the log keeps growing`)
+				this.o.log(`[labMiningPoolClPayout] ALERT no snapshot has committed for ${Math.round(age / 1000)}s (more than ${this.o.staleIntervals ?? 3} intervals of ${Math.round(this.intervalMs / 1000)}s): committed=${this.stats.committed} failed=${this.stats.failed} truncateFailed=${this.stats.truncateFailed} skippedBusy=${this.stats.skippedBusy} deferredNotQuiet=${this.stats.deferredNotQuiet} inFlight=${this.cur !== null}; the log keeps growing`)
 			}
 		} catch {
 			/* an alert must never break the daemon */
@@ -150,6 +157,10 @@ export class WalSnapshotScheduler {
 			}
 			const reason = this.due()
 			if (!reason) return
+			if (this.o.quiet && !this.o.quiet() && !this.cur) {
+				this.stats.deferredNotQuiet++
+				return
+			}
 			if (this.cur) {
 				this.stats.skippedBusy++
 				if (this.stats.skippedBusy === 1 || this.stats.skippedBusy % 10 === 0) {

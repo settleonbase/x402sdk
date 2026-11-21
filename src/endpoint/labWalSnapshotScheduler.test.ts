@@ -404,3 +404,119 @@ test('K3: no committed snapshot for more than 3 intervals is an ALERT (once per 
 		await w.done()
 	}
 })
+
+// ---- K4: a snapshot is only frozen while the handle has no uncommitted writes
+import { cpSync } from 'node:fs'
+
+/** The committed snapshot ALONE (the log removed): what a restart would start from before it replays anything. */
+function snapshotOnly(stateDir: string, dir: string): LabPayoutStateCore {
+	const copy = path.join(dir, `snap-only-${Math.random().toString(36).slice(2)}`)
+	cpSync(stateDir, copy, { recursive: true })
+	fs.rmSync(path.join(copy, 'wal'), { recursive: true, force: true })
+	return recoverPayoutState(copy, { readOnly: true }).core
+}
+
+test('K4 (the reviewer\'s probe): with an uncommitted pendingAdd and cursor on the handle the scheduler does not freeze; after the commit it does, and the snapshot holds exactly the committed state. Without the gate the same snapshot would hold the uncommitted write (so the gate is what protects)', async () => {
+	for (const gated of [true, false]) {
+		const w = await world()
+		try {
+			await fill(w.h, 1, 4)
+			w.h.pendingAdd([entry(100)]) // not committed
+			w.h.setScalar('historyCursor', 9999) // not committed
+			const s = w.mk(gated ? { quiet: () => !w.h.hasUncommittedWrites() } : {})
+			w.clock.t += 600_000
+			s.poke()
+			if (gated) {
+				assert.equal(s.stats.started, 0, 'not frozen while uncommitted writes exist')
+				assert.equal(s.stats.deferredNotQuiet, 1)
+				await w.h.commit('scan')
+				s.poke()
+				await w.settle(s)
+				assert.equal(s.stats.committed, 1)
+				const snap = snapshotOnly(w.stateDir, w.dir)
+				assert.equal(snap.pendingHas(key(100)), true, 'now committed, so it is in the snapshot')
+				assert.equal(snap.getScalar('historyCursor'), 9999)
+			} else {
+				await w.settle(s)
+				const snap = snapshotOnly(w.stateDir, w.dir)
+				assert.equal(snap.pendingHas(key(100)), true, 'control: without the gate the snapshot DOES contain the uncommitted write')
+				assert.equal(w.core.lastAppliedSeq, 4, 'although no event for it exists in the log')
+				await w.h.commit('scan')
+			}
+		} finally {
+			await w.done()
+		}
+	}
+})
+
+test('K4: an in-flight record changed in place (rec.hash = ...) without a commit is also "not quiet"', async () => {
+	const w = await world()
+	try {
+		w.h.setScalar('inFlightWithdraw', { idempotencyKey: 'k', eventKeys: [key(1)] } as never)
+		await w.h.commit('intent')
+		assert.equal(w.h.hasUncommittedWrites(), false)
+		const rec = w.h.scalar('inFlightWithdraw') as unknown as Record<string, unknown>
+		rec.hash = hex32(0xabc) // the lifecycle does this, then commits 'hash'
+		assert.equal(w.h.hasUncommittedWrites(), true)
+		const s = w.mk({ quiet: () => !w.h.hasUncommittedWrites() })
+		w.clock.t += 600_000
+		s.poke()
+		assert.equal(s.stats.started, 0)
+		await w.h.commit('hash')
+		assert.equal(w.h.hasUncommittedWrites(), false)
+		s.poke()
+		await w.settle(s)
+		assert.equal(s.stats.committed, 1)
+		assert.equal((snapshotOnly(w.stateDir, w.dir).getInFlight() as Record<string, unknown>).hash, hex32(0xabc))
+	} finally {
+		await w.done()
+	}
+})
+const hex32 = (n: number): string => `0x${n.toString(16).padStart(64, '0')}`
+
+test('K4 randomized: pokes land between random synchronous writes and awaited commits; every snapshot is frozen on a committed state (checked at the freeze) and equals the state the snapshot alone gives back; the log + snapshot always give the live state at the end', async () => {
+	const w = await world(900)
+	try {
+		const frozen: { digest: string; walSeq: number }[] = []
+		const realFreeze = w.core.freezeForSnapshot.bind(w.core)
+		w.core.freezeForSnapshot = (() => {
+			assert.equal(w.h.hasUncommittedWrites(), false, 'the freeze happened on a state with uncommitted writes')
+			const src = realFreeze()
+			frozen.push({ digest: w.logical(w.core), walSeq: src.walSeq })
+			return src
+		}) as typeof w.core.freezeForSnapshot
+		const mismatches: string[] = []
+		const s = w.mk({
+			quiet: () => !w.h.hasUncommittedWrites(),
+			onFinished: (r) => {
+				if (!r.committed) return
+				const f = frozen.find((x) => x.walSeq === r.walSeq)
+				if (!f) return void mismatches.push(`no freeze record for walSeq ${r.walSeq}`)
+				if (w.logical(snapshotOnly(w.stateDir, w.dir)) !== f.digest) mismatches.push(`snapshot at walSeq ${r.walSeq} differs from the committed state at its freeze`)
+			},
+		})
+		let seed = 777
+		const rnd = (): number => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 0x100000000)
+		let next = 1
+		for (let step = 0; step < 300; step++) {
+			const x = rnd()
+			if (x < 0.35) w.h.pendingAdd([entry(next++)])
+			else if (x < 0.5) w.h.setScalar('historyCursor', step)
+			else if (x < 0.6) w.h.consumedAdd(key(5000 + step))
+			else if (x < 0.75) await w.h.commit('scan')
+			else {
+				w.clock.t += 600_000
+				s.poke() // may start a snapshot or be deferred; the write steps above run while it is in flight
+				if (rnd() < 0.5) await turn(2)
+			}
+		}
+		await w.h.commit('scalars')
+		await w.settle(s)
+		assert.ok(s.stats.committed >= 3 && s.stats.deferredNotQuiet >= 1, `committed=${s.stats.committed} deferred=${s.stats.deferredNotQuiet}: both the deferral and snapshots really happened`)
+		assert.equal(frozen.length, s.stats.started)
+		assert.deepEqual(mismatches, [], 'every snapshot alone equals the committed state it was frozen on')
+		assert.equal(w.logical(recoverPayoutState(w.stateDir, { readOnly: true }).core), w.logical(w.core), 'snapshot + log give the live state')
+	} finally {
+		await w.done()
+	}
+})
