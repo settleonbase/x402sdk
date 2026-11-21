@@ -1524,6 +1524,12 @@ function resolveSnapshotConfig(): SnapshotConfig {
 	}
 }
 
+/** Test seam: pause the WAL session open this many ms (default none) so the stop-while-opening race is hit deterministically. */
+function resolveWalOpenPauseMs(): number | undefined {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_WAL_OPEN_PAUSE_MS)
+	return Number.isFinite(n) && n > 0 ? Math.min(5000, Math.floor(n)) : undefined
+}
+
 /** Test/ops tunable: refuse (fatally) any single log event above this many bytes; unset = the log's 16 MiB. */
 function resolveWalMaxFrameBytes(): number | undefined {
 	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_WAL_MAX_FRAME_BYTES)
@@ -1540,6 +1546,7 @@ async function startWalMode(): Promise<void> {
 			log: walLog,
 			maxFrameBytes: resolveWalMaxFrameBytes(),
 			snapshot: resolveSnapshotConfig(),
+			openPauseMs: resolveWalOpenPauseMs(),
 		})
 		sessionBackfillFloor = labWalSession.sessionBackfillFloor
 		if (labStopRequested) {

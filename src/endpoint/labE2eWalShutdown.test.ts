@@ -184,12 +184,12 @@ test('s12 spec on the real daemon: after the scheduled prune and a restart the p
 	assert.equal(r.logical!.consumed.includes(realKey), false, 'the real key really is gone from the consumed set')
 })
 
-test('stop requested while the WAL session is still opening: the start does not begin ticking and the shutdown still ends in the version 2 layout (race-dependent timing, invariants asserted either way)', { timeout: 300_000 }, async () => {
+test('stop requested while the WAL session is still opening (deterministic: the open is paused 500 ms): in all 6 runs the start does not begin ticking, nothing is sent, and the shutdown ends in the version 2 layout', { timeout: 300_000 }, async () => {
 	const lines: string[] = []
 	const r = await runScenario(
 		{
 			name: 'stop_during_open',
-			env: { CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_BATCH_ENTRIES: '10' },
+			env: { CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_BATCH_ENTRIES: '10', CONET_LAB_MINING_POOL_CL_PAYOUT_WAL_OPEN_PAUSE_MS: '500' }, // the pause makes the SIGTERM land inside the opening session on every run
 			body: async (ctx) => {
 				seedValidators(ctx)
 				seedWithdrawals(ctx)
@@ -212,7 +212,8 @@ test('stop requested while the WAL session is still opening: the start does not 
 	for (const e of r.exits) assert.equal(e.code, 0, `every run ended with exit 0: ${JSON.stringify(r.exits)}`)
 	assert.deepEqual(r.layout, { manifestVersion: 2, walSegments: 0 })
 	const stoppedEarly = r.logs.flat().filter((l) => /stop requested while the WAL session was opening/.test(l)).length
-	process.stderr.write(`stop_during_open: ${stoppedEarly} of 6 runs hit the race window\n`)
+	assert.equal(stoppedEarly, 6, 'the opening pause makes every run take the stop-while-opening branch')
+	assert.equal(r.signerRequests.length, 0, 'no tick ran, so nothing was sent')
 	assert.equal(r.unknownRpcMethods.length, 0)
 	for (const [k, n] of Object.entries(r.paymentsPerEventKey)) assert.ok(n <= 1, `event key ${k} paid ${n} times`)
 })

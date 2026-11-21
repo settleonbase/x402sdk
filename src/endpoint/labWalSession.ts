@@ -90,6 +90,8 @@ export async function openWalSession(opts: {
 	/** Refuse (fatally) any single event above this size; default the log's 16 MiB. Tunable so the over-limit stop can be exercised end to end. */
 	maxFrameBytes?: number
 	snapshot?: SnapshotConfig
+	/** Test seam (default 0 = none): pause this long after recovery and before the start-up alignment, so a stop request can be made to arrive while the session is opening, every time. */
+	openPauseMs?: number
 }): Promise<WalSession> {
 	let status = inspectSegmentedDir(opts.stateDir)
 	const markerPath = path.join(opts.stateDir, WAL_BOOTSTRAP_MARKER)
@@ -117,6 +119,7 @@ export async function openWalSession(opts: {
 	const handle = new WalStateHandle<SkimEntry, LabClPayoutState>({ core: rec.core, wal, log: opts.log })
 	opts.log(`[labMiningPoolClPayout] WAL mode: snapshotSeq=${rec.snapshotSeq} replayed=${rec.replayed} pending=${rec.core.pendingSize} consumed=${rec.core.consumedSize} nextSeq=${rec.writerLastSeq + 1} snapshotEveryMs=${opts.snapshot?.intervalMs ?? 'default(600000)'} walMaxBytes=${opts.snapshot?.walMaxBytes ?? 'default(268435456)'} consumedCap=${opts.snapshot?.consumedCap ?? 'none'}`)
 
+	if (opts.openPauseMs && opts.openPauseMs > 0) await new Promise((r) => setTimeout(r, opts.openPauseMs))
 	// start-up alignment, through the handle (the legacy path did this on its in-memory state). S4: it happens before the first tick; enterTick makes that an assertion (no tick may be running).
 	handle.enterTick()
 	let sessionBackfillFloor = opts.scanFloor
