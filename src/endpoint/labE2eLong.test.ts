@@ -46,13 +46,13 @@ function buildWorld(ctx: Ctx, seed: number): World {
 	return { expected, totalGwei: total }
 }
 
-type Faults = { acksLostTotal: number; acksLostAfterRun2: number; receiptKills: number }
+type Faults = { acksLostTotal: number; acksLostAfterRun2: number; emptyReceiptsAfterRun3: number; emptyReceiptsTotal: number; duplicateSends: number; getTransactionCalls: number }
 type Outcome = { result: ScenarioResult; world: World; finalLogical: ReturnType<typeof digestLogical>; faults: Faults }
 
 async function runMode(seed: number, walMode: boolean, invariantC: boolean): Promise<Outcome> {
 	let world!: World
 	let finalLogical: ReturnType<typeof digestLogical> = null
-	let faults: Faults = { acksLostTotal: 0, acksLostAfterRun2: 0, receiptKills: 0 }
+	let faults: Faults = { acksLostTotal: 0, acksLostAfterRun2: 0, emptyReceiptsAfterRun3: 0, emptyReceiptsTotal: 0, duplicateSends: 0, getTransactionCalls: 0 }
 	const heads = [400, 460, 520, 580, 640, 700, 700, 700, 700, 700, 700, 700, 700, 700, 700, 700]
 	const s: Scenario = {
 		name: `long_${seed}_${walMode ? 'wal' : 'legacy'}${invariantC ? '_c' : ''}`,
@@ -106,7 +106,7 @@ async function runMode(seed: number, walMode: boolean, invariantC: boolean): Pro
 				return 'mined'
 			}
 			await ctx.run({ ticks: 4, timeoutMs: 120_000 })
-			const receiptKills = killedOnReceipt
+			const emptyAfterRun3 = ctx.chain.emptyReceipts
 			// run 4 (same process, no kill): a lost ACK again, resolved in-process by the idempotency key, and a late receipt (first ask of every transaction empty) resolved by re-asking
 			let n4 = 0
 			let armed4 = false
@@ -129,7 +129,7 @@ async function runMode(seed: number, walMode: boolean, invariantC: boolean): Pro
 			// run 5: clean, to the end
 			ctx.chain.receiptRule = () => 'mined'
 			await ctx.run({ ticks: 8, timeoutMs: 180_000 })
-			faults = { acksLostTotal: ctx.signer.acksLost, acksLostAfterRun2: lostAfterRun2, receiptKills }
+			faults = { acksLostTotal: ctx.signer.acksLost, acksLostAfterRun2: lostAfterRun2, emptyReceiptsAfterRun3: emptyAfterRun3, emptyReceiptsTotal: ctx.chain.emptyReceipts, duplicateSends: ctx.signer.duplicateSends, getTransactionCalls: ctx.signer.getTransactionCalls }
 			finalLogical = digestLogical(ctx.stateDir)
 		},
 	}
@@ -153,7 +153,11 @@ function reconcile(o: Outcome, label: string): void {
 	for (const i of [0, 1, 2]) assert.equal(result.exits[i]!.signal, 'SIGKILL', `${label}: run ${i + 1} was killed by kill -9`)
 	assert.ok(o.faults.acksLostAfterRun2 >= 1, `${label}: the ACK was really lost across a restart (run 2): ${o.faults.acksLostAfterRun2}`)
 	assert.ok(o.faults.acksLostTotal >= 2, `${label}: the ACK was really lost again in-process (run 4): ${o.faults.acksLostTotal} in total`)
-	assert.equal(o.faults.receiptKills, 1, `${label}: the process was killed at the first empty receipt ask`)
+	// counted on the fake chain / fake signer side, not by the hooks: empty receipt answers (run 3 across a restart, run 4 in-process), and proof that the recovery paths were taken afterwards
+	assert.ok(o.faults.emptyReceiptsAfterRun3 >= 1, `${label}: the receipt was really asked and answered empty at the kill (run 3): ${o.faults.emptyReceiptsAfterRun3}`)
+	assert.ok(o.faults.emptyReceiptsTotal >= 2, `${label}: late receipts really happened again in-process (run 4): ${o.faults.emptyReceiptsTotal} in total`)
+	assert.ok(o.faults.duplicateSends + o.faults.getTransactionCalls >= 1, `${label}: the daemon really recovered a recorded-but-unacknowledged send through the signer (duplicate sends ${o.faults.duplicateSends}, lookups ${o.faults.getTransactionCalls})`)
+	process.stderr.write(`faults ${label}: kill -9 runs=${[0, 1, 2].map((i) => result.exits[i]!.signal).join('/')}, acksLost=${o.faults.acksLostTotal} (after run 2: ${o.faults.acksLostAfterRun2}), emptyReceipts=${o.faults.emptyReceiptsTotal} (after run 3: ${o.faults.emptyReceiptsAfterRun3}), duplicateSends=${o.faults.duplicateSends}, signerLookups=${o.faults.getTransactionCalls}\n`)
 	assert.ok(o.finalLogical, label)
 	assert.equal(o.finalLogical!.pending.length, 0, `${label}: nothing left pending`)
 	for (const k of world.expected.keys()) assert.ok(o.finalLogical!.consumed.includes(k), `${label}: ${k} consumed`)

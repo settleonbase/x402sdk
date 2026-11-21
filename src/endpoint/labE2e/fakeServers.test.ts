@@ -55,6 +55,8 @@ export class FakeChain {
 	/** What a receipt request returns for a hash: decided by a rule so scenarios can delay, lose or revert. */
 	receiptRule: (tx: SentTx, askCount: number) => 'mined' | 'none' | 'reverted' = () => 'mined'
 	receiptAsks = new Map<string, number>()
+	/** Counted on the chain side (not by a test hook): receipt asks answered with "no receipt yet". */
+	emptyReceipts = 0
 	rpcLog: string[] = []
 	unknownMethods: string[] = []
 	/** Called on every request (fault injection: delay, kill, 5xx). Return a status to short-circuit. */
@@ -152,7 +154,10 @@ export class FakeChain {
 				const ask = (this.receiptAsks.get(h) ?? 0) + 1
 				this.receiptAsks.set(h, ask)
 				const rule = this.receiptRule(tx, ask)
-				if (rule === 'none') return null
+				if (rule === 'none') {
+					this.emptyReceipts++
+					return null
+				}
 				const status: 0 | 1 = rule === 'reverted' ? 0 : 1
 				tx.status = status
 				tx.mined = true
@@ -253,6 +258,9 @@ export class FakeSigner {
 	mode: 'ok' | 'reject' | 'lose-ack' | 'down' = 'ok'
 	/** How many times a connection was REALLY dropped without an answer in 'lose-ack' mode (a hook that sets the mode too late or resets it too early shows up as 0). */
 	acksLost = 0
+	/** Counted on the signer side: a send repeated with an idempotency key it already recorded (answered with the original hash), and signer_getTransaction lookups. */
+	duplicateSends = 0
+	getTransactionCalls = 0
 	/** Fault injection hooks, called before / after the signer records a send. */
 	beforeRecord?: (tx: Record<string, unknown>) => void
 	afterRecord?: (tx: Record<string, unknown>, hash: string) => void
@@ -286,6 +294,7 @@ export class FakeSigner {
 			}
 			if (body.method === 'signer_getAddress') return reply(SIGNER_ADDRESS)
 			if (body.method === 'signer_getTransaction') {
+				this.getTransactionCalls++
 				const key = String((body.params as { idempotencyKey?: string }).idempotencyKey)
 				const row = this.byKey.get(key)
 				return reply(row ? { hash: row.hash, status: this.chain.sent.get(row.hash)?.mined ? 'mined' : 'sent' } : null)
@@ -297,6 +306,7 @@ export class FakeSigner {
 				const prior = this.byKey.get(key)
 				if (prior) {
 					if (prior.fingerprint !== fingerprint) return fail('idempotency key already used for a different request')
+					this.duplicateSends++
 					return reply({ hash: prior.hash, duplicate: true })
 				}
 				if (this.mode === 'reject') return fail('POLICY_DENIED: rejected by the fake signer')
