@@ -27,7 +27,7 @@ export const PROD_HEAP_LIMIT_BYTES = 1_660_944_384
 
 const GC_RE = /(Scavenge|Mark-Compact|Mark-sweep)[^\d]*([\d.]+) \(([\d.]+)\) -> ([\d.]+) \(([\d.]+)\) MB, (?:pooled: [\d.]+ MB, )?([\d.]+) \/ ([\d.]+) ms/
 
-export type Phase = { peakGcBeforeMiB: number; peakSampleMiB: number; maxPauseMs: number; maxMarkCompactPauseMs: number; markCompactCount: number; gcCount: number; startMs: number | null; endMs: number | null; peakRssMiB: number }
+export type Phase = { peakGcBeforeMiB: number; /** the live heap right AFTER a full (Mark-Compact) collection: the quantity V8 aborts on when it no longer fits under the limit */ peakMcAfterMiB: number; peakSampleMiB: number; maxPauseMs: number; maxMarkCompactPauseMs: number; markCompactCount: number; gcCount: number; startMs: number | null; endMs: number | null; peakRssMiB: number }
 export type RunAnalysis = {
 	exit: { code: number | null; signal: string | null }
 	oom: boolean
@@ -39,9 +39,11 @@ export type RunAnalysis = {
 	flush: Phase
 	tickDurationsMs: number[]
 	ticksCompleted: number
+	/** every full collection: time since start (ms), heap before and after (MiB), pause (ms) */
+	mcEvents: { t: number; before: number; after: number; pauseMs: number }[]
 }
 
-const emptyPhase = (): Phase => ({ peakGcBeforeMiB: 0, peakSampleMiB: 0, maxPauseMs: 0, maxMarkCompactPauseMs: 0, markCompactCount: 0, gcCount: 0, startMs: null, endMs: null, peakRssMiB: 0 })
+const emptyPhase = (): Phase => ({ peakGcBeforeMiB: 0, peakMcAfterMiB: 0, peakSampleMiB: 0, maxPauseMs: 0, maxMarkCompactPauseMs: 0, markCompactCount: 0, gcCount: 0, startMs: null, endMs: null, peakRssMiB: 0 })
 
 /** Reads the raw output lines of one child run (reporter log lines, V8 --trace-gc lines, the E2E_HEAP samples) in the order they were written. */
 export function analyseRun(lines: string[], exit: { code: number | null; signal: string | null }): RunAnalysis {
@@ -58,6 +60,7 @@ export function analyseRun(lines: string[], exit: { code: number | null; signal:
 	let maxRssBytes: number | null = null
 	let heapLimit: number | null = null
 	let oom = exit.signal === 'SIGABRT'
+	const mcEvents: RunAnalysis['mcEvents'] = []
 	const touch = (p: Phase): void => {
 		if (p.startMs === null) p.startMs = t
 		p.endMs = t
@@ -94,10 +97,13 @@ export function analyseRun(lines: string[], exit: { code: number | null; signal:
 		const gcm = GC_RE.exec(line)
 		if (gcm) {
 			const before = Number(gcm[2])
+			const after = Number(gcm[4])
 			const pause = Number(gcm[6])
 			const isMc = gcm[1] !== 'Scavenge'
+			if (isMc) mcEvents.push({ t: Number(/(\d+) ms:/.exec(line)?.[1] ?? 0), before, after, pauseMs: pause })
 			eachPhase((p) => {
 				p.peakGcBeforeMiB = Math.max(p.peakGcBeforeMiB, before)
+				if (isMc) p.peakMcAfterMiB = Math.max(p.peakMcAfterMiB, after)
 				p.maxPauseMs = Math.max(p.maxPauseMs, pause)
 				p.gcCount++
 				if (isMc) {
@@ -116,7 +122,7 @@ export function analyseRun(lines: string[], exit: { code: number | null; signal:
 	}
 	const keys = Object.keys(ticks).sort((a, b) => Number(a.slice(4)) - Number(b.slice(4)))
 	const tickDurationsMs = keys.map((k) => (ticks[k]!.endMs ?? 0) - (ticks[k]!.startMs ?? 0))
-	return { exit, oom, maxRssBytes, heapLimit, overall, startup, ticks, flush, tickDurationsMs, ticksCompleted: keys.length }
+	return { exit, oom, maxRssBytes, heapLimit, overall, startup, ticks, flush, tickDurationsMs, ticksCompleted: keys.length, mcEvents }
 }
 
 const tsxLoader = (): string[] => (process.execArgv.some((a) => a.includes('tsx')) ? process.execArgv.filter((x) => !x.startsWith('--max-old-space-size')) : ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href])
@@ -147,6 +153,8 @@ async function runCell(out: string, root: string, pending: number, consumed: num
 				headPlan(ctx, Array.from({ length: ticks + 2 }, () => realtimeCursor + 4))
 				const r = await ctx.run({ ticks, timeoutMs: 1_800_000 })
 				analysis = analyseRun(r.lines, { code: r.code, signal: r.signal })
+				fs.mkdirSync(path.join(out, 'raw-lines'), { recursive: true })
+				fs.writeFileSync(path.join(out, 'raw-lines', `oldpath_${pending}_${consumed}_${heapMB}.log`), r.lines.join('\n') + '\n') // the child's complete output: reporter lines, V8 GC log, heap samples
 			},
 		},
 		root
@@ -185,7 +193,7 @@ async function main(): Promise<void> {
 			const analysis = await runCell(out, root, pending, consumed, heapMB, ticks, srcV2)
 			results.push({ pending, consumed, heapMB, analysis })
 			const o = analysis.overall
-			process.stderr.write(`oldpath: pending ${pending} consumed ${consumed} heap ${heapMB} MB: ${analysis.oom ? `ABORTED (${analysis.exit.signal}), ticks completed ${analysis.ticksCompleted}` : `ok, ticks ${analysis.ticksCompleted}`}; peak heap before GC ${o.peakGcBeforeMiB.toFixed(0)} MiB (${((o.peakGcBeforeMiB * MIB * 100) / PROD_HEAP_LIMIT_BYTES).toFixed(0)}% of 1,660,944,384), RSS peak ${o.peakRssMiB.toFixed(0)} MiB, longest MC pause ${o.maxMarkCompactPauseMs.toFixed(0)} ms\n`)
+			process.stderr.write(`oldpath: pending ${pending} consumed ${consumed} heap ${heapMB} MB: ${analysis.oom ? `ABORTED (${analysis.exit.signal}), ticks completed ${analysis.ticksCompleted}` : `ok, ticks ${analysis.ticksCompleted}`}; peak heap before GC ${o.peakGcBeforeMiB.toFixed(0)} MiB (${((o.peakGcBeforeMiB * MIB * 100) / PROD_HEAP_LIMIT_BYTES).toFixed(0)}% of 1,660,944,384), live heap after a full GC at most ${o.peakMcAfterMiB.toFixed(0)} MiB (${((o.peakMcAfterMiB * MIB * 100) / PROD_HEAP_LIMIT_BYTES).toFixed(0)}%), RSS peak ${o.peakRssMiB.toFixed(0)} MiB, longest MC pause ${o.maxMarkCompactPauseMs.toFixed(0)} ms\n`)
 		}
 		fs.rmSync(dir, { recursive: true, force: true })
 		const st = fs.statfsSync(out)
@@ -230,5 +238,8 @@ if (process.env.NODE_TEST_CONTEXT) {
 		assert.equal(r.maxRssBytes, 1700000000)
 		assert.equal(r.heapLimit, 1660944384)
 		assert.equal(r.ticksCompleted, 2)
+		assert.equal(r.overall.peakMcAfterMiB, 1100, 'the live heap after the larger full collection')
+		assert.equal(r.startup.peakMcAfterMiB, 1000.1)
+		assert.deepEqual(r.mcEvents.map((e) => [e.t, e.before, e.after, e.pauseMs]), [[900, 1400.5, 1000.1, 410.2], [950, 1500, 1100, 250]])
 	})
 }
