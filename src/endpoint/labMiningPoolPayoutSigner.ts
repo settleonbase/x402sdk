@@ -341,6 +341,20 @@ export function labPayoutSignerSendOnce(
 }
 
 /**
+ * READ-ONLY lookup of the signer's record for an idempotency key (offline tools). Unlike recoverLabPayoutHashByIdempotencyKey it does NOT swallow transport errors or signer refusals:
+ * it returns the row, null when the signer answers with an empty result, and THROWS on every failure, so a caller can tell "no record" from "could not read".
+ */
+export async function readLabSignerTransactionRecord(
+	socketPath: string,
+	idempotencyKey: string
+): Promise<{ hash?: string; status?: string; raw: unknown } | null> {
+	const row = await labSignerRpc(socketPath, 'signer_getTransaction', { idempotencyKey })
+	if (row === null || row === undefined) return null
+	const hash = typeof row?.hash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(row.hash.trim()) ? row.hash.trim() : undefined
+	return { hash, status: typeof row?.status === 'string' ? row.status : undefined, raw: row }
+}
+
+/**
  * Look up prior broadcast by durable idempotencyKey (ACK-lost after broadcast recovery).
  * Returns original hash when signer journal still holds the send — never invents success.
  */
