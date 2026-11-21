@@ -263,3 +263,22 @@ test('E9: stop() followed by start() in the same process (exported API): no seco
 		assert.equal(summaryOf(r).maxRunning, '1')
 	})
 })
+
+test('E10: pending entries that cannot be paid (gas above the cap): once the scan has caught up the ticks are idle - one wait of TICK_MS each, no busy loop, nothing is paid', async () => {
+	await withWorld('e10', PATCHED_ROOT, { E2E_WAIT_MS: '200', E2E_RUN_MS: '9000' }, async (w) => {
+		backlogWorld(w, 1)
+		w.chain.gasPriceWei = 200_000_000n // above the 30,000,000 wei cap plus the dust band: flush waits (gas wait is far from forced)
+		const r = await w.run({ timeoutMs: 60_000 })
+		assert.equal(r.code, 0)
+		const ticks = ticksOf(r.events)
+		const skips = r.lines.filter((l) => l.includes('skip flush: gasPrice=')).length
+		const lastProgress = ticks.map((t) => t.outcome).lastIndexOf('progress')
+		const idleAfter = ticks.slice(lastProgress + 1)
+		console.log(`E10 ticks=${ticks.length} progress=${lastProgress + 1} idle-after=${idleAfter.length} flush-skipped lines=${skips} txs paid=${w.chain.sent.size}`)
+		assert.equal(w.chain.sent.size, 0, 'nothing may be paid above the gas cap')
+		assert.ok(idleAfter.length >= 8 && idleAfter.every((t) => t.outcome === 'idle'))
+		for (const t of idleAfter.slice(0, -1)) assert.equal(t.waitAfterRequested, TICK_MS)
+		assert.ok(idleAfter.length <= 9000 / 200 + 2, `idle ticks ${idleAfter.length}: at most one per 200 ms compressed wait`)
+		assert.ok(skips >= idleAfter.length, 'every idle tick logged the gas-wait skip (the pending pool stayed non-empty)')
+	})
+})
