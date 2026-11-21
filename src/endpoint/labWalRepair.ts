@@ -31,6 +31,33 @@ import { createHash } from 'node:crypto'
 import { acquireStateDirLock } from './labClPayoutStateLock'
 import { WAL_DIR, WalMidCorruptionError, decodeFrameAt, scanWal, type WalEvent } from './labWal'
 
+export const MAX_LISTED_UNDECODABLE = 10_000
+
+/**
+ * The undecodable events between the last intact frame and the highest decodable later frame (sequence numbers are contiguous): exact counts by arithmetic, the lists only when the span is
+ * at most `maxList` (review R8: a damaged first frame with a snapshot far ahead must not enumerate hundreds of thousands of seqs).
+ */
+export function inferUndecodable(lastGoodSeq: number, decodedSeqs: number[], walSeq: number, maxList = MAX_LISTED_UNDECODABLE): {
+	span: number
+	count: number
+	coveredCount: number
+	lostCount: number
+	listTruncated: boolean
+	seqs: number[]
+	coveredList: number[]
+	lostList: number[]
+} {
+	const decoded = new Set(decodedSeqs)
+	const highest = decodedSeqs.length > 0 ? Math.max(...decodedSeqs) : lastGoodSeq
+	const span = Math.max(0, highest - lastGoodSeq)
+	const count = span - decoded.size
+	const decodedCovered = decodedSeqs.filter((x) => x <= walSeq).length
+	const coveredCount = Math.max(0, Math.min(highest, walSeq) - lastGoodSeq) - decodedCovered
+	const listTruncated = span > maxList
+	const seqs: number[] = []
+	if (!listTruncated) for (let q = lastGoodSeq + 1; q <= highest; q++) if (!decoded.has(q)) seqs.push(q)
+	return { span, count, coveredCount, lostCount: count - coveredCount, listTruncated, seqs, coveredList: seqs.filter((x) => x <= walSeq), lostList: seqs.filter((x) => x > walSeq) }
+}
 export const RUN_ID_RE = /^[A-Za-z0-9._-]{8,64}$/
 const MANIFEST_FILE = 'manifest.json'
 
@@ -107,6 +134,11 @@ export type RepairAudit = {
 	 */
 	undecodableEvents: {
 		count: number
+		/** Counts are exact and always present; the seq lists are bounded (R8): when the span is larger than MAX_LISTED_UNDECODABLE they are empty and `listTruncated` is true (use `range`). */
+		coveredCount: number
+		lostCount: number
+		range: { from: number; to: number } | null
+		listTruncated: boolean
 		seqs: number[]
 		coveredBySnapshot: number[]
 		lostBeyondSnapshot: number[]
@@ -252,10 +284,16 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 	// R7: the frames that cannot be decoded. Contiguous seqs: everything from lastGoodSeq+1 to the highest decodable later seq that no decodable frame has.
 	const decoded = new Set(seqs)
 	const highest = seqs.length > 0 ? Math.max(...seqs) : mid.lastGoodSeq
-	const undecodable: number[] = []
-	for (let q = mid.lastGoodSeq + 1; q <= highest; q++) if (!decoded.has(q)) undecodable.push(q)
-	const undecCovered = undecodable.filter((x) => x <= snap.walSeq)
-	const undecLost = undecodable.filter((x) => x > snap.walSeq)
+	const und = inferUndecodable(mid.lastGoodSeq, seqs, snap.walSeq)
+	const undecodable = und.seqs
+	const undecCount = und.count
+	const undecCoveredCount = und.coveredCount
+	const undecLostCount = und.lostCount
+	const listTruncated = und.listTruncated
+	const spanFrom = mid.lastGoodSeq + 1
+	const span = und.span
+	const undecCovered = und.coveredList
+	const undecLost = und.lostList
 	let lastGoodTs: string | null = null
 	for (let at = 0; at < mid.badOffset; ) {
 		const d = decodeFrameAt(buf, at)
@@ -297,22 +335,26 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 		droppedCoveredBySnapshot: { count: covered.length, seqs: covered },
 		droppedBeyondSnapshot: { count: beyond.length, seqs: beyond },
 		undecodableEvents: {
-			count: undecodable.length,
+			count: undecCount,
+			coveredCount: undecCoveredCount,
+			lostCount: undecLostCount,
+			range: span > 0 ? { from: spanFrom, to: highest } : null,
+			listTruncated,
 			seqs: undecodable,
 			coveredBySnapshot: undecCovered,
 			lostBeyondSnapshot: undecLost,
 			byteRanges,
 			note:
-				undecLost.length > 0
-					? `AT LEAST ${undecLost.length} event(s) above the snapshot could not be decoded and are lost (seq ${undecLost.join(', ')}). They may have been in-flight records of transactions already sent: ` +
+				undecLostCount > 0
+					? `AT LEAST ${undecLostCount} event(s) above the snapshot could not be decoded and are lost (${listTruncated ? `seq range ${spanFrom}..${highest}, list omitted` : `seq ${undecLost.join(', ')}`}). They may have been in-flight records of transactions already sent: ` +
 						'reconcile EVERY transaction sent from the signer record and the chain for the whole time span from the last intact event to the end of the segment, and book what was sent as consumed.'
-					: undecodable.length > 0
-						? `${undecodable.length} undecodable event(s) lie inside the snapshot (seq ${undecodable.join(', ')}); their effect is already in the state, nothing is lost by cutting them.`
+					: undecCount > 0
+						? `${undecCount} undecodable event(s) lie inside the snapshot (${listTruncated ? `seq range ${spanFrom}..${Math.min(highest, snap.walSeq)}` : `seq ${undecodable.join(', ')}`}); their effect is already in the state, nothing is lost by cutting them.`
 						: 'no undecodable event between the intact frames.',
 		},
 		lastGoodEventTs: lastGoodTs,
 		segmentMtime: fs.statSync(mid.file).mtime.toISOString(),
-		lostEventsAtLeast: beyond.length + undecLost.length,
+		lostEventsAtLeast: beyond.length + undecLostCount,
 		nextEventSeq: nextSeq,
 		seqReuseNote:
 			`After the cut the daemon continues at seq ${nextSeq} (= max(last intact seq ${mid.lastGoodSeq}, snapshot walSeq ${snap.walSeq}) + 1). ` +

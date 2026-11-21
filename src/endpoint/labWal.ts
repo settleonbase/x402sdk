@@ -313,7 +313,8 @@ export function scanWal(
 					at,
 					r.reason,
 					later,
-					lastSeq
+					// R8: when the damaged frame is the FIRST of its segment, no frame of this segment was scanned yet: the last intact seq is the one just before the segment's first
+					Math.max(lastSeq, seg.firstSeq - 1)
 				)
 			}
 			truncatedBytes = buf.length - at

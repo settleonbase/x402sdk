@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import { appendFileSync, chmodSync, readdirSync, statSync, symlinkSync } from 'node:fs'
 import { acquireStateDirLock } from './labClPayoutStateLock'
 import { WAL_DIR, WAL_HEADER_BYTES, WalMidCorruptionError, WalWriter, decodeFrameAt, encodeFrame, formatWalMidCorruptionAlert, scanWal, segmentFileName, type WalEvent, type WalOp } from './labWal'
-import { RUN_ID_RE, parseCliArgs, readSnapshotWalSeq, realpathOrAncestor, repairMidCorruption } from './labWalRepair'
+import { MAX_LISTED_UNDECODABLE, RUN_ID_RE, inferUndecodable, parseCliArgs, readSnapshotWalSeq, realpathOrAncestor, repairMidCorruption } from './labWalRepair'
 
 const key = (i: number): string => `0x${i.toString(16).padStart(64, '0')}`
 const ev = (seq: number, ops: WalOp[], t: string): WalEvent => ({ v: 1, seq, ts: '2026-11-21T00:00:00.000Z', t, ops })
@@ -680,5 +680,81 @@ test('R7: the damaged frame is listed as an undecodable event with its inferred 
 		assert.equal(r.audit.lostEventsAtLeast, 4, '102, 103, 104, 105')
 	} finally {
 		done(c.root)
+	}
+})
+
+// ------------------------------------------------------------ review R8: the damaged frame is the FIRST frame of its segment
+test('R8: a damaged first frame reports lastGoodSeq = firstSeq - 1 (not 0): no fake seqs, exact counts, and a huge span never enumerates the list', () => {
+	const w = world({ firstSeq: 101, walSeq: 100 })
+	try {
+		const buf = Buffer.from(w.intact)
+		buf[w.starts[0]! + WAL_HEADER_BYTES + 2] = buf[w.starts[0]! + WAL_HEADER_BYTES + 2]! ^ 0x40 // frame 101 damaged
+		writeFileSync(w.file, buf)
+		const r = repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01', dryRun: true })
+		if (r.status !== 'dry-run') throw new Error('expected a dry run')
+		assert.equal(r.audit.lastGoodSeq, 100, 'the seq just before the segment, not 0')
+		assert.deepEqual(r.audit.frames.map((f) => f.seq), [102, 103, 104, 105])
+		assert.deepEqual(r.audit.undecodableEvents.seqs, [101])
+		assert.equal(r.audit.undecodableEvents.count, 1)
+		assert.equal(r.audit.undecodableEvents.lostCount, 1)
+		assert.equal(r.audit.undecodableEvents.listTruncated, false)
+		assert.equal(r.audit.nextEventSeq, 101)
+		assert.equal(r.audit.lostEventsAtLeast, 5)
+	} finally {
+		done(w.root)
+	}
+	// the same with the very first segment of a log whose snapshot is far ahead of the log start: the old code would have said lastGoodSeq 0 and enumerated ~500k fake seqs
+	const v = world({ firstSeq: 1, walSeq: 0 })
+	try {
+		const buf = Buffer.from(v.intact)
+		buf[v.starts[0]! + WAL_HEADER_BYTES + 2] = buf[v.starts[0]! + WAL_HEADER_BYTES + 2]! ^ 0x40
+		writeFileSync(v.file, buf)
+		const r = repairMidCorruption({ stateDir: v.stateDir, auditDir: v.auditDir, runId: RUN, approval: 'PM-2026-11-21-01', dryRun: true })
+		if (r.status !== 'dry-run') throw new Error('expected a dry run')
+		assert.equal(r.audit.lastGoodSeq, 0)
+		assert.deepEqual(r.audit.undecodableEvents.seqs, [1])
+	} finally {
+		done(v.root)
+	}
+})
+
+test('R8: the undecodable list is bounded - a huge span reports exact counts and the range, not the list; the covered/lost split stays exact', () => {
+	// last intact 100, decodable later frames 500001 and 500003, snapshot at 400000: 500000 seqs between, 2 decodable
+	const big = inferUndecodable(100, [500001, 500003], 400000)
+	assert.equal(big.listTruncated, true)
+	assert.deepEqual(big.seqs, [])
+	assert.equal(big.span, 500003 - 100)
+	assert.equal(big.count, 500003 - 100 - 2)
+	assert.equal(big.coveredCount, 400000 - 100, 'seqs 101..400000 are inside the snapshot and none of them is decodable')
+	assert.equal(big.lostCount, big.count - big.coveredCount)
+	// small span: the lists are present and agree with the counts
+	const small = inferUndecodable(100, [102, 104], 102)
+	assert.deepEqual(small.seqs, [101, 103])
+	assert.deepEqual(small.coveredList, [101])
+	assert.deepEqual(small.lostList, [103])
+	assert.equal(small.coveredCount, 1)
+	assert.equal(small.lostCount, 1)
+	assert.equal(small.listTruncated, false)
+	// nothing decodable after the damage
+	const none = inferUndecodable(100, [], 50)
+	assert.equal(none.count, 0)
+	assert.equal(none.span, 0)
+	// the counts agree with the lists for random inputs
+	for (let seed = 1; seed <= 200; seed++) {
+		let x = seed
+		const r = () => ((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) / 0x100000000)
+		const last = Math.floor(r() * 50)
+		const decoded: number[] = []
+		for (let q = last + 1; q <= last + 40; q++) if (r() < 0.5) decoded.push(q)
+		const wal = Math.floor(r() * 90)
+		const full = inferUndecodable(last, decoded, wal, 1000)
+		assert.equal(full.seqs.length, full.count, `seed ${seed}`)
+		assert.equal(full.coveredList.length, full.coveredCount, `seed ${seed}`)
+		assert.equal(full.lostList.length, full.lostCount, `seed ${seed}`)
+		const cnt = inferUndecodable(last, decoded, wal, 0)
+		if (full.span > 0) assert.equal(cnt.listTruncated, true)
+		assert.equal(cnt.count, full.count)
+		assert.equal(cnt.coveredCount, full.coveredCount)
+		assert.equal(cnt.lostCount, full.lostCount)
 	}
 })
