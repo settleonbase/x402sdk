@@ -1,7 +1,9 @@
 /**
  * P2c-1 acceptance (errata C2): the per-tick reads the reporter makes over the pending pool cost the same through the state handle as directly on the Map the reporter used before.
  * Opt-in (LAB_PERF=1, run with NODE_OPTIONS=--expose-gc): it builds 1.66 million SkimEntry objects and takes a while. LAB_PERF_N overrides the size.
- * Thresholds: time <= +10%, heap <= +5% (medians of 5 alternating runs per operation, after one warm-up run of each side so the JIT state is the same).
+ * Thresholds: time <= +10% + 3 ms, heap <= +5% (+5 MB). Time compares the MINIMUM of 15 alternating runs per side (after a warm-up run of each side): the minimum is the run least disturbed by GC and
+ * the machine, which is the robust statistic here. The first version compared medians of 5 with a bare +10% line, and the reviewer measured +6.4% and +18.0% on the same direct-Map-vs-pass-through
+ * pair (pure noise, the legacy handle is a pass-through), so that line was below the noise and could not be a release gate. Heap compares medians (its noise is small).
  * P2c-2 adds the WAL handle (a LabPayoutStateCore over the same entry objects): the same four reads through WalStateHandle, plus the same reads while a snapshot is in flight (informational: layered
  * views over a 3% delta; no threshold, the numbers go in the receipt) and the O(1) size counters.
  */
@@ -51,7 +53,7 @@ test(`C2: the four per-tick pool reads over ${N} entries cost the same through t
 		let rB: unknown
 		op(direct())
 		op(viaHandle())
-		for (let rep = 0; rep < 5; rep++) {
+		for (let rep = 0; rep < 15; rep++) {
 			for (const which of rep % 2 === 0 ? ['A', 'B'] : ['B', 'A']) {
 				gc?.()
 				const base = process.memoryUsage().heapUsed
@@ -71,12 +73,12 @@ test(`C2: the four per-tick pool reads over ${N} entries cost the same through t
 			}
 		}
 		assert.deepEqual(JSON.parse(JSON.stringify(rB, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))), JSON.parse(JSON.stringify(rA, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))), `${name}: same result`)
-		const ta = median(tA)
-		const tb = median(tB)
+		const ta = Math.min(...tA)
+		const tb = Math.min(...tB)
 		const ha = median(hA)
 		const hb = median(hB)
-		rows.push(`${name}: time direct ${ta.toFixed(1)} ms, handle ${tb.toFixed(1)} ms (${(((tb - ta) / ta) * 100).toFixed(1)}%); heap delta direct ${(ha / 1e6).toFixed(1)} MB, handle ${(hb / 1e6).toFixed(1)} MB`)
-		if (!(tb <= ta * 1.1 + 2)) fails.push(`${name}: time through the handle ${tb.toFixed(1)} ms vs direct ${ta.toFixed(1)} ms exceeds +10%`)
+		rows.push(`${name}: time (min of 15) direct ${ta.toFixed(1)} ms, handle ${tb.toFixed(1)} ms (${(((tb - ta) / ta) * 100).toFixed(1)}%), medians ${median(tA).toFixed(1)} / ${median(tB).toFixed(1)} ms; heap delta direct ${(ha / 1e6).toFixed(1)} MB, handle ${(hb / 1e6).toFixed(1)} MB`)
+		if (!(tb <= ta * 1.1 + 3)) fails.push(`${name}: time (min of 15) through the handle ${tb.toFixed(1)} ms vs direct ${ta.toFixed(1)} ms exceeds +10% + 3 ms`)
 		if (!(hb <= ha * 1.05 + 5_000_000)) fails.push(`${name}: heap through the handle ${(hb / 1e6).toFixed(1)} MB vs direct ${(ha / 1e6).toFixed(1)} MB exceeds +5%`)
 	}
 	console.log(`# C2 (${handleKind} handle, N=${N}) ` + rows.join(`\n# C2 (${handleKind}) `))

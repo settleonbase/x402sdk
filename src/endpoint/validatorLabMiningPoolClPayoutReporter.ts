@@ -224,6 +224,9 @@ type LabManifest = {
 }
 
 let labStarted = false
+/** Set by stop; a WAL start that is still opening its session must then not begin ticking (the shutdown converts the opened session instead). */
+let labStopRequested = false
+let labWalStarting: Promise<void> | null = null
 let labTimer: ReturnType<typeof setTimeout> | undefined
 let labInFlight = false
 let labPubkeySet = new Set<string>()
@@ -1469,7 +1472,8 @@ function scheduleNextLabTick(): void {
 }
 
 export function startValidatorLabMiningPoolClPayoutReporter(): void {
-	if (labStarted) return
+	if (labStarted || labWalStarting) return
+	labStopRequested = false
 	if (!labEnabled()) {
 		logger(Colors.yellow('[labMiningPoolClPayout] disabled (set CONET_LAB_MINING_POOL_CL_PAYOUT=1)'))
 		return
@@ -1481,7 +1485,9 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	// S4: start-up alignment (initLabSessionState / the WAL session's alignment) is only legal before any tick has begun; a tick already running here is a bug, not a race to tolerate
 	if (labInFlight) throw new Error('[labMiningPoolClPayout] start while a tick is running')
 	if (labWalMode()) {
-		void startWalMode()
+		labWalStarting = startWalMode().finally(() => {
+			labWalStarting = null
+		})
 		return
 	}
 	// Forward-compat guard (always on): events in wal/ would be silently ignored by this build, so refuse to start (labWalGuard.ts).
@@ -1536,9 +1542,13 @@ async function startWalMode(): Promise<void> {
 			snapshot: resolveSnapshotConfig(),
 		})
 		sessionBackfillFloor = labWalSession.sessionBackfillFloor
+		if (labStopRequested) {
+			logger(Colors.yellow('[labMiningPoolClPayout] stop requested while the WAL session was opening; no tick is started (the shutdown converts the opened session)'))
+			return
+		}
 		if (shouldStopAfterSettled(labWalSession.settledBatchCount, resolveMaxSettledBatches())) {
 			logger(Colors.cyan('[labMiningPoolClPayout] MAX_SETTLED_BATCHES already reached at start; exiting 0 before any tick'))
-			process.exit(0)
+			process.exit(await gracefulStopWalSession(labWalSession, { stateDir: resolveSegmentedStateDir(), tickIdle: true, log: walLog }))
 		}
 		labStarted = true
 		logger(
@@ -1557,6 +1567,7 @@ async function startWalMode(): Promise<void> {
 }
 
 export function stopValidatorLabMiningPoolClPayoutReporter(): void {
+	labStopRequested = true
 	labStarted = false
 	labSessionState = undefined
 	sessionBackfillFloor = undefined
@@ -1623,6 +1634,7 @@ export async function waitForLabMiningPoolClPayoutIdle(maxWaitMs = 90_000): Prom
  */
 export async function shutdownLabMiningPoolClPayout(maxWaitMs = 90_000): Promise<number> {
 	stopValidatorLabMiningPoolClPayoutReporter()
+	if (labWalStarting) await labWalStarting.catch(() => undefined) // a start still opening its session finishes first (and starts no tick, see labStopRequested)
 	const idle = await waitForLabMiningPoolClPayoutIdle(maxWaitMs)
 	return flushLabMiningPoolListeningCheckpoint({ tickIdle: idle })
 }

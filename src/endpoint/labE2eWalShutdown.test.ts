@@ -144,3 +144,74 @@ test('graceful stop while a tick does not end: no downgrade snapshot, exit 1, th
 	for (const [k, n] of Object.entries(r.paymentsPerEventKey)) assert.equal(n, 1, `event key ${k} paid ${n} times`)
 	assert.equal(r.logical!.pending.length, 0)
 })
+
+test('s12 spec on the real daemon: after the scheduled prune and a restart the pruned keys (including a real withdrawal key) are not queued or paid again', { timeout: 300_000 }, async () => {
+	const realKey = eventKeyOf(102, 0) // a real withdrawal of the simulated chain, made the OLDEST consumed key so that it is pruned first
+	const filler = Array.from({ length: 10_299 }, (_, i) => ethers.keccak256(ethers.toUtf8Bytes(`filler-${i}`)))
+	const r = await runScenario(
+		{
+			name: 's12_restart',
+			env: { CONET_LAB_MINING_POOL_CL_PAYOUT_CONSUMED_KEYS_MAX: '10000', CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_BATCH_ENTRIES: '10', CONET_LAB_MINING_POOL_CL_PAYOUT_WAL_SNAPSHOT_INTERVAL_MS: '1' },
+			body: async (ctx) => {
+				seedValidators(ctx)
+				seedWithdrawals(ctx)
+				headPlan(ctx, [128, 128, 128, 128])
+				// the cursors are past every seeded withdrawal (a restart never rescans them: the consumed set is only a second line of defence behind the cursors, as in the legacy path)
+				ctx.seedState({
+					lastBackfillProcessedBlock: 120,
+					historyCursor: 120,
+					realtimeCursor: 128,
+					lastLiveHeadScanned: 128,
+					freezeH: { height: 120, hash: ethers.keccak256(ethers.toUtf8Bytes('block:120')), frozenAt: new Date().toISOString() },
+					pending: [],
+					consumedEventKeys: Object.fromEntries([realKey, ...filler].map((k) => [k, true] as const)),
+					exitedPubkeys: {},
+				})
+				await ctx.run({ ticks: 2 })
+				await ctx.run({ ticks: 2 }) // the restart
+			},
+		},
+		undefined,
+		{ walMode: true }
+	)
+	assert.deepEqual(r.exits.map((e) => e.code), [0, 0])
+	assert.equal(r.logs[0]!.filter((l) => /snapshot committed walSeq=/.test(l) && /pruned=1300/.test(l)).length, 1, 'the prune happened once in the first run')
+	assert.equal(r.signerRequests.length, 0, 'nothing was paid, before or after the restart')
+	assert.equal(r.chainSent.length, 0)
+	assert.equal(r.logical!.pending.length, 0, 'the pruned keys were not queued again')
+	assert.equal(r.logical!.consumed.length, 9000)
+	assert.equal(r.logical!.consumed.includes(realKey), false, 'the real key really is gone from the consumed set')
+})
+
+test('stop requested while the WAL session is still opening: the start does not begin ticking and the shutdown still ends in the version 2 layout (race-dependent timing, invariants asserted either way)', { timeout: 300_000 }, async () => {
+	const lines: string[] = []
+	const r = await runScenario(
+		{
+			name: 'stop_during_open',
+			env: { CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_BATCH_ENTRIES: '10' },
+			body: async (ctx) => {
+				seedValidators(ctx)
+				seedWithdrawals(ctx)
+				headPlan(ctx, [120, 124, 128, 128, 128, 128])
+				for (let i = 0; i < 6; i++) {
+					await ctx.run({
+						ticks: 3,
+						killWhen: (ev) => {
+							if (ev.kind === 'log' && /loaded manifest pubkeys=/.test(ev.line)) ctx.currentChild?.kill('SIGTERM') // the WAL session is being opened right now
+							return false
+						},
+					})
+				}
+				void lines
+			},
+		},
+		undefined,
+		{ walMode: true }
+	)
+	for (const e of r.exits) assert.equal(e.code, 0, `every run ended with exit 0: ${JSON.stringify(r.exits)}`)
+	assert.deepEqual(r.layout, { manifestVersion: 2, walSegments: 0 })
+	const stoppedEarly = r.logs.flat().filter((l) => /stop requested while the WAL session was opening/.test(l)).length
+	process.stderr.write(`stop_during_open: ${stoppedEarly} of 6 runs hit the race window\n`)
+	assert.equal(r.unknownRpcMethods.length, 0)
+	for (const [k, n] of Object.entries(r.paymentsPerEventKey)) assert.ok(n <= 1, `event key ${k} paid ${n} times`)
+})

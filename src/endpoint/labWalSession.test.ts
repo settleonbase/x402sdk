@@ -106,3 +106,24 @@ test('drift in the incremental history counts is an ALERT from the session (the 
 		fs.rmSync(t.root, { recursive: true, force: true })
 	}
 })
+
+test('explicit rule: a bootstrap marker next to manifest.json or a staged manifest.json.tmp* is never discarded (nothing is deleted, the start refuses)', async () => {
+	for (const staged of ['manifest.json.tmp.12345', 'manifest.json.tmp']) {
+		const t = tmp()
+		fs.mkdirSync(path.join(t.stateDir, 'gen-20261121T000000Z-cccccccccccc'), { recursive: true })
+		fs.writeFileSync(path.join(t.stateDir, WAL_BOOTSTRAP_MARKER), 'x')
+		fs.writeFileSync(path.join(t.stateDir, staged), '{}')
+		await assert.rejects(() => open(t), /not a partial bootstrap/)
+		assert.equal(fs.existsSync(path.join(t.stateDir, 'gen-20261121T000000Z-cccccccccccc')), true, `nothing was deleted (${staged})`)
+		assert.equal(fs.existsSync(path.join(t.stateDir, staged)), true)
+		fs.rmSync(t.root, { recursive: true, force: true })
+	}
+})
+
+test('the start race is closed in the source: stop sets the request flag, the WAL start checks it after the session opened and does not tick, the shutdown awaits a start that is still opening', () => {
+	const r = fs.readFileSync(path.join(__dirname, 'validatorLabMiningPoolClPayoutReporter.ts'), 'utf8')
+	assert.match(r, /export function stopValidatorLabMiningPoolClPayoutReporter\(\): void \{\s*\n\s*labStopRequested = true/)
+	assert.match(r, /labWalSession = await openWalSession\([\s\S]*?if \(labStopRequested\) \{[\s\S]*?return\s*\n\s*\}[\s\S]*?labStarted = true/, 'checked after the open, before labStarted/ticks')
+	assert.match(r, /if \(labWalStarting\) await labWalStarting\.catch/, 'the shutdown waits for a start that is still opening')
+	assert.match(r, /if \(labStarted \|\| labWalStarting\) return/, 'a second start while opening is ignored')
+})

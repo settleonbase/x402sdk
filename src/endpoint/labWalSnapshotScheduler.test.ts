@@ -204,3 +204,77 @@ test('count drift found at a snapshot is an ALERT and is corrected', async () =>
 		await w.done()
 	}
 })
+
+// ---- s12 as the reviewer specified it: seed 10,300 consumed keys, cap 10,000, one scheduled snapshot
+import { createLegacyStateStore } from './labLegacyState'
+import { appendConsumedArchive, consumedArchiveDir } from './labConsumedPrune'
+
+async function seed10300(w: Awaited<ReturnType<typeof world>>): Promise<string[]> {
+	const keys = Array.from({ length: 10_300 }, (_, i) => key(0x100000 + i))
+	for (const k of keys) w.h.consumedAdd(k)
+	await w.h.commit('settle')
+	return keys
+}
+
+test('s12 spec: with 10,300 consumed keys and cap 10,000 the COMMITTED manifest holds exactly the set the legacy prune leaves (the oldest 1,300 gone, 9,000 left, insertion order); the archive has them all, oldest first, BEFORE the manifest commits', async () => {
+	const w = await world()
+	try {
+		const keys = await seed10300(w)
+		// what the legacy implementation leaves, computed by the legacy code itself
+		const archDir = path.join(w.dir, 'legacy-archive')
+		const logsLegacy: string[] = []
+		const legacy = createLegacyStateStore({ stateFile: () => path.join(w.dir, 'legacy.json'), segmentedDir: () => path.join(w.dir, 'legacy.v2'), consumedCap: () => 10_000, scanFloor: () => 100, tripPersist: () => undefined, logger: (...a: unknown[]) => void logsLegacy.push(String(a[0])) })
+		const st = { consumedEventKeys: Object.fromEntries(keys.map((k) => [k, true] as const)), exitedPubkeys: {}, pending: [] } as never
+		assert.equal(legacy.pruneConsumedEventKeys(st), 1300)
+		const legacyLeft = Object.keys((st as { consumedEventKeys: Record<string, true> }).consumedEventKeys)
+		assert.equal(legacyLeft.length, 9000)
+		void archDir
+		const archived: string[] = []
+		let archivedWhenCommitting = -1
+		const s = w.mk({
+			consumedCap: 10_000,
+			archive: (k) => void archived.push(...k),
+			writeOptions: { hooks: { beforeManifestRename: () => void (archivedWhenCommitting = archived.length) } },
+		})
+		w.clock.t += 600_000
+		s.poke()
+		await w.settle(s)
+		assert.equal(s.stats.committed, 1)
+		assert.equal(archivedWhenCommitting, 1300, 'the whole archive write happened before the manifest was made visible')
+		assert.deepEqual(archived, keys.slice(0, 1300), 'oldest first')
+		const rec = recoverPayoutState(w.stateDir, { readOnly: true })
+		assert.equal(rec.snapshotSeq, w.core.lastAppliedSeq)
+		assert.deepEqual([...rec.core.consumedKeys()], legacyLeft, 'the committed snapshot holds exactly the legacy-pruned set, in order')
+		assert.deepEqual([...w.core.consumedKeys()], legacyLeft, 'and so does the live state')
+		for (const k of keys.slice(0, 1300)) assert.equal(rec.core.consumedHas(k), false)
+		assert.equal(rec.core.pendingSize, 0, 'pruned keys are not queued again after a restart-style recovery')
+	} finally {
+		await w.done()
+	}
+})
+
+test('s12 spec: when the archive fails nothing is pruned this time (the committed manifest still holds all 10,300) and the operator sees the ALERT', async () => {
+	const w = await world()
+	try {
+		const keys = await seed10300(w)
+		const s = w.mk({ consumedCap: 10_000, archive: () => { throw new Error('disk full') } })
+		w.clock.t += 600_000
+		s.poke()
+		await w.settle(s)
+		assert.equal(s.stats.committed, 1)
+		assert.equal(s.stats.archiveFailed, 1)
+		const rec = recoverPayoutState(w.stateDir, { readOnly: true })
+		assert.deepEqual([...rec.core.consumedKeys()], keys, 'the committed manifest holds every key')
+		assert.ok(w.logs.some((l) => /ALERT consumed archive failed/.test(l)))
+		// the next try with a working archive prunes
+		const archived: string[] = []
+		const s2 = w.mk({ consumedCap: 10_000, archive: (k) => void archived.push(...k) })
+		w.clock.t += 600_000
+		s2.poke()
+		await w.settle(s2)
+		assert.equal(archived.length, 1300)
+		assert.equal(w.core.consumedSize, 9000)
+	} finally {
+		await w.done()
+	}
+})

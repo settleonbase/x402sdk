@@ -44,7 +44,9 @@ const norm = (raw: unknown): number | undefined => {
 export const WAL_BOOTSTRAP_MARKER = '.wal-bootstrap-in-progress'
 
 function placeBootstrapMarker(dir: string): void {
+	const parentExisted = fs.existsSync(dir)
 	fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+	if (!parentExisted) fsyncDirStrict(path.dirname(dir)) // the directory entry itself must survive a power cut too (without it the whole dir may vanish: harmless, equal to "not started")
 	const fd = fs.openSync(path.join(dir, WAL_BOOTSTRAP_MARKER), 'w', 0o600)
 	try {
 		fs.writeSync(fd, 'bootstrap of the first version 3 snapshot in progress; safe to discard everything else in this directory\n')
@@ -62,6 +64,10 @@ function removeBootstrapMarker(dir: string): void {
 
 /** The partial result of a killed bootstrap: refuse if anything in the dir could be a committed log (a non-empty wal/), otherwise remove every entry but the marker. */
 function discardPartialBootstrap(dir: string, log: (line: string) => void): void {
+	// explicit rule (review): a committed manifest, or a staged one that was about to be committed, means this is not an uncommitted bootstrap - never discard
+	for (const name of fs.readdirSync(dir)) {
+		if (name === 'manifest.json' || name.startsWith('manifest.json.tmp')) throw new Error(`[labMiningPoolClPayout] bootstrap marker present but ${path.join(dir, name)} exists: not a partial bootstrap, refusing to discard anything (operator check required)`)
+	}
 	const walDir = path.join(dir, 'wal')
 	if (fs.existsSync(walDir) && fs.readdirSync(walDir).length > 0) throw new Error(`[labMiningPoolClPayout] bootstrap marker present but ${walDir} is not empty: not a partial bootstrap, refusing to start (operator check required)`)
 	const removed: string[] = []
@@ -109,7 +115,7 @@ export async function openWalSession(opts: {
 	if (rec.warnings.length > 0) throw new Error('[labMiningPoolClPayout] WAL recovery reported warnings; refusing to start (operator check required)')
 	const wal = new WalWriter({ stateDir: opts.stateDir, lastSeq: rec.writerLastSeq, segmentBytes: opts.segmentBytes, maxFrameBytes: opts.maxFrameBytes })
 	const handle = new WalStateHandle<SkimEntry, LabClPayoutState>({ core: rec.core, wal, log: opts.log })
-	opts.log(`[labMiningPoolClPayout] WAL mode: snapshotSeq=${rec.snapshotSeq} replayed=${rec.replayed} pending=${rec.core.pendingSize} consumed=${rec.core.consumedSize} nextSeq=${rec.writerLastSeq + 1}`)
+	opts.log(`[labMiningPoolClPayout] WAL mode: snapshotSeq=${rec.snapshotSeq} replayed=${rec.replayed} pending=${rec.core.pendingSize} consumed=${rec.core.consumedSize} nextSeq=${rec.writerLastSeq + 1} snapshotEveryMs=${opts.snapshot?.intervalMs ?? 'default(600000)'} walMaxBytes=${opts.snapshot?.walMaxBytes ?? 'default(268435456)'} consumedCap=${opts.snapshot?.consumedCap ?? 'none'}`)
 
 	// start-up alignment, through the handle (the legacy path did this on its in-memory state). S4: it happens before the first tick; enterTick makes that an assertion (no tick may be running).
 	handle.enterTick()
