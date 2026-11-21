@@ -43,6 +43,8 @@ export type VariantResult = {
 	paidKeys: number
 	txsPerFieldHour: number
 	historyCursorEnd: number
+	/** Whole-state persistence seen from the child (fs.writeSync / fsyncSync / rename of manifest.json): real writes into the state dir. Absent in runs made before the counters existed. */
+	io?: { writeBytes: number; writeCalls: number; writeMs: number; fsyncCalls: number; fsyncMs: number; manifestCommits: number; manifestCommitsPerTick: number; bytesPerCommit: number; stateBytesEnd: number }
 }
 
 export async function measure(variant: VariantResult['variant'], root: string, rep: number, o: { runMs: number; latencyMs: number; waitMs: number | 'real'; blockMs: number; every: number; outDir?: string; tickMs?: number }): Promise<VariantResult> {
@@ -95,14 +97,37 @@ export async function measure(variant: VariantResult['variant'], root: string, r
 			paidKeys: paidKeys.size,
 			txsPerFieldHour: txs / fieldHours,
 			historyCursorEnd: st.historyCursor ?? 0,
+			...(sum.manifestCommits !== undefined
+				? {
+						io: {
+							writeBytes: Number(sum.fsWriteBytes),
+							writeCalls: Number(sum.fsWriteCalls),
+							writeMs: Number(sum.fsWriteMs),
+							fsyncCalls: Number(sum.fsyncCalls),
+							fsyncMs: Number(sum.fsyncMs),
+							manifestCommits: Number(sum.manifestCommits),
+							manifestCommitsPerTick: Number(sum.manifestCommits) / Math.max(1, ticks.length),
+							bytesPerCommit: Number(sum.fsWriteBytes) / Math.max(1, Number(sum.manifestCommits)),
+							stateBytesEnd: dirBytes(w.stateDir),
+						},
+					}
+				: {}),
 		}
 	})
 }
 
+function dirBytes(dir: string): number {
+	let n = 0
+	for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+		const p = path.join(dir, e.name)
+		n += e.isDirectory() ? dirBytes(p) : fs.statSync(p).size
+	}
+	return n
+}
 const f = (x: number, d = 0): string => (Number.isFinite(x) ? x.toFixed(d) : 'n/a')
 export function table(rs: VariantResult[]): string {
-	const rows = [['variant', 'rep', 'ticks', 'tick p50/p90 ms', 'cycle p50/p90 ms', 'wait ms', 'rt blocks', 'blocks/field-h', 'chain head/field-h', 'tip gap end', 'txs', 'txs/field-h', 'paid keys', 'maxRunning']]
-	for (const r of rs) rows.push([r.variant, String(r.rep), String(r.ticks), `${f(r.tickMs.p50)}/${f(r.tickMs.p90)}`, `${f(r.cycleMs.p50)}/${f(r.cycleMs.p90)}`, f(r.waitMsObserved.p50), String(r.realtimeBlocksScanned), f(r.blocksPerFieldHour), f(r.chainHeadBlocksPerFieldHour), String(r.tipGapEnd), String(r.txs), f(r.txsPerFieldHour, 1), String(r.paidKeys), String(r.maxRunning)])
+	const rows = [['variant', 'rep', 'ticks', 'tick p50/p90 ms', 'cycle p50/p90 ms', 'wait ms', 'rt blocks', 'blocks/field-h', 'chain head/field-h', 'tip gap end', 'txs', 'txs/field-h', 'paid keys', 'maxRunning', 'commits/tick', 'bytes/commit', 'write+fsync ms/tick']]
+	for (const r of rs) rows.push([r.variant, String(r.rep), String(r.ticks), `${f(r.tickMs.p50)}/${f(r.tickMs.p90)}`, `${f(r.cycleMs.p50)}/${f(r.cycleMs.p90)}`, f(r.waitMsObserved.p50), String(r.realtimeBlocksScanned), f(r.blocksPerFieldHour), f(r.chainHeadBlocksPerFieldHour), String(r.tipGapEnd), String(r.txs), f(r.txsPerFieldHour, 1), String(r.paidKeys), String(r.maxRunning), r.io ? f(r.io.manifestCommitsPerTick, 1) : 'n/a', r.io ? f(r.io.bytesPerCommit) : 'n/a', r.io ? f((r.io.writeMs + r.io.fsyncMs) / Math.max(1, r.ticks), 1) : 'n/a'])
 	const w = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)))
 	return rows.map((r) => r.map((c, i) => c.padEnd(w[i]!)).join('  ')).join('\n')
 }

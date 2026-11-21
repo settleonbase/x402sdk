@@ -7,6 +7,7 @@
  *  - E2E_RUN_MS stops the child after that long like SIGTERM does (stop, wait for idle, flush), SIGTERM does the same at any time.
  * Events carry t=<ms since child start> from the child's own monotonic clock.
  */
+import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -16,6 +17,32 @@ const t0 = process.hrtime.bigint()
 const now = (): number => Number((process.hrtime.bigint() - t0) / 1_000n) / 1000
 const ev = (s: string): void => console.log(`E2E_EV ${s} t=${now().toFixed(3)}`)
 const realSetTimeout = global.setTimeout
+// persistence evidence (observation only): the state store writes through fs.writeSync / fs.fsyncSync / fs.renameSync of the default fs object; bytes, calls and time are counted here, the reporter is not touched.
+const io = { writeBytes: 0, writeCalls: 0, writeMs: 0, fsyncCalls: 0, fsyncMs: 0, manifestCommits: 0 }
+{
+	const w0 = fs.writeSync
+	const f0 = fs.fsyncSync
+	const r0 = fs.renameSync
+	const ms = (a: bigint): number => Number(process.hrtime.bigint() - a) / 1e6
+	;(fs as unknown as { writeSync: unknown }).writeSync = ((...a: unknown[]) => {
+		const t = process.hrtime.bigint()
+		const n = (w0 as (...x: unknown[]) => number)(...a)
+		io.writeCalls++
+		io.writeBytes += n
+		io.writeMs += ms(t)
+		return n
+	}) as typeof fs.writeSync
+	;(fs as unknown as { fsyncSync: unknown }).fsyncSync = ((...a: unknown[]) => {
+		const t = process.hrtime.bigint()
+		;(f0 as (...x: unknown[]) => void)(...a)
+		io.fsyncCalls++
+		io.fsyncMs += ms(t)
+	}) as typeof fs.fsyncSync
+	;(fs as unknown as { renameSync: unknown }).renameSync = ((a: string, b: string) => {
+		if (String(b).endsWith('manifest.json')) io.manifestCommits++
+		return r0(a, b)
+	}) as typeof fs.renameSync
+}
 const waitMsRaw = process.env.E2E_WAIT_MS ?? '20'
 let waits = 0
 ;(global as unknown as { setTimeout: unknown }).setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...a: unknown[]) => {
@@ -84,7 +111,7 @@ async function main(): Promise<void> {
 		await rep.flushLabMiningPoolListeningCheckpoint()
 		await queue.waitForAllOnchainTxQueues(90_000)
 		const ru = process.resourceUsage()
-		ev(`summary ticks=${ticks} maxRunning=${maxRunning} waits=${waits} cpuUserMs=${Math.round(ru.userCPUTime / 1000)} cpuSysMs=${Math.round(ru.systemCPUTime / 1000)}`)
+		ev(`summary ticks=${ticks} maxRunning=${maxRunning} waits=${waits} cpuUserMs=${Math.round(ru.userCPUTime / 1000)} cpuSysMs=${Math.round(ru.systemCPUTime / 1000)} fsWriteBytes=${io.writeBytes} fsWriteCalls=${io.writeCalls} fsWriteMs=${io.writeMs.toFixed(1)} fsyncCalls=${io.fsyncCalls} fsyncMs=${io.fsyncMs.toFixed(1)} manifestCommits=${io.manifestCommits}`)
 		process.exit(0)
 	}
 	process.on('SIGTERM', () => void shutdown('SIGTERM'))
