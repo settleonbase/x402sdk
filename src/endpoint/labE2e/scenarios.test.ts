@@ -3,7 +3,6 @@
  * The head advances by a plan (one value per eth_blockNumber call = one per tick).
  */
 import { ethers } from 'ethers'
-import { readSegmentedState, writeSegmentedState } from '../labClPayoutStateStore'
 import type { Ctx, Scenario } from './harness.test'
 
 export const eventKeyOf = (block: number, index: number): string => ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['uint256', 'uint256'], [BigInt(block), BigInt(index)]))
@@ -103,9 +102,7 @@ export const scenarios: Scenario[] = [
 			ctx.chain.gasPriceWei = 200_000_000n // above the 30,000,000 wei cap plus the 50,000,000 wei dust band
 			await ctx.run({ ticks: 2 })
 			// a later run finds a wait that started 10 minutes ago: force flush
-			const st = readSegmentedState(ctx.stateDir) as Record<string, unknown>
-			st.gasWaitStartedAt = ago(600_000)
-			writeSegmentedState(ctx.stateDir, st)
+			await ctx.patchScalars({ gasWaitStartedAt: ago(600_000) })
 			await ctx.run({ ticks: 1 })
 		},
 	},

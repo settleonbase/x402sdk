@@ -16,6 +16,7 @@ import { pathToFileURL } from 'node:url'
 import { ethers } from 'ethers'
 import { canonicalJson, readManifest, readSegmentedState, writeSegmentedState } from '../labClPayoutStateStore'
 import { recoverPayoutState } from '../labPayoutRecovery'
+import { WalWriter } from '../labWal'
 import { FakeBeacon, FakeChain, FakeSigner, KEY_ARRAY, POOL, REDEEM, SIGNER_ADDRESS, type SentTx } from './fakeServers.test'
 
 export const DEFAULT_ROOT = path.resolve(__dirname, '../../..')
@@ -47,6 +48,8 @@ export type Ctx = {
 	run(o: RunOpts): Promise<RunResult>
 	/** Write an initial v2 state (a state the daemon found on disk, e.g. after a rollback or an earlier run). */
 	seedState(state: Record<string, unknown>): void
+	/** Change scalars of the state BETWEEN runs, whichever layout it has: a whole-state rewrite for a version 2 state, one appended log event for a WAL state. */
+	patchScalars(patch: Record<string, unknown>): Promise<void>
 }
 
 const ANSI = /\u001b\[[0-9;]*m/g
@@ -107,8 +110,26 @@ export function digestState(stateDir: string): StateDigest | null {
 	}
 }
 
+/** The logical state, whichever layout it is on disk (version 2 snapshot or WAL): what the daemon would recover. Wall-clock scalars are placeholders as everywhere. */
+export function digestLogical(stateDir: string): { scalars: unknown; pending: unknown[]; consumed: string[]; exited: string[] } | null {
+	if (!fs.existsSync(path.join(stateDir, 'manifest.json'))) return null
+	const rec = recoverPayoutState(stateDir, { readOnly: true })
+	const c = rec.core
+	const scalars = c.scalarsCopy() as Record<string, unknown>
+	const inflight = c.getInFlight()
+	if (inflight) scalars.inFlightWithdraw = JSON.parse(JSON.stringify(inflight))
+	return {
+		scalars: normalizeScalars(scalars),
+		pending: [...c.pendingEntries()].map((e) => ({ ...e })).sort((a, b) => (a.eventKey < b.eventKey ? -1 : 1)),
+		consumed: [...c.consumedKeys()],
+		exited: [...c.exited.keys()],
+	}
+}
+
 export type ScenarioResult = {
 	state: StateDigest | null
+	/** Only set in WAL runs (the file-level digest does not apply to a log). */
+	logical?: ReturnType<typeof digestLogical>
 	signerRequests: unknown[]
 	/** Number of distinct transactions (idempotency keys) per EVENT key, from the daemon's persisted in-flight record at the moment the signer received each send. */
 	paymentsPerEventKey: Record<string, number>
@@ -155,12 +176,13 @@ function childEnv(ctx: Pick<Ctx, 'root' | 'dir' | 'stateFile' | 'stateDir' | 'ch
 	}
 }
 
-export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_ROOT ?? DEFAULT_ROOT): Promise<ScenarioResult> {
+export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_ROOT ?? DEFAULT_ROOT, opts: { walMode?: boolean } = {}): Promise<ScenarioResult> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `labe2e-${s.name.replace(/[^a-z0-9]+/gi, '_').slice(0, 24)}-`))
 	const chain = new FakeChain()
 	const beacon = new FakeBeacon()
 	const signer = new FakeSigner(chain)
 	const labPubkeys: string[] = []
+	const baseEnv: Record<string, string> = { ...(s.env ?? {}), ...(opts.walMode ? { CONET_LAB_MINING_POOL_CL_PAYOUT_WAL: '1' } : {}) }
 	for (let i = 0; i < 6; i++) labPubkeys.push(ethers.hexlify(ethers.concat([ethers.keccak256(ethers.toUtf8Bytes(`lab-pubkey-${i}`)), ethers.dataSlice(ethers.keccak256(ethers.toUtf8Bytes(`lab-pubkey-b-${i}`)), 0, 16)])).toLowerCase())
 	try {
 		await chain.start()
@@ -193,9 +215,27 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 			labPubkeys,
 			runs,
 			seedState: (state) => void writeSegmentedState(stateDir, state),
+			patchScalars: async (patch) => {
+				const walPresent = (() => {
+					try {
+						return fs.readdirSync(path.join(stateDir, 'wal')).length > 0 || (JSON.parse(fs.readFileSync(path.join(stateDir, 'manifest.json'), 'utf8')) as { version?: number }).version === 3
+					} catch {
+						return false
+					}
+				})()
+				if (!walPresent) {
+					const st = readSegmentedState(stateDir) as Record<string, unknown>
+					writeSegmentedState(stateDir, { ...st, ...patch })
+					return
+				}
+				const rec = recoverPayoutState(stateDir, { readOnly: true })
+				const w = new WalWriter({ stateDir, lastSeq: rec.writerLastSeq })
+				await w.append('test-patch', [{ op: 'scalarsSet', patch }]).durable
+				await w.close()
+			},
 			run: async (o) => {
 				const loader = process.execArgv.some((a) => a.includes('tsx')) ? [...process.execArgv] : ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href]
-				const env = childEnv({ root, dir, stateFile, stateDir, chain, beacon, signer, labPubkeys }, s.env ?? {}, o)
+				const env = childEnv({ root, dir, stateFile, stateDir, chain, beacon, signer, labPubkeys }, baseEnv, o)
 				const child = spawn(process.execPath, [...loader, path.join(__dirname, 'childMain.test.ts')], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
 				ctx.currentChild = child
 				const lines: string[] = []
@@ -253,7 +293,8 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 			if (n && !/^\[(labMiningPoolClPayout|labMiningPoolClPayoutDaemon|e2e-child)\]/.test(n)) strayOutput.push(n)
 		}
 		return {
-			state: digestState(stateDir),
+			state: opts.walMode ? null : digestState(stateDir),
+			...(opts.walMode ? { logical: digestLogical(stateDir) } : {}),
 			signerRequests: signer.requests.filter((r) => r.method === 'signer_sendTransaction').map((r) => {
 				const p = r.params as Record<string, unknown>
 				return { keyArray: p.keyArray, chainId: p.chainId, to: p.to, data: p.data, value: p.value, gasLimit: p.gasLimit, idempotencyKey: p.idempotencyKey, requestFingerprint: p.requestFingerprint }

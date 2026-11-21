@@ -103,6 +103,7 @@ import {
 } from './labStartupConfig'
 import { acquireStateDirLock, type StateDirLock } from './labClPayoutStateLock'
 import { assertNoWalEvents } from './labWalGuard'
+import { openWalSession, type WalSession } from './labWalSession'
 import { LabPayoutFailClosedGate } from './labClPayoutFailClosed'
 import type { LabStateHandle } from './labStateHandle'
 import { createLegacyStateStore, type LabClPayoutState, type SkimEntry, type LabPendingEntryJson } from './labLegacyState'
@@ -229,6 +230,8 @@ let labMiningPool = ''
 let labManifestMtime = 0
 let labPhaseLogged = false
 let labSessionState: LabClPayoutState | undefined
+/** WAL mode (CONET_LAB_MINING_POOL_CL_PAYOUT_WAL): the recovered state, the log writer and the long-lived handle. Undefined = the legacy whole-state path. */
+let labWalSession: WalSession | undefined
 /** Back-pressure state of the two scan lines (labBackpressure.ts). */
 let labHistoryPaused = false
 let labRealtimePaused = false
@@ -511,6 +514,11 @@ function tryPersistListeningCheckpoint(h: LabHandle, liveHead: number): void {
 
 function labEnabled(): boolean {
 	return ['1', 'true', 'yes'].includes(String(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT || '').toLowerCase())
+}
+
+/** The write-ahead-log state path. Off by default: the legacy whole-state path is then byte for byte what it was. */
+function labWalMode(): boolean {
+	return ['1', 'true', 'yes', 'on'].includes(String(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_WAL || '').trim().toLowerCase())
 }
 
 function labDryRun(): boolean {
@@ -1337,8 +1345,7 @@ async function labPayoutTick(): Promise<void> {
 		const provider = createLabRpcProvider()
 		const readContract = new ethers.Contract(redeemAddr, READ_ABI, provider)
 
-		const state = getLabSessionState()
-		const h: LabHandle = legacyStore.newHandle(state)
+		const h: LabHandle = labWalSession ? labWalSession.handle : legacyStore.newHandle(getLabSessionState())
 		tickHandle = h
 		h.enterTick()
 		const liveHead = Number(await provider.getBlockNumber())
@@ -1462,6 +1469,10 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	// Refuses to start when another live process holds the state dir (throws, daemon exits).
 	assertPinnedRedeem(process.env.CONET_VALIDATOR_DEPOSIT_REDEEM, CONET_VALIDATOR_DEPOSIT_REDEEM)
 	labStateLock = acquireStateDirLock(resolveSegmentedStateDir())
+	if (labWalMode()) {
+		void startWalMode()
+		return
+	}
 	// Forward-compat guard (always on): events in wal/ would be silently ignored by this build, so refuse to start (labWalGuard.ts).
 	assertNoWalEvents(resolveSegmentedStateDir())
 	labSessionState = initLabSessionState()
@@ -1482,6 +1493,36 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	void labPayoutTick().finally(() => scheduleNextLabTick())
 }
 
+/** WAL-mode start: recover (or bootstrap) the state, then the same start check and first tick as the legacy path. A failure refuses to start (exit 1). */
+async function startWalMode(): Promise<void> {
+	try {
+		labWalSession = await openWalSession({
+			stateDir: resolveSegmentedStateDir(),
+			legacyStateFile: resolveStateFile(),
+			scanFloor: resolveLabScanFloorBlock(),
+			log: (line) => logger(line.includes('ALERT') ? Colors.red(line) : Colors.cyan(line)),
+		})
+		sessionBackfillFloor = labWalSession.sessionBackfillFloor
+		if (shouldStopAfterSettled(labWalSession.settledBatchCount, resolveMaxSettledBatches())) {
+			logger(Colors.cyan('[labMiningPoolClPayout] MAX_SETTLED_BATCHES already reached at start; exiting 0 before any tick'))
+			process.exit(0)
+		}
+		labStarted = true
+		logger(
+			Colors.cyan(
+				`[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=${labPubkeySet.size} tick=${resolveTickMs()}ms ` +
+					`${startupConfigLine()} ` +
+					`realtimeReserved=${resolveRealtimeReservedBatches()} ` +
+					`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} txWaitTimeoutMs=${resolveTxWaitTimeoutMs()} pendingPool=on`
+			)
+		)
+		void labPayoutTick().finally(() => scheduleNextLabTick())
+	} catch (e: unknown) {
+		logger(Colors.red(`[labMiningPoolClPayout] WAL start refused: ${(e as Error)?.message ?? e}`))
+		process.exit(1)
+	}
+}
+
 export function stopValidatorLabMiningPoolClPayoutReporter(): void {
 	labStarted = false
 	labSessionState = undefined
@@ -1495,6 +1536,20 @@ export function stopValidatorLabMiningPoolClPayoutReporter(): void {
 
 /** Persist listening checkpoint before process exit (next restart backfills from lastListeningEndBlock+1). */
 export async function flushLabMiningPoolListeningCheckpoint(): Promise<void> {
+	if (labWalSession) {
+		try {
+			const h = labWalSession.handle
+			h.requireIdle() // a tick that is still running means no write in parallel with it (the legacy path wrote anyway; P2c-3 makes the stop wait for the tick)
+			const provider = createLabRpcProvider()
+			const liveHead = Number(await provider.getBlockNumber())
+			if (Number.isFinite(liveHead)) tryPersistListeningCheckpoint(h, liveHead)
+			await h.commit('scalars')
+			await labWalSession.wal.close()
+		} catch {
+			/* best effort */
+		}
+		return
+	}
 	try {
 		const state = labSessionState ?? legacyStore.readStateFromDisk()
 		const provider = createLabRpcProvider()
