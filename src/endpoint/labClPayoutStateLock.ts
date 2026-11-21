@@ -8,6 +8,7 @@
  * is refused (fail closed). Node built-ins only.
  */
 import fs from 'node:fs'
+import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 
 export type StateDirLock = {
@@ -128,22 +129,48 @@ function reclaimStaleLock(file: string, stale: { pid: number; token: string }): 
 	}
 }
 
+/** Temp files of an acquire that was killed before it published its lock (names `<lock>.tmp.<pid>.<token>`): removed when their pid is dead. Best effort, never throws. */
+function removeStaleTempFiles(file: string): void {
+	try {
+		const dir = path.dirname(file)
+		const prefix = `${path.basename(file)}.tmp.`
+		for (const name of fs.readdirSync(dir)) {
+			if (!name.startsWith(prefix)) continue
+			const pid = Number(name.slice(prefix.length).split('.')[0])
+			if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && !isProcessAlive(pid)) fs.rmSync(path.join(dir, name), { force: true })
+		}
+	} catch {
+		/* a leftover temp file is harmless */
+	}
+}
+
 /**
  * Take the writer lock for a state dir. Throws when another live process holds it, when this
  * process already holds it, or when the lock body is unreadable. Never waits.
  */
 export function acquireStateDirLock(stateDir: string): StateDirLock {
 	const file = stateDirLockPath(stateDir)
+	removeStaleTempFiles(file)
 	for (let attempt = 0; attempt < 3; attempt++) {
 		const token = randomBytes(12).toString('hex')
+		// The lock file must never be observable half-written (found by the C5 random kill test: a kill -9 between the exclusive create and the write left an EMPTY lock file, which every later start
+		// refuses as "unreadable" until an operator removes it). So the body is written and fsynced into a private temp file first and then published with link(), which is atomic and fails with
+		// EEXIST exactly like the exclusive create did. A crash before the link leaves only the temp file (no lock); one after it leaves a complete lock.
+		const tmp = `${file}.tmp.${process.pid}.${token}`
 		try {
-			const fd = fs.openSync(file, 'wx', 0o600)
+			const fd = fs.openSync(tmp, 'wx', 0o600)
 			try {
 				const body = Buffer.from(`${JSON.stringify({ pid: process.pid, token, startedAt: new Date().toISOString() })}\n`, 'utf8')
 				let off = 0
 				while (off < body.length) off += fs.writeSync(fd, body, off, body.length - off)
+				fs.fsyncSync(fd)
 			} finally {
 				fs.closeSync(fd)
+			}
+			try {
+				fs.linkSync(tmp, file)
+			} finally {
+				fs.rmSync(tmp, { force: true })
 			}
 			const lock: StateDirLock = { file, token, release: () => releaseIfOwner(file, token) }
 			held.set(file, lock)

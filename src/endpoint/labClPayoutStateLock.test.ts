@@ -135,3 +135,36 @@ test('B-1 (TOCTOU): a racing reclaimer of the same stale lock is refused; exactl
 		assert.equal(fs.existsSync(lockFile), false)
 	})
 })
+
+test('C5 finding: the lock file is never half-written - a crash between writing the body and publishing it leaves NO lock (the next start succeeds); a stale temp file of a dead pid is cleaned up, a live one is left', () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'labsl-'))
+	const stateDir = path.join(dir, 'state.v2')
+	const realLink = fs.linkSync
+	try {
+		;(fs as unknown as { linkSync: unknown }).linkSync = () => {
+			throw Object.assign(new Error('simulated crash before the lock is published'), { code: 'EIO' })
+		}
+		assert.throws(() => acquireStateDirLock(stateDir), /simulated crash/)
+	} finally {
+		;(fs as unknown as { linkSync: unknown }).linkSync = realLink
+	}
+	const lockFile = stateDirLockPath(stateDir)
+	assert.equal(fs.existsSync(lockFile), false, 'no (empty or partial) lock file exists after the interrupted acquire')
+	// a temp file left by a killed process: removed (dead pid 2147483000); one of a live pid (this process's parent) is left alone
+	const stale = `${lockFile}.tmp.2147483000.abcdef`
+	const live = `${lockFile}.tmp.${process.ppid}.abcdef`
+	fs.writeFileSync(stale, '')
+	fs.writeFileSync(live, '')
+	const lock = acquireStateDirLock(stateDir)
+	try {
+		assert.equal(fs.existsSync(stale), false, 'stale temp file removed')
+		assert.equal(fs.existsSync(live), true, 'a temp file of a live pid is not touched')
+		const body = JSON.parse(fs.readFileSync(lockFile, 'utf8'))
+		assert.equal(body.pid, process.pid)
+		assert.equal(typeof body.token, 'string')
+		assert.equal(fs.readdirSync(dir).filter((n) => n.includes('.tmp.' + process.pid + '.')).length, 0, 'this acquire left no temp file behind')
+	} finally {
+		lock.release()
+		fs.rmSync(dir, { recursive: true, force: true })
+	}
+})
