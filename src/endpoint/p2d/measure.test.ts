@@ -47,13 +47,14 @@ type ChildReport = {
 }
 
 function gcObserver(): { stop: () => Promise<{ count: number; maxPauseMs: number; totalPauseMs: number }> } {
-	const obs = new PerformanceObserver(() => undefined)
+	// entries are collected IN the callback (a callback that does nothing drains the queue, so a later takeRecords() is always empty: the first two M0 runs read 0 pauses for that reason)
+	const recs: { duration: number }[] = []
+	const obs = new PerformanceObserver((list) => void recs.push(...list.getEntries()))
 	obs.observe({ entryTypes: ['gc'] })
 	return {
 		stop: async () => {
-			// PerformanceObserver entries are queued asynchronously: after purely synchronous work they are only readable once the event loop has turned (the first M0 run read 0 pauses for that reason)
+			// delivery to the callback is asynchronous: after purely synchronous work it only happens once the event loop has turned
 			for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r))
-			const recs = obs.takeRecords()
 			obs.disconnect()
 			return { count: recs.length, maxPauseMs: recs.reduce((m, r) => Math.max(m, r.duration), 0), totalPauseMs: recs.reduce((a, r) => a + r.duration, 0) }
 		},
@@ -118,10 +119,10 @@ async function childMain(mode: string, dir: string): Promise<void> {
 	const memBefore = process.memoryUsage()
 	const heapBefore = memBefore.heapUsed
 	const maxRssKb = process.resourceUsage().maxRSS
+	const gcStats = await go.stop() // the workload's own collections only (before the forced ones below)
 	gc?.()
 	gc?.()
 	const mem = process.memoryUsage()
-	const gcStats = await go.stop()
 	void hold
 	const report: ChildReport = {
 		mode,
