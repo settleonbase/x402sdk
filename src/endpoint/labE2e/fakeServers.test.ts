@@ -251,6 +251,8 @@ export class FakeSigner {
 	byKey = new Map<string, { fingerprint: string; hash: string }>()
 	/** 'ok', 'reject' (never broadcast, signer refuses), 'lose-ack' (records the tx, then drops the connection without answering), 'down'. */
 	mode: 'ok' | 'reject' | 'lose-ack' | 'down' = 'ok'
+	/** How many times a connection was REALLY dropped without an answer in 'lose-ack' mode (a hook that sets the mode too late or resets it too early shows up as 0). */
+	acksLost = 0
 	/** Fault injection hooks, called before / after the signer records a send. */
 	beforeRecord?: (tx: Record<string, unknown>) => void
 	afterRecord?: (tx: Record<string, unknown>, hash: string) => void
@@ -305,6 +307,7 @@ export class FakeSigner {
 				this.chain.sent.set(hash.toLowerCase(), { eventKeys: this.eventKeysOf?.(key) ?? [], hash, idempotencyKey: key, to: String(tx.to), data: String(tx.data), value: String(tx.value), gasLimit: String(tx.gasLimit), keyArray: String(tx.keyArray), chainId: Number(tx.chainId), amountWei: BigInt(dec[1]), status: null, mined: false })
 				this.afterRecord?.(tx, hash)
 				if (this.mode === 'lose-ack') {
+					this.acksLost++
 					req.socket.destroy()
 					return
 				}
