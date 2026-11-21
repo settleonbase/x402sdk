@@ -251,6 +251,12 @@ function labSignerRpc(
 				socketPath,
 				path: '/rpc',
 				method: 'POST',
+				// One connection per call, never the pooled global agent. The Node global agent keeps connections alive
+				// (default since Node 19) and the signer closes idle ones after 5 s. The daemon writes its ledger
+				// synchronously between two signer calls and can block the event loop for longer than that, so a pooled
+				// connection that the signer had already closed could be reused and the write would fail with EPIPE
+				// before the request reached the signer. A fresh connection cannot be stale.
+				agent: false,
 				headers: {
 					'content-type': 'application/json',
 					'content-length': Buffer.byteLength(body),
