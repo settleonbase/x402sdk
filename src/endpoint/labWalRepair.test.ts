@@ -644,6 +644,8 @@ test('R7: the damaged frame is listed as an undecodable event with its inferred 
 		assert.deepEqual(r.audit.undecodableEvents.byteRanges, [{ from: a.starts[2], to: a.starts[3] }])
 		assert.match(r.audit.undecodableEvents.note, /AT LEAST 1 event\(s\) above the snapshot could not be decoded.*reconcile EVERY transaction/s)
 		assert.equal(r.audit.lostEventsAtLeast, 3, '103 (undecodable) + 104 + 105')
+		assert.equal(r.audit.lastGoodEventTs, '2026-11-21T00:00:00.000Z', 'the time of the last intact event (102)')
+		assert.ok(!Number.isNaN(Date.parse(r.audit.segmentMtime)))
 		const onDisk = JSON.parse(readFileSync(r.auditFile, 'utf8'))
 		assert.deepEqual(onDisk.undecodableEvents.seqs, [103])
 	} finally {

@@ -114,6 +114,9 @@ export type RepairAudit = {
 		byteRanges: { from: number; to: number }[]
 		note: string
 	}
+	/** Timestamp of the last intact event before the damage (null if the damaged frame is the first of the segment) and the segment file's mtime: the time span to reconcile is between them. */
+	lastGoodEventTs: string | null
+	segmentMtime: string
 	/** At least this many acknowledged events are lost by the cut: decodable ones beyond the snapshot plus undecodable ones beyond the snapshot. */
 	lostEventsAtLeast: number
 	/** The seq the next event gets after recovery: max(lastGoodSeq, snapshotWalSeq) + 1. */
@@ -253,6 +256,13 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 	for (let q = mid.lastGoodSeq + 1; q <= highest; q++) if (!decoded.has(q)) undecodable.push(q)
 	const undecCovered = undecodable.filter((x) => x <= snap.walSeq)
 	const undecLost = undecodable.filter((x) => x > snap.walSeq)
+	let lastGoodTs: string | null = null
+	for (let at = 0; at < mid.badOffset; ) {
+		const d = decodeFrameAt(buf, at)
+		if (!d.ok) break
+		lastGoodTs = d.event.ts
+		at = d.end
+	}
 	const byteRanges: { from: number; to: number }[] = []
 	{
 		let from = mid.badOffset
@@ -300,6 +310,8 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 						? `${undecodable.length} undecodable event(s) lie inside the snapshot (seq ${undecodable.join(', ')}); their effect is already in the state, nothing is lost by cutting them.`
 						: 'no undecodable event between the intact frames.',
 		},
+		lastGoodEventTs: lastGoodTs,
+		segmentMtime: fs.statSync(mid.file).mtime.toISOString(),
 		lostEventsAtLeast: beyond.length + undecLost.length,
 		nextEventSeq: nextSeq,
 		seqReuseNote:
