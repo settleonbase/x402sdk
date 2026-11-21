@@ -33,6 +33,19 @@ import { WAL_DIR, WalMidCorruptionError, decodeFrameAt, scanWal, type WalEvent }
 
 export const MAX_LISTED_UNDECODABLE = 10_000
 
+/** min and max by a loop: Math.min(...a)/Math.max(...a) overflows the call stack on a very large array (a log can hold hundreds of thousands of frames). */
+export function minMax(a: readonly number[]): { min: number; max: number } | null {
+	if (a.length === 0) return null
+	let min = a[0]!
+	let max = a[0]!
+	for (let i = 1; i < a.length; i++) {
+		const v = a[i]!
+		if (v < min) min = v
+		if (v > max) max = v
+	}
+	return { min, max }
+}
+
 /**
  * The undecodable events between the last intact frame and the highest decodable later frame (sequence numbers are contiguous): exact counts by arithmetic, the lists only when the span is
  * at most `maxList` (review R8: a damaged first frame with a snapshot far ahead must not enumerate hundreds of thousands of seqs).
@@ -48,7 +61,7 @@ export function inferUndecodable(lastGoodSeq: number, decodedSeqs: number[], wal
 	lostList: number[]
 } {
 	const decoded = new Set(decodedSeqs)
-	const highest = decodedSeqs.length > 0 ? Math.max(...decodedSeqs) : lastGoodSeq
+	const highest = minMax(decodedSeqs)?.max ?? lastGoodSeq
 	const span = Math.max(0, highest - lastGoodSeq)
 	const count = span - decoded.size
 	const decodedCovered = decodedSeqs.filter((x) => x <= walSeq).length
@@ -283,7 +296,7 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 	const nextSeq = Math.max(mid.lastGoodSeq, snap.walSeq) + 1
 	// R7: the frames that cannot be decoded. Contiguous seqs: everything from lastGoodSeq+1 to the highest decodable later seq that no decodable frame has.
 	const decoded = new Set(seqs)
-	const highest = seqs.length > 0 ? Math.max(...seqs) : mid.lastGoodSeq
+	const highest = minMax(seqs)?.max ?? mid.lastGoodSeq
 	const und = inferUndecodable(mid.lastGoodSeq, seqs, snap.walSeq)
 	const undecodable = und.seqs
 	const undecCount = und.count
@@ -331,7 +344,7 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 		frames,
 		dryRun: opts.dryRun === true,
 		lastGoodSeq: mid.lastGoodSeq,
-		droppedSeqs: seqs.length > 0 ? { first: Math.min(...seqs), last: Math.max(...seqs), count: seqs.length } : null,
+		droppedSeqs: ((mm) => (mm ? { first: mm.min, last: mm.max, count: seqs.length } : null))(minMax(seqs)),
 		droppedCoveredBySnapshot: { count: covered.length, seqs: covered },
 		droppedBeyondSnapshot: { count: beyond.length, seqs: beyond },
 		undecodableEvents: {

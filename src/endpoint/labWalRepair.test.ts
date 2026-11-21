@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import { appendFileSync, chmodSync, readdirSync, statSync, symlinkSync } from 'node:fs'
 import { acquireStateDirLock } from './labClPayoutStateLock'
 import { WAL_DIR, WAL_HEADER_BYTES, WalMidCorruptionError, WalWriter, decodeFrameAt, encodeFrame, formatWalMidCorruptionAlert, scanWal, segmentFileName, type WalEvent, type WalOp } from './labWal'
-import { MAX_LISTED_UNDECODABLE, RUN_ID_RE, inferUndecodable, parseCliArgs, readSnapshotWalSeq, realpathOrAncestor, repairMidCorruption } from './labWalRepair'
+import { MAX_LISTED_UNDECODABLE, RUN_ID_RE, inferUndecodable, minMax, parseCliArgs, readSnapshotWalSeq, realpathOrAncestor, repairMidCorruption } from './labWalRepair'
 
 const key = (i: number): string => `0x${i.toString(16).padStart(64, '0')}`
 const ev = (seq: number, ops: WalOp[], t: string): WalEvent => ({ v: 1, seq, ts: '2026-11-21T00:00:00.000Z', t, ops })
@@ -757,4 +757,17 @@ test('R8: the undecodable list is bounded - a huge span reports exact counts and
 		assert.equal(cnt.coveredCount, full.coveredCount)
 		assert.equal(cnt.lostCount, full.lostCount)
 	}
+})
+
+test('minMax is stack-safe on a huge array (Math.min(...a) would overflow the call stack) and agrees with the spread form on small ones; inferUndecodable survives 500k decoded seqs', () => {
+	assert.equal(minMax([]), null)
+	assert.deepEqual(minMax([5]), { min: 5, max: 5 })
+	assert.deepEqual(minMax([3, 9, 1, 7]), { min: 1, max: 9 })
+	const big = Array.from({ length: 500_000 }, (_, i) => 1000 + i)
+	assert.throws(() => Math.max(...big), RangeError, 'the spread form really overflows here')
+	assert.deepEqual(minMax(big), { min: 1000, max: 500_999 })
+	const r = inferUndecodable(999, big, 0)
+	assert.equal(r.span, 500_000)
+	assert.equal(r.count, 0)
+	assert.equal(r.listTruncated, true)
 })
