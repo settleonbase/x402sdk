@@ -18,6 +18,28 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+/** The filesystem calls the log makes, so tests can inject a volatile page cache (data lost until fsync), ENOSPC and fsync failures (review Z3, errata W7). */
+export interface WalFs {
+	mkdirSync(p: string, o: { recursive: boolean; mode: number }): void
+	openSync(p: string, flags: string, mode?: number): number
+	fsyncSync(fd: number): void
+	closeSync(fd: number): void
+	writeSync(fd: number, buf: Buffer, offset: number, length: number): number
+	fstatSync(fd: number): { size: number }
+	unlinkSync(p: string): void
+	readdirSync(p: string): string[]
+}
+export const nodeWalFs: WalFs = {
+	mkdirSync: (p, o) => void fs.mkdirSync(p, o),
+	openSync: (p, f, m) => fs.openSync(p, f, m),
+	fsyncSync: (fd) => fs.fsyncSync(fd),
+	closeSync: (fd) => fs.closeSync(fd),
+	writeSync: (fd, b, o, l) => fs.writeSync(fd, b, o, l),
+	fstatSync: (fd) => fs.fstatSync(fd),
+	unlinkSync: (p) => fs.unlinkSync(p),
+	readdirSync: (p) => fs.readdirSync(p),
+}
+
 export const WAL_DIR = 'wal'
 export const WAL_FRAME_MAGIC0 = 0x57 // 'W'
 export const WAL_FRAME_MAGIC1 = 0x4c // 'L'
@@ -142,10 +164,10 @@ export function segmentFileName(firstSeq: number): string {
 	return `wal-${firstSeq.toString(16).padStart(16, '0')}.log`
 }
 
-export function listSegments(walDir: string): { file: string; firstSeq: number }[] {
+export function listSegments(walDir: string, fsx: Pick<WalFs, 'readdirSync'> = nodeWalFs): { file: string; firstSeq: number }[] {
 	let names: string[]
 	try {
-		names = fs.readdirSync(walDir)
+		names = fsx.readdirSync(walDir)
 	} catch (e) {
 		if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []
 		throw e
@@ -160,13 +182,33 @@ export function listSegments(walDir: string): { file: string; firstSeq: number }
 	return out
 }
 
-function fsyncDir(dir: string): void {
-	const fd = fs.openSync(dir, 'r')
+function fsyncDir(dir: string, fsx: Pick<WalFs, 'openSync' | 'fsyncSync' | 'closeSync'> = nodeWalFs): void {
+	const fd = fsx.openSync(dir, 'r')
 	try {
-		fs.fsyncSync(fd)
+		fsx.fsyncSync(fd)
 	} finally {
-		fs.closeSync(fd)
+		fsx.closeSync(fd)
 	}
+}
+
+/**
+ * Recovery-time cleanup, before any writer exists (review V5a): remove every segment whose events are all <= throughSeq (they are inside the committed snapshot). `lastSeqInLog` is the
+ * scan's lastSeq; the last segment ends there. This completes an interrupted graceful stop (downgrade manifest committed, segment files not yet deleted) and a crash between the manifest
+ * commit and the truncation. A segment with any event above throughSeq is kept. Returns the removed file names; fsyncs the directory when it removed something.
+ */
+export function removeWalSegmentsThrough(stateDir: string, throughSeq: number, lastSeqInLog: number, fsx: WalFs = nodeWalFs): string[] {
+	const walDir = path.join(stateDir, WAL_DIR)
+	const segs = listSegments(walDir, fsx)
+	const removed: string[] = []
+	for (let i = 0; i < segs.length; i++) {
+		const lastInSeg = i + 1 < segs.length ? segs[i + 1]!.firstSeq - 1 : Math.max(lastSeqInLog, segs[i]!.firstSeq - 1)
+		if (lastInSeg <= throughSeq) {
+			fsx.unlinkSync(path.join(walDir, segs[i]!.file))
+			removed.push(segs[i]!.file)
+		}
+	}
+	if (removed.length > 0) fsyncDir(walDir, fsx)
+	return removed
 }
 
 // ------------------------------------------------------------------ recovery scan
@@ -313,6 +355,8 @@ export type WalWriterOptions = {
 	onFatal?: (err: Error) => void
 	hooks?: WalWriterHooks
 	now?: () => Date
+	/** Test double for the filesystem (default: node:fs). */
+	fs?: WalFs
 }
 
 type Queued = { frame: Buffer; seq: number; resolve: () => void; reject: (e: Error) => void }
@@ -324,7 +368,10 @@ export class WalWriter {
 	private readonly onFatal: (err: Error) => void
 	private readonly hooks: WalWriterHooks
 	private readonly now: () => Date
+	private readonly fsx: WalFs
 	private lastAssigned: number
+	private durable = 0
+	private waiters: { seq: number; resolve: () => void; reject: (e: Error) => void }[] = []
 	private queue: Queued[] = []
 	private flushing = false
 	private scheduled = false
@@ -341,6 +388,8 @@ export class WalWriter {
 		this.segmentBytes = opts.segmentBytes ?? WAL_DEFAULT_SEGMENT_BYTES
 		this.maxFrame = opts.maxFrameBytes ?? WAL_DEFAULT_MAX_FRAME_BYTES
 		this.lastAssigned = opts.lastSeq
+		this.durable = opts.lastSeq // everything up to the snapshot / the scanned log is durable by definition
+		this.fsx = opts.fs ?? nodeWalFs
 		this.hooks = opts.hooks ?? {}
 		this.now = opts.now ?? (() => new Date())
 		this.onFatal =
@@ -356,6 +405,29 @@ export class WalWriter {
 	}
 	get lastSeq(): number {
 		return this.lastAssigned
+	}
+	/** Highest seq whose fsync has completed. */
+	get durableSeq(): number {
+		return this.durable
+	}
+	/**
+	 * Resolves once every event up to `seq` has been fsynced (the snapshot commit waits on this so a snapshot never gets ahead of the log); rejects if the writer died first.
+	 */
+	whenDurable(seq: number): Promise<void> {
+		if (this.durable >= seq) return Promise.resolve()
+		if (this.dead) return Promise.reject(this.dead)
+		return new Promise<void>((resolve, reject) => {
+			this.waiters.push({ seq, resolve, reject })
+		})
+	}
+	private releaseWaiters(): void {
+		if (this.waiters.length === 0) return
+		const rest: typeof this.waiters = []
+		for (const w of this.waiters) {
+			if (w.seq <= this.durable) w.resolve()
+			else rest.push(w)
+		}
+		this.waiters = rest
 	}
 	get isDead(): boolean {
 		return this.dead !== null
@@ -393,26 +465,26 @@ export class WalWriter {
 	}
 
 	private openSegment(firstSeq: number): void {
-		fs.mkdirSync(this.walDir, { recursive: true, mode: 0o700 })
+		this.fsx.mkdirSync(this.walDir, { recursive: true, mode: 0o700 })
 		const file = segmentFileName(firstSeq)
 		const full = path.join(this.walDir, file)
-		const fd = fs.openSync(full, 'a', 0o600)
+		const fd = this.fsx.openSync(full, 'a', 0o600)
 		// a new file must survive a crash together with its directory entry
 		this.hooks.beforeSync?.(file)
-		fs.fsyncSync(fd)
+		this.fsx.fsyncSync(fd)
 		this.hooks.beforeDirSync?.(this.walDir)
-		fsyncDir(this.walDir)
+		fsyncDir(this.walDir, this.fsx)
 		this.fd = fd
 		this.segFile = file
 		this.segFirstSeq = firstSeq
-		this.segSize = fs.fstatSync(fd).size
+		this.segSize = this.fsx.fstatSync(fd).size
 		this.segFrames = 0
 	}
 
 	private closeSegment(): void {
 		if (this.fd !== null) {
 			try {
-				fs.closeSync(this.fd)
+				this.fsx.closeSync(this.fd)
 			} catch {
 				/* closing a segment is best effort */
 			}
@@ -435,10 +507,13 @@ export class WalWriter {
 					this.closeSegment()
 					for (const q of batch) q.reject(err)
 					for (const q of this.queue.splice(0)) q.reject(err)
+					for (const w of this.waiters.splice(0)) w.reject(err)
 					this.onFatal(err)
 					return
 				}
+				this.durable = batch[batch.length - 1]!.seq
 				for (const q of batch) q.resolve()
+				this.releaseWaiters()
 				await Promise.resolve()
 			}
 		} finally {
@@ -474,11 +549,11 @@ export class WalWriter {
 			this.hooks.beforeWrite?.(buf, this.segFile)
 			const partial = this.hooks.partialWrite?.(buf, this.segFile)
 			if (partial !== undefined && partial !== null) {
-				fs.writeSync(this.fd!, buf, 0, Math.max(0, Math.min(partial, buf.length)))
+				this.fsx.writeSync(this.fd!, buf, 0, Math.max(0, Math.min(partial, buf.length)))
 				throw new Error('labWal: simulated partial write')
 			}
 			let off = 0
-			while (off < buf.length) off += fs.writeSync(this.fd!, buf, off, buf.length - off)
+			while (off < buf.length) off += this.fsx.writeSync(this.fd!, buf, off, buf.length - off)
 			this.segSize += buf.length
 			this.segFrames += end - i
 			touched.add(this.segFile)
@@ -490,25 +565,25 @@ export class WalWriter {
 	private syncCurrent(): void {
 		if (this.fd === null) return
 		this.hooks.beforeSync?.(this.segFile)
-		fs.fsyncSync(this.fd)
+		this.fsx.fsyncSync(this.fd)
 		this.fsyncCount++
 		this.hooks.onSync?.(this.segFile)
 	}
 
 	/** Remove every segment file whose events are all <= throughSeq (the snapshot's walSeq). The segment being written is kept unless it is fully covered. */
 	truncateThrough(throughSeq: number): string[] {
-		const segs = listSegments(this.walDir)
+		const segs = listSegments(this.walDir, this.fsx)
 		const removed: string[] = []
 		for (let i = 0; i < segs.length; i++) {
 			const nextFirst = i + 1 < segs.length ? segs[i + 1]!.firstSeq : this.lastAssigned + 1
 			const lastInSeg = nextFirst - 1
 			if (lastInSeg <= throughSeq) {
 				if (segs[i]!.file === this.segFile) this.closeSegment()
-				fs.unlinkSync(path.join(this.walDir, segs[i]!.file))
+				this.fsx.unlinkSync(path.join(this.walDir, segs[i]!.file))
 				removed.push(segs[i]!.file)
 			}
 		}
-		if (removed.length > 0) fsyncDir(this.walDir)
+		if (removed.length > 0) fsyncDir(this.walDir, this.fsx)
 		return removed
 	}
 
@@ -516,9 +591,9 @@ export class WalWriter {
 	async closeAndRemoveAll(): Promise<void> {
 		while (this.queue.length > 0 || this.flushing || this.scheduled) await new Promise((r) => setImmediate(r))
 		this.closeSegment()
-		for (const s of listSegments(this.walDir)) fs.unlinkSync(path.join(this.walDir, s.file))
+		for (const s of listSegments(this.walDir, this.fsx)) this.fsx.unlinkSync(path.join(this.walDir, s.file))
 		try {
-			fsyncDir(this.walDir)
+			fsyncDir(this.walDir, this.fsx)
 		} catch (e) {
 			if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
 		}
