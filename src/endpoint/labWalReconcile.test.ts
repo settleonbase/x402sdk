@@ -51,14 +51,15 @@ const done = (w: World): void => fs.rmSync(w.root, { recursive: true, force: tru
 const ADD3: { t: string; ops: WalOp[] } = {
 	t: 'scan',
 	ops: [
-		{ op: 'pendingAdd', entry: { eventKey: K[0]!, blockNumber: 100, withdrawalIndex: 0, amountWei: '1000' } },
-		{ op: 'pendingAdd', entry: { eventKey: K[1]!, blockNumber: 120, withdrawalIndex: 1, amountWei: '2000' } },
-		{ op: 'pendingAdd', entry: { eventKey: K[2]!, blockNumber: 700, withdrawalIndex: 0, amountWei: '3000' } },
+		{ op: 'pendingAdd', entry: { eventKey: K[0]!, blockNumber: 100, withdrawalIndex: 0, amount: '1000' } },
+		{ op: 'pendingAdd', entry: { eventKey: K[1]!, blockNumber: 120, withdrawalIndex: 1, amount: '2000' } },
+		{ op: 'pendingAdd', entry: { eventKey: K[2]!, blockNumber: 700, withdrawalIndex: 0, amount: '3000' } },
 		{ op: 'scalarsSet', patch: { historyCursor: 200 } },
 	],
 }
-const writeKeys = (w: World, list: object[]): void => fs.writeFileSync(w.keysFile, JSON.stringify(list, null, 2))
-const entryFor = (k: string, i: number): object => ({ eventKey: k, txHash: tx(i), blockNumber: 9000 + i, amountWei: String(1000 * (i + 1)) })
+const REVIEWERS = ['alice@ops', 'bob@ops']
+const writeKeys = (w: World, list: object[], reviewers: unknown = REVIEWERS): void => fs.writeFileSync(w.keysFile, JSON.stringify({ reviewers, entries: list }, null, 2))
+const entryFor = (k: string, i: number): Record<string, unknown> => ({ eventKey: k, txHash: tx(i), blockNumber: 9000 + i, amountWei: String(1000 * (i + 1)), txTotalWei: String(1000 * (i + 1)), nonce: 40 + i })
 const args = (w: World, over: Partial<Parameters<typeof reconcileKeys>[0]> = {}): Parameters<typeof reconcileKeys>[0] => ({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: APPROVAL, keysFile: w.keysFile, ...over })
 const walFiles = (w: World): string[] => listSegments(path.join(w.stateDir, WAL_DIR)).map((s) => s.file)
 
@@ -221,22 +222,29 @@ test('the keys file is validated before anything is touched: format, lower-case 
 	try {
 		const good = entryFor(K[0]!, 0) as Record<string, unknown>
 		const bad: [string, unknown, RegExp][] = [
-			['not an array', { a: 1 }, /non-empty JSON array/],
-			['empty', [], /non-empty JSON array/],
-			['upper-case key', [{ ...good, eventKey: K[0]!.toUpperCase().replace('0X', '0x') }], /LOWER-case/],
-			['short key', [{ ...good, eventKey: '0x12' }], /eventKey must be/],
-			['no tx hash', [{ ...good, txHash: undefined }], /txHash/],
-			['bad tx hash', [{ ...good, txHash: '0xabc' }], /txHash/],
-			['block 0', [{ ...good, blockNumber: 0 }], /blockNumber/],
-			['fractional block', [{ ...good, blockNumber: 1.5 }], /blockNumber/],
-			['amount 0', [{ ...good, amountWei: '0' }], /amountWei/],
-			['amount with a leading zero', [{ ...good, amountWei: '01' }], /amountWei/],
-			['negative amount', [{ ...good, amountWei: '-5' }], /amountWei/],
-			['numeric amount', [{ ...good, amountWei: 5 }], /amountWei/],
-			['unknown field', [{ ...good, extra: 1 }], /unknown field "extra"/],
-			['long note', [{ ...good, note: 'x'.repeat(501) }], /note/],
-			['duplicate key', [good, { ...good, txHash: tx(9) }], /duplicate eventKey/],
-			['not an object', [5], /not an object/],
+			['not an object', [good], /must be a JSON object/],
+			['empty', [], /must be a JSON object/],
+			['entries not an array', { reviewers: REVIEWERS, entries: { a: 1 } }, /non-empty JSON array/],
+			['entries empty', { reviewers: REVIEWERS, entries: [] }, /non-empty JSON array/],
+			['no reviewers', { entries: [good] }, /exactly two ids/],
+			['one reviewer', { reviewers: ['alice@ops'], entries: [good] }, /exactly two ids/],
+			['same reviewer twice', { reviewers: ['alice@ops', 'ALICE@ops'], entries: [good] }, /must be different people/],
+			['bad reviewer id', { reviewers: ['a', 'bob@ops'], entries: [good] }, /exactly two ids/],
+			['unknown top-level field', { reviewers: REVIEWERS, entries: [good], extra: 1 }, /unknown top-level field/],
+			['upper-case key', { reviewers: REVIEWERS, entries: [{ ...good, eventKey: K[0]!.toUpperCase().replace('0X', '0x') }] }, /LOWER-case/],
+			['short key', { reviewers: REVIEWERS, entries: [{ ...good, eventKey: '0x12' }] }, /eventKey must be/],
+			['no tx hash', { reviewers: REVIEWERS, entries: [{ ...good, txHash: undefined }] }, /txHash/],
+			['bad tx hash', { reviewers: REVIEWERS, entries: [{ ...good, txHash: '0xabc' }] }, /txHash/],
+			['block 0', { reviewers: REVIEWERS, entries: [{ ...good, blockNumber: 0 }] }, /blockNumber/],
+			['fractional block', { reviewers: REVIEWERS, entries: [{ ...good, blockNumber: 1.5 }] }, /blockNumber/],
+			['amount 0', { reviewers: REVIEWERS, entries: [{ ...good, amountWei: '0' }] }, /amountWei/],
+			['amount with a leading zero', { reviewers: REVIEWERS, entries: [{ ...good, amountWei: '01' }] }, /amountWei/],
+			['negative amount', { reviewers: REVIEWERS, entries: [{ ...good, amountWei: '-5' }] }, /amountWei/],
+			['numeric amount', { reviewers: REVIEWERS, entries: [{ ...good, amountWei: 5 }] }, /amountWei/],
+			['unknown field', { reviewers: REVIEWERS, entries: [{ ...good, extra: 1 }] }, /unknown field "extra"/],
+			['long note', { reviewers: REVIEWERS, entries: [{ ...good, note: 'x'.repeat(501) }] }, /note/],
+			['duplicate key', { reviewers: REVIEWERS, entries: [good, { ...good, txHash: tx(9) }] }, /duplicate eventKey/],
+			['not an object', { reviewers: REVIEWERS, entries: [5] }, /not an object/],
 		]
 		for (const [name, list, re] of bad) {
 			fs.writeFileSync(w.keysFile, JSON.stringify(list))
@@ -245,8 +253,8 @@ test('the keys file is validated before anything is touched: format, lower-case 
 		}
 		fs.writeFileSync(w.keysFile, '{not json')
 		await assert.rejects(reconcileKeys(args(w)), /not valid JSON/)
-		assert.throws(() => parseKeysFile(JSON.stringify(Array.from({ length: MAX_RECONCILE_KEYS + 1 }, (_, i) => entryFor(hex(0x10000 + i), i)))), /more than 20000 keys/)
-		assert.equal(parseKeysFile(JSON.stringify([good, { ...(entryFor(K[1]!, 1) as object), note: 'matched in tx ' + tx(1) }])).length, 2)
+		assert.throws(() => parseKeysFile(JSON.stringify({ reviewers: REVIEWERS, entries: Array.from({ length: MAX_RECONCILE_KEYS + 1 }, (_, i) => entryFor(hex(0x10000 + i), i)) })), /more than 20000 keys/)
+		assert.equal(parseKeysFile(JSON.stringify({ reviewers: REVIEWERS, entries: [good, { ...entryFor(K[1]!, 1), note: 'matched in tx ' + tx(1) }] })).entries.length, 2)
 		assert.equal(walFiles(w).length, 1)
 		// arguments
 		for (const [name, over, re] of [
@@ -384,7 +392,7 @@ test('a listed key that belongs to the current in-flight record REFUSES the run 
 test('keys that are already consumed or unknown are still booked (classified in the audit); a key list may not exceed the cap; the daemon and the other recovery modules never reference this command', async () => {
 	const w = await world([ADD3, { t: 'x', ops: [{ op: 'consumedAdd', key: hex(0xb1) }] }])
 	try {
-		writeKeys(w, [entryFor(hex(0xb1), 0), entryFor(hex(0xb2), 1), entryFor(K[0]!, 2)])
+		writeKeys(w, [entryFor(hex(0xb1), 3), { ...entryFor(hex(0xb2), 4), note: 'unknown to the state; paid in tx f04 per the signer record' }, entryFor(K[0]!, 0)])
 		const dry = await reconcileKeys(args(w, { dryRun: true }))
 		if (dry.status !== 'dry-run') throw new Error('expected a dry run')
 		assert.deepEqual(dry.audit.counts, { wasPending: 1, alreadyConsumed: 1, neither: 1 })
@@ -424,6 +432,80 @@ test('CLI: missing --keys-file or run id exits 2 and touches nothing; --dry-run 
 		assert.equal(real.status, 0, real.stderr)
 		assert.equal(JSON.parse(real.stdout).status, 'appended')
 		assert.equal(walFiles(w).length, 2)
+	} finally {
+		done(w)
+	}
+})
+
+// ------------------------------------------------------------ review R9 / R10
+test('R9: offline self-check per tx hash - a declared amount that differs from the pending entry, a foreign pending key mixed into a tx, inconsistent group fields, and an unexplained key all REFUSE before anything is touched; a correct multi-key tx passes', async () => {
+	const w = await world([ADD3])
+	try {
+		const before = walFiles(w)
+		const refuse = async (name: string, list: object[], re: RegExp): Promise<void> => {
+			writeKeys(w, list)
+			await assert.rejects(reconcileKeys(args(w)), re, name)
+			assert.deepEqual(walFiles(w), before, `${name}: nothing appended`)
+			assert.equal(fs.existsSync(w.auditDir), false, `${name}: nothing written`)
+		}
+		// the reviewer's cases: declared amount 999 for a key whose pending entry is 1000
+		await refuse('declared amount differs from pending', [{ ...entryFor(K[0]!, 0), amountWei: '999', txTotalWei: '999' }], /declared amountWei 999 differs from the pending entry's amount 1000/)
+		// a pending key that was never paid mixed into the same tx: the total of the tx (K0+K1 = 3000) no longer matches (K0+K1+K2 = 6000)
+		const tx0 = tx(77)
+		await refuse(
+			'foreign pending key in the tx',
+			[
+				{ eventKey: K[0], txHash: tx0, blockNumber: 9000, amountWei: '1000', txTotalWei: '3000', nonce: 41 },
+				{ eventKey: K[1], txHash: tx0, blockNumber: 9000, amountWei: '2000', txTotalWei: '3000', nonce: 41 },
+				{ eventKey: K[2], txHash: tx0, blockNumber: 9000, amountWei: '3000', txTotalWei: '3000', nonce: 41 },
+			],
+			/keys add up to 6000 wei \(pending 6000 \+ declared 0\) but the tx total is 3000/
+		)
+		await refuse('group declares different totals', [{ eventKey: K[0], txHash: tx0, blockNumber: 9000, amountWei: '1000', txTotalWei: '3000' }, { eventKey: K[1], txHash: tx0, blockNumber: 9000, amountWei: '2000', txTotalWei: '3001' }], /different txTotalWei/)
+		await refuse('group declares different blocks', [{ eventKey: K[0], txHash: tx0, blockNumber: 9000, amountWei: '1000', txTotalWei: '3000' }, { eventKey: K[1], txHash: tx0, blockNumber: 9001, amountWei: '2000', txTotalWei: '3000' }], /different blockNumbers/)
+		await refuse('group declares different nonces', [{ eventKey: K[0], txHash: tx0, blockNumber: 9000, amountWei: '1000', txTotalWei: '3000', nonce: 1 }, { eventKey: K[1], txHash: tx0, blockNumber: 9000, amountWei: '2000', txTotalWei: '3000', nonce: 2 }], /different nonces/)
+		await refuse('unknown key without an explanation', [entryFor(hex(0xc7), 5)], /neither pending nor consumed.*needs a note/)
+		await refuse('unknown key with a too-short note', [{ ...entryFor(hex(0xc7), 5), note: 'short' }], /needs a note/)
+		// a correct two-key tx passes: 1000 + 2000 = 3000, one tx, one nonce
+		writeKeys(w, [{ eventKey: K[0], txHash: tx0, blockNumber: 9000, amountWei: '1000', txTotalWei: '3000', nonce: 41 }, { eventKey: K[1], txHash: tx0, blockNumber: 9000, amountWei: '2000', txTotalWei: '3000', nonce: 41 }])
+		const r = await reconcileKeys(args(w, { dryRun: true }))
+		if (r.status !== 'dry-run') throw new Error('expected a dry run')
+		assert.deepEqual(r.audit.txGroups, [{ txHash: tx0, blockNumber: 9000, nonce: 41, txTotalWei: '3000', keyCount: 2, pendingSumWei: '3000', declaredOtherSumWei: '0', sumWei: '3000', ok: true }])
+		assert.deepEqual(r.audit.reviewers, REVIEWERS)
+		assert.match(r.audit.reviewersNote, /plain strings.*cannot verify/)
+		// an unknown key WITH an explanation passes and is listed separately; a mixed tx (pending + unknown) adds the declared amount of the unknown one
+		writeKeys(w, [
+			{ eventKey: K[0], txHash: tx0, blockNumber: 9000, amountWei: '1000', txTotalWei: '1500' },
+			{ eventKey: hex(0xc8), txHash: tx0, blockNumber: 9000, amountWei: '500', txTotalWei: '1500', note: 'state lost the pendingAdd; amount from the chain tx logs' },
+		])
+		const m = await reconcileKeys(args(w, { dryRun: true }))
+		if (m.status !== 'dry-run') throw new Error('expected a dry run')
+		assert.equal(m.audit.txGroups[0]!.sumWei, '1500')
+		assert.deepEqual(m.audit.unverifiableOffline, [{ eventKey: hex(0xc8), amountWei: '500', note: 'state lost the pendingAdd; amount from the chain tx logs' }])
+	} finally {
+		done(w)
+	}
+})
+
+test('R10: the event carries the corrected absolute settledBatchCount (recorded + distinct tx hashes that are not already fully consumed); the audit prints before/after, the distinct counts and the declared nonces', async () => {
+	const w = await world([ADD3, { t: 'settle', ops: [{ op: 'consumedAdd', key: hex(0xd1) }, { op: 'scalarsSet', patch: { settledBatchCount: 7 } }] }])
+	try {
+		writeKeys(w, [entryFor(K[0]!, 0), entryFor(K[1]!, 1), entryFor(hex(0xd1), 2)]) // d1 is consumed already (its settle survived): that tx is not counted again
+		const dry = await reconcileKeys(args(w, { dryRun: true }))
+		if (dry.status !== 'dry-run') throw new Error('expected a dry run')
+		assert.equal(dry.audit.settledBatchCountBefore, 7)
+		assert.equal(dry.audit.distinctTxHashes, 3)
+		assert.equal(dry.audit.distinctTxHashesCounted, 2)
+		assert.equal(dry.audit.settledBatchCountAfter, 9)
+		assert.deepEqual(dry.audit.nonces, [40, 41, 42])
+		assert.match(dry.audit.nonceNote, /declared nonces \(40, 41, 42\)/)
+		const r = await reconcileKeys(args(w))
+		assert.equal(r.status, 'appended')
+		const rec = recoverPayoutState(w.stateDir, { readOnly: true })
+		assert.equal(rec.core.getScalar('settledBatchCount'), 9, 'the corrected count is what a restart reads (the reviewer reproduced 7 where 8 was right)')
+		// idempotent: applying the same event again does not move it (absolute, max-merged)
+		applyOps(rec.core, [{ op: 'scalarsSet', patch: { settledBatchCount: 9 } }])
+		assert.equal(rec.core.getScalar('settledBatchCount'), 9)
 	} finally {
 		done(w)
 	}

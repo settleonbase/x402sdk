@@ -7,7 +7,13 @@
  *
  *  - a command, not a flag: no environment variable, no configuration, no state; the daemon does not reference it (source test);
  *  - the same state-directory lock as the daemon (refuses while held); needs a run id and an approval reference (a plain string: approvalVerified is always false in the audit);
- *  - the input is a human-made list; every key carries its evidence (tx hash, block, amount) and the file is validated (format, lower-case hex, no duplicate keys) before anything is touched;
+ *  - the input is a human-made file {reviewers:[a,b], entries:[...]}: TWO DIFFERENT reviewer ids (plain strings, recorded in the audit; the command cannot verify them); every entry carries its
+ *    evidence (tx hash, block, the key's own amount `amountWei`, the tx total `txTotalWei`, optional wallet `nonce`) and the file is validated (format, lower-case hex, no duplicate keys) before anything is touched;
+ *  - OFFLINE SELF-CONSISTENCY (review R9): entries are grouped by tx hash; inside a group blockNumber/txTotalWei/nonce must agree; for every key that is still pending the declared amount must equal the pending
+ *    entry's amount to the wei; and (pending amounts + declared amounts of the non-pending keys) must equal txTotalWei to the wei. A key that is neither pending nor consumed cannot be checked offline: it is listed separately
+ *    in the audit and its entry must carry a note that explains it (>= 10 characters). Any mismatch refuses the whole run before anything is touched (a wrong key would be booked consumed for good: there is no consumedDel);
+ *  - settledBatchCount (review R10): the lost settle events also lost their count. The event carries the absolute corrected count = recorded + number of distinct tx hashes that are not already fully consumed;
+ *    the audit prints before/after and the nonces the entries declare so the operator can compare them with the Lab wallet's chain nonce;
  *  - the audit goes first: written OUTSIDE the state directory (exclusive create, fsync, directory fsync), together with a verbatim copy of the input file; only then is the single event appended
  *    and fsynced; a `.done.json` record with the seq and the frame hash is written afterwards. A repeated run id fails before anything is appended;
  *  - it appends nothing when the log is not clean (a torn tail or mid-log damage must be repaired first), and it never modifies or removes an existing event or file;
@@ -30,7 +36,9 @@ export const MAX_RECONCILE_KEYS = 20_000
 const KEY_RE = /^0x[0-9a-f]{64}$/
 const TX_RE = /^0x[0-9a-f]{64}$/
 
-export type ReconcileInput = { eventKey: string; txHash: string; blockNumber: number; amountWei: string; note?: string }
+export type ReconcileInput = { eventKey: string; txHash: string; blockNumber: number; /** The key's own amount. */ amountWei: string; /** The whole tx's NativeWithdrawn amount (same for every key of the tx). */ txTotalWei: string; nonce?: number; note?: string }
+export type ReconcileFile = { reviewers: [string, string]; entries: ReconcileInput[] }
+const REVIEWER_RE = /^[A-Za-z0-9._@:-]{3,64}$/
 
 export type ReconcileAudit = {
 	runId: string
@@ -46,7 +54,20 @@ export type ReconcileAudit = {
 	eventSeq: number
 	keysFileSha256: string
 	keyCount: number
+	reviewers: [string, string]
+	reviewersNote: string
 	keys: (ReconcileInput & { was: 'pending' | 'consumed-already' | 'neither' })[]
+	/** R9: per tx hash: the offline self-check (all must be ok, otherwise the run is refused). */
+	txGroups: { txHash: string; blockNumber: number; nonce: number | null; txTotalWei: string; keyCount: number; pendingSumWei: string; declaredOtherSumWei: string; sumWei: string; ok: boolean }[]
+	/** R9: keys that are neither pending nor consumed: cannot be verified offline; each carries the operator's explanation. */
+	unverifiableOffline: { eventKey: string; amountWei: string; note: string }[]
+	/** R10 */
+	settledBatchCountBefore: number
+	settledBatchCountAfter: number
+	distinctTxHashes: number
+	distinctTxHashesCounted: number
+	nonces: number[]
+	nonceNote: string
 	counts: { wasPending: number; alreadyConsumed: number; neither: number }
 	/** Keys that are part of the current in-flight record. A non-empty list means the command REFUSES (see `refused`). */
 	inFlightOverlap: string[]
@@ -72,33 +93,46 @@ export type ReconcileHooks = {
 	beforeAppend?: () => void
 }
 
-/** Parse and validate the human-made list. Throws with the first problem found; nothing has been touched yet. */
-export function parseKeysFile(text: string): ReconcileInput[] {
-	let raw: unknown
+/** Parse and validate the human-made file. Throws with the first problem found; nothing has been touched yet. */
+export function parseKeysFile(text: string): ReconcileFile {
+	let rawFile: unknown
 	try {
-		raw = JSON.parse(text)
+		rawFile = JSON.parse(text)
 	} catch {
 		throw new Error('labWalReconcile: the keys file is not valid JSON')
 	}
-	if (!Array.isArray(raw) || raw.length === 0) throw new Error('labWalReconcile: the keys file must be a non-empty JSON array')
+	if (rawFile === null || typeof rawFile !== 'object' || Array.isArray(rawFile)) throw new Error('labWalReconcile: the keys file must be a JSON object {reviewers:[a,b], entries:[...]}')
+	const top = rawFile as Record<string, unknown>
+	for (const k of Object.keys(top)) if (!['reviewers', 'entries'].includes(k)) throw new Error(`labWalReconcile: the keys file has an unknown top-level field "${k}"`)
+	const rv = top.reviewers
+	if (!Array.isArray(rv) || rv.length !== 2 || rv.some((x) => typeof x !== 'string' || !REVIEWER_RE.test(x))) throw new Error('labWalReconcile: "reviewers" must be an array of exactly two ids (3-64 chars: letters, digits, . _ @ : -)')
+	if (rv[0]!.toLowerCase() === rv[1]!.toLowerCase()) throw new Error('labWalReconcile: the two reviewers must be different people (two different ids)')
+	const raw = top.entries
+	if (!Array.isArray(raw) || raw.length === 0) throw new Error('labWalReconcile: "entries" must be a non-empty JSON array')
 	if (raw.length > MAX_RECONCILE_KEYS) throw new Error(`labWalReconcile: more than ${MAX_RECONCILE_KEYS} keys in one run; split the list (the event must stay far below the frame limit)`)
 	const seen = new Set<string>()
 	const out: ReconcileInput[] = []
+	const dec = (v: unknown, name: string, at: string): string => {
+		if (typeof v !== 'string' || !/^[1-9][0-9]*$/.test(v)) throw new Error(`labWalReconcile: ${at}: ${name} (the evidence) must be a positive decimal string`)
+		return v
+	}
 	raw.forEach((r, i) => {
 		const at = `entry ${i}`
 		if (r === null || typeof r !== 'object' || Array.isArray(r)) throw new Error(`labWalReconcile: ${at} is not an object`)
 		const o = r as Record<string, unknown>
-		for (const k of Object.keys(o)) if (!['eventKey', 'txHash', 'blockNumber', 'amountWei', 'note'].includes(k)) throw new Error(`labWalReconcile: ${at} has an unknown field "${k}"`)
+		for (const k of Object.keys(o)) if (!['eventKey', 'txHash', 'blockNumber', 'amountWei', 'txTotalWei', 'nonce', 'note'].includes(k)) throw new Error(`labWalReconcile: ${at} has an unknown field "${k}"`)
 		if (typeof o.eventKey !== 'string' || !KEY_RE.test(o.eventKey)) throw new Error(`labWalReconcile: ${at}: eventKey must be 0x + 64 LOWER-case hex digits`)
 		if (typeof o.txHash !== 'string' || !TX_RE.test(o.txHash)) throw new Error(`labWalReconcile: ${at}: txHash (the evidence) must be 0x + 64 lower-case hex digits`)
 		if (typeof o.blockNumber !== 'number' || !Number.isSafeInteger(o.blockNumber) || o.blockNumber < 1) throw new Error(`labWalReconcile: ${at}: blockNumber (the evidence) must be a positive integer`)
-		if (typeof o.amountWei !== 'string' || !/^[1-9][0-9]*$/.test(o.amountWei)) throw new Error(`labWalReconcile: ${at}: amountWei (the evidence) must be a positive decimal string`)
+		const amountWei = dec(o.amountWei, 'amountWei', at)
+		const txTotalWei = dec(o.txTotalWei, 'txTotalWei', at)
+		if (o.nonce !== undefined && (typeof o.nonce !== 'number' || !Number.isSafeInteger(o.nonce) || o.nonce < 0)) throw new Error(`labWalReconcile: ${at}: nonce must be a non-negative integer`)
 		if (o.note !== undefined && (typeof o.note !== 'string' || o.note.length > 500)) throw new Error(`labWalReconcile: ${at}: note must be a string of at most 500 characters`)
 		if (seen.has(o.eventKey)) throw new Error(`labWalReconcile: ${at}: duplicate eventKey ${o.eventKey}`)
 		seen.add(o.eventKey)
-		out.push({ eventKey: o.eventKey, txHash: o.txHash, blockNumber: o.blockNumber, amountWei: o.amountWei, ...(o.note !== undefined ? { note: o.note } : {}) })
+		out.push({ eventKey: o.eventKey, txHash: o.txHash, blockNumber: o.blockNumber, amountWei, txTotalWei, ...(o.nonce !== undefined ? { nonce: o.nonce } : {}), ...(o.note !== undefined ? { note: o.note } : {}) })
 	})
-	return out
+	return { reviewers: [rv[0] as string, rv[1] as string], entries: out }
 }
 
 export async function reconcileKeys(opts: { stateDir: string; auditDir: string; runId: string; approval: string; keysFile: string; dryRun?: boolean; now?: () => Date; hooks?: ReconcileHooks }): Promise<ReconcileResult> {
@@ -109,7 +143,8 @@ export async function reconcileKeys(opts: { stateDir: string; auditDir: string; 
 	if (!opts.keysFile) throw new Error('labWalReconcile: a keys file is required')
 	assertAuditDirOutside(opts.stateDir, opts.auditDir)
 	const keysText = fs.readFileSync(opts.keysFile, 'utf8')
-	const keys = parseKeysFile(keysText)
+	const file = parseKeysFile(keysText)
+	const keys = file.entries
 	const now = opts.now ?? (() => new Date())
 	let lock: { release: () => void } | null = null
 	if (!opts.dryRun) {
@@ -120,13 +155,14 @@ export async function reconcileKeys(opts: { stateDir: string; auditDir: string; 
 		}
 	}
 	try {
-		return await reconcileLocked(opts, keys, keysText, now)
+		return await reconcileLocked(opts, file, keysText, now)
 	} finally {
 		lock?.release()
 	}
 }
 
-async function reconcileLocked(opts: { stateDir: string; auditDir: string; runId: string; approval: string; keysFile: string; dryRun?: boolean; hooks?: ReconcileHooks }, keys: ReconcileInput[], keysText: string, now: () => Date): Promise<ReconcileResult> {
+async function reconcileLocked(opts: { stateDir: string; auditDir: string; runId: string; approval: string; keysFile: string; dryRun?: boolean; hooks?: ReconcileHooks }, file: ReconcileFile, keysText: string, now: () => Date): Promise<ReconcileResult> {
+	const keys = file.entries
 	const snap = readSnapshotWalSeq(opts.stateDir)
 	// the log must be clean: nothing is appended behind a torn tail or past mid-log damage
 	let rec
@@ -141,6 +177,49 @@ async function reconcileLocked(opts: { stateDir: string; auditDir: string; runId
 	const lastSeqBefore = rec.writerLastSeq
 	const eventSeq = lastSeqBefore + 1
 	const classified = keys.map((k) => ({ ...k, was: (core.pendingHas(k.eventKey) ? 'pending' : core.consumedHas(k.eventKey) ? 'consumed-already' : 'neither') as 'pending' | 'consumed-already' | 'neither' }))
+	// R9: offline self-consistency, per tx hash. Everything refused here happens BEFORE any file or lock effect beyond the read.
+	const pendingAmount = (k: string): bigint | null => {
+		const e = core.pendingGet(k)
+		if (!e) return null
+		const a = (e as Record<string, unknown>).amount
+		try {
+			return typeof a === 'string' || typeof a === 'number' ? BigInt(a) : null
+		} catch {
+			return null
+		}
+	}
+	const groups = new Map<string, (typeof classified)[number][]>()
+	for (const k of classified) groups.set(k.txHash, [...(groups.get(k.txHash) ?? []), k])
+	const txGroups: ReconcileAudit['txGroups'] = []
+	for (const [txHash, list] of groups) {
+		const first = list[0]!
+		for (const k of list) {
+			if (k.txTotalWei !== first.txTotalWei) throw new Error(`labWalReconcile: R9: tx ${txHash}: the entries declare different txTotalWei (${first.txTotalWei} and ${k.txTotalWei}). Nothing was changed`)
+			if (k.blockNumber !== first.blockNumber) throw new Error(`labWalReconcile: R9: tx ${txHash}: the entries declare different blockNumbers. Nothing was changed`)
+			if ((k.nonce ?? null) !== (first.nonce ?? null)) throw new Error(`labWalReconcile: R9: tx ${txHash}: the entries declare different nonces. Nothing was changed`)
+		}
+		let pendingSum = 0n
+		let otherSum = 0n
+		for (const k of list) {
+			if (k.was === 'pending') {
+				const pa = pendingAmount(k.eventKey)
+				if (pa === null) throw new Error(`labWalReconcile: R9: key ${k.eventKey} is pending but its entry has no readable amount; cannot self-check. Nothing was changed`)
+				if (pa !== BigInt(k.amountWei)) throw new Error(`labWalReconcile: R9: key ${k.eventKey}: declared amountWei ${k.amountWei} differs from the pending entry's amount ${pa}. Nothing was changed`)
+				pendingSum += pa
+			} else otherSum += BigInt(k.amountWei)
+		}
+		const sum = pendingSum + otherSum
+		const ok = sum === BigInt(first.txTotalWei)
+		txGroups.push({ txHash, blockNumber: first.blockNumber, nonce: first.nonce ?? null, txTotalWei: first.txTotalWei, keyCount: list.length, pendingSumWei: pendingSum.toString(), declaredOtherSumWei: otherSum.toString(), sumWei: sum.toString(), ok })
+		if (!ok) throw new Error(`labWalReconcile: R9: tx ${txHash}: the keys add up to ${sum} wei (pending ${pendingSum} + declared ${otherSum}) but the tx total is ${first.txTotalWei}. A foreign or missing key, or a wrong amount: nothing was changed`)
+	}
+	const unverifiable = classified.filter((k) => k.was === 'neither').map((k) => ({ eventKey: k.eventKey, amountWei: k.amountWei, note: (k.note ?? '').trim() }))
+	for (const u of unverifiable) if (u.note.length < 10) throw new Error(`labWalReconcile: R9: key ${u.eventKey} is neither pending nor consumed and cannot be verified offline: its entry needs a note (>= 10 characters) that explains where it comes from. Nothing was changed`)
+	// R10: the settled count. Groups that are entirely consumed already were counted by a surviving settle event.
+	const settledBefore = typeof core.getScalar('settledBatchCount') === 'number' ? (core.getScalar('settledBatchCount') as number) : 0
+	const counted = [...groups.values()].filter((l) => l.some((k) => k.was !== 'consumed-already')).length
+	const settledAfter = settledBefore + counted
+	const nonces = [...new Set(keys.filter((k) => k.nonce !== undefined).map((k) => k.nonce as number))].sort((a, b) => a - b)
 	const inFlight = core.getInFlight()
 	const inFlightKeys = new Set<string>(inFlight && Array.isArray(inFlight.eventKeys) ? (inFlight.eventKeys as string[]) : [])
 	const overlap = keys.filter((k) => inFlightKeys.has(k.eventKey)).map((k) => k.eventKey)
@@ -155,7 +234,9 @@ async function reconcileLocked(opts: { stateDir: string; auditDir: string; runId
 	const cursor = typeof core.getScalar('historyCursor') === 'number' ? (core.getScalar('historyCursor') as number) : null
 	const ops: WalOp[] = []
 	for (const k of keys) ops.push({ op: 'consumedAdd', key: k.eventKey }, { op: 'pendingDel', key: k.eventKey })
-	if (maxPaid !== null) ops.push({ op: 'scalarsSet', patch: { maxPaidHistoryBlock: maxPaid } })
+	const patch: Record<string, unknown> = { settledBatchCount: settledAfter }
+	if (maxPaid !== null) patch.maxPaidHistoryBlock = maxPaid
+	ops.push({ op: 'scalarsSet', patch })
 	const copyName = `wal-reconcile-${opts.runId}.keys.json`
 	const audit: ReconcileAudit = {
 		runId: opts.runId,
@@ -169,6 +250,16 @@ async function reconcileLocked(opts: { stateDir: string; auditDir: string; runId
 		lastSeqBefore,
 		eventSeq,
 		keysFileSha256: createHash('sha256').update(keysText).digest('hex'),
+		reviewers: file.reviewers,
+		reviewersNote: 'The two reviewer ids are plain strings. This command cannot verify that two different people reviewed the list; the receipt must say so and the PM keeps the sign-offs.',
+		txGroups,
+		unverifiableOffline: unverifiable,
+		settledBatchCountBefore: settledBefore,
+		settledBatchCountAfter: settledAfter,
+		distinctTxHashes: groups.size,
+		distinctTxHashesCounted: counted,
+		nonces,
+		nonceNote: 'Compare with the Lab wallet on chain: the declared nonces (' + (nonces.length > 0 ? nonces.join(', ') : 'none declared') + ') must be consecutive and sit between the nonce of the last intact payment and the wallet\'s latest nonce.',
 		keyCount: keys.length,
 		keys: classified,
 		counts: { wasPending: classified.filter((k) => k.was === 'pending').length, alreadyConsumed: classified.filter((k) => k.was === 'consumed-already').length, neither: classified.filter((k) => k.was === 'neither').length },
