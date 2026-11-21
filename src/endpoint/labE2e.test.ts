@@ -17,6 +17,8 @@ const record = process.env.E2E_RECORD === '1'
 for (const s of scenarios) {
 	test(`e2e ${s.name}`, { timeout: 300_000 }, async () => {
 		const r: ScenarioResult = await runScenario(s)
+		const rpcLog = r.rpcLog
+		delete r.rpcLog
 		assert.deepEqual(r.unknownRpcMethods, [], 'the fake chain served every RPC method the reporter used')
 		assert.deepEqual(r.strayOutput, [], 'no stack trace, unhandled rejection or library output outside the reporter\'s own prefixed lines (F2)')
 		for (const [k, n] of Object.entries(r.paymentsPerEventKey)) assert.ok(n <= 1, `event key ${k} was paid by ${n} transactions (F1: at most once)`)
@@ -29,7 +31,10 @@ for (const s of scenarios) {
 		}
 		assert.ok(fs.existsSync(file), `fixture ${file} exists (record it first)`)
 		const golden = fs.readFileSync(file, 'utf8')
-		if (text !== golden && process.env.E2E_ACTUAL_DIR) fs.writeFileSync(path.join(process.env.E2E_ACTUAL_DIR, `${s.name}.actual.json`), text)
+		if (text !== golden && process.env.E2E_ACTUAL_DIR) {
+			fs.writeFileSync(path.join(process.env.E2E_ACTUAL_DIR, `${s.name}.actual.json`), text)
+			fs.writeFileSync(path.join(process.env.E2E_ACTUAL_DIR, `${s.name}.rpclog.json`), JSON.stringify(rpcLog))
+		}
 		assert.equal(text, golden, `${s.name}: result equals the golden fixture`)
 	})
 }

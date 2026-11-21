@@ -14,17 +14,11 @@ export function seedValidators(ctx: Ctx): void {
 	ctx.beacon.validators.set(6, { pubkey: ethers.hexlify(ethers.randomBytes(48)).toLowerCase(), status: 'active_ongoing' })
 }
 
+/** The head per tick: the first tick sees heads[0]; the child asks the fake chain for the next value at the start of every later scheduled tick (see childMain / FakeChain.tickHeads). */
 export function headPlan(ctx: Ctx, heads: number[]): void {
-	let calls = 0
+	ctx.chain.tickHeads = heads
+	ctx.chain.tickIndex = 0
 	ctx.chain.head = heads[0]!
-	const prev = ctx.chain.onRequest
-	ctx.chain.onRequest = async (method, params) => {
-		if (method === 'eth_blockNumber') {
-			ctx.chain.head = heads[Math.min(calls, heads.length - 1)]!
-			calls++
-		}
-		return prev?.(method, params)
-	}
 }
 
 /** a few withdrawals of 1 gwei*k on the history range (100..120) and on the realtime range (>120) */

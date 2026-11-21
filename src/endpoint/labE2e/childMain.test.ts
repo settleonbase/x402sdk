@@ -16,7 +16,12 @@ let finish: () => void = () => undefined
 	if (typeof ms === 'number' && ms === 15_000 && String(new Error().stack).includes('scheduleNextLabTick')) {
 		scheduledTicks++
 		if (scheduledTicks >= ticks) return realSetTimeout(() => finish(), 20)
-		return realSetTimeout(fn, 20, ...a)
+		// before every scheduled tick the child asks the fake chain (plain HTTP) to move its head to this tick's value
+		return realSetTimeout(() => {
+			void fetch(`${process.env.CONET_VALIDATOR_DEPOSIT_RPC_URL}/e2e/tick`)
+				.catch(() => undefined)
+				.then(() => fn(...a))
+		}, 20)
 	}
 	return realSetTimeout(fn, ms, ...a)
 }) as typeof setTimeout

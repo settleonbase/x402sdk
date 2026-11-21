@@ -117,6 +117,8 @@ export type ScenarioResult = {
 	exits: { code: number | null; signal: string | null; killed: boolean }[]
 	chainSent: { amountWei: string; idempotencyKey: string; to: string; value: string; keyArray: string; mined: boolean }[]
 	unknownRpcMethods: string[]
+	/** Not part of the compared result (stripped by the caller): the RPC method sequence, for diagnosing a mismatch. */
+	rpcLog?: string[]
 }
 
 export type Scenario = {
@@ -253,6 +255,7 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 			exits: runs.map((r) => ({ code: r.code, signal: r.signal, killed: r.killed })),
 			chainSent: [...chain.sent.values()].map((t) => ({ amountWei: t.amountWei.toString(), idempotencyKey: t.idempotencyKey, to: t.to, value: t.value, keyArray: t.keyArray, mined: t.mined })),
 			unknownRpcMethods: [...new Set(chain.unknownMethods)],
+			rpcLog: chain.rpcLog,
 		}
 	} finally {
 		await signer.stop()

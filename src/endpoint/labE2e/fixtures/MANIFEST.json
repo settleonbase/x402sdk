@@ -9,7 +9,7 @@
     "result": "16 of 17 scenarios identical (state digests, signer requests, per-event-key payment counts, key log lines); only s02_invariant_c_on differs: df78e6b has no invariant C and pays all five pending entries in one batch, P1 holds the ones ahead of the committed cursor (two batches 4+1) - the known P1 change"
   },
   "normalization": "see labE2e/harness.test.ts header: ANSI and logger prefix removed; ISO timestamps, durations and the wall-clock scalars updatedAt/createdAt/gasWaitStartedAt/frozenAt become placeholders; generation names and manifest writtenAt dropped; nothing else is relaxed",
-  "determinism": "recorded once, then compared twice more on the P1 root and once on the P2 checkout: identical; the first comparison exposed freezeH.frozenAt (wall clock) which is normalized",
+  "determinism": "recorded once, then compared on the P1 root 2 x 5 concurrent runs (heavy CPU load), once alone, and on the P2 checkout: identical; the first comparison exposed freezeH.frozenAt (wall clock, normalized); load exposed an ethers-internal extra eth_blockNumber that broke a head plan counted per RPC call, so the head is now driven per tick over HTTP (/e2e/tick)",
   "goldens": {
     "s01_two_lines_pay.golden.json": "ea78cb821b962e6082d791e4931c4d3b0bf1c0c549df573a2fbc8ec0dd4e5425",
     "s02_invariant_c_on.golden.json": "0069d22011ee18ba5e61aca84d06ed96cdaa06e7d7d487219e47a7cbf70c4b00",
@@ -27,7 +27,7 @@
     "s14_first_batch_gate.golden.json": "2350e5aca12f58f5fcb98791db9eff9a19b6ff39a9dfbc580059c110fa578e5c",
     "s15_kill_after_signer_records.golden.json": "71da8d323d87ae521e0dcf9a0ff3f4fffd63652368fbf43d88ec9129943e6ca8",
     "s16_kill_before_settle.golden.json": "3692d67228adba3869f70aded450d0b9a93ce215d8a5028d4099990f26ede02c",
-    "s17_many_batches_two_lines.golden.json": "9281888afb8c3dd8aca2d06e36b76e81bf2572f698df29e14598da7416890781"
+    "s17_many_batches_two_lines.golden.json": "30ca210efb7651787f34902de6a2743bf08f9f71f7e7e427a161d01e729e5040"
   },
   "review": "independent review of efbc3fd: F1 per-event-key payment counts (asserted <= 1 in every scenario), F2 stray output must be empty, F3 only the reporter tick scheduler timer is shortened (delay 15000 and stack contains scheduleNextLabTick), F4 the group runs by default; scenario s17 added"
 }

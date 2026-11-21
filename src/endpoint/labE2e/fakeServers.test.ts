@@ -59,6 +59,9 @@ export class FakeChain {
 	unknownMethods: string[] = []
 	/** Called on every request (fault injection: delay, kill, 5xx). Return a status to short-circuit. */
 	onRequest?: (method: string, params: unknown[]) => Promise<void | { status: number }>
+	/** The head per tick (set by the scenario); the child asks for the next one over HTTP at the start of every scheduled tick (/e2e/tick), so the head never depends on how many RPC calls a tick makes. */
+	tickHeads: number[] = []
+	tickIndex = 0
 	private server?: http.Server
 	url = ''
 
@@ -162,6 +165,12 @@ export class FakeChain {
 	}
 	async start(): Promise<void> {
 		this.server = http.createServer(async (req, res) => {
+			if ((req.url ?? '').startsWith('/e2e/tick')) {
+				this.tickIndex++
+				if (this.tickHeads.length > 0) this.head = this.tickHeads[Math.min(this.tickIndex, this.tickHeads.length - 1)]!
+				res.end(JSON.stringify({ tick: this.tickIndex, head: this.head }))
+				return
+			}
 			try {
 				const body = JSON.parse(await readBody(req)) as { id: number; method: string; params: unknown[] } | { id: number; method: string; params: unknown[] }[]
 				const one = async (q: { id: number; method: string; params: unknown[] }): Promise<Record<string, unknown>> => {
