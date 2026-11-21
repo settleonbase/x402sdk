@@ -4,6 +4,7 @@
  * Nothing in the reporter is patched; only the global setTimeout used by its scheduler is wrapped here, in this test child.
  */
 import path from 'node:path'
+import v8 from 'node:v8'
 import { pathToFileURL } from 'node:url'
 
 const root = process.env.E2E_REPORTER_ROOT
@@ -12,6 +13,15 @@ const ticks = Number(process.env.E2E_TICKS ?? 1)
 const realSetTimeout = global.setTimeout
 let scheduledTicks = 0
 let finish: () => void = () => undefined
+// P2d memory evidence (opt-in, E2E_TRACE_GC=1): V8's own GC log (--trace-gc, switched on at run time) and a heap sample every 25 ms tagged with the tick counter; the reporter under test is not touched.
+if (process.env.E2E_TRACE_GC) {
+	v8.setFlagsFromString('--trace-gc')
+	const t0 = process.hrtime.bigint()
+	setInterval(() => {
+		const m = process.memoryUsage()
+		console.log(`E2E_HEAP t=${Number((process.hrtime.bigint() - t0) / 1_000_000n)} used=${m.heapUsed} rss=${m.rss} ticks=${scheduledTicks}`)
+	}, 25).unref()
+}
 ;(global as unknown as { setTimeout: unknown }).setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...a: unknown[]) => {
 	if (typeof ms === 'number' && ms === 15_000 && String(new Error().stack).includes('scheduleNextLabTick')) {
 		scheduledTicks++
@@ -34,6 +44,7 @@ async function main(): Promise<void> {
 		if (shuttingDown) return
 		shuttingDown = true
 		console.log(`[e2e-child] ${signal}; draining`)
+		if (process.env.E2E_TRACE_GC) console.log(`E2E_MEM maxRssBytes=${process.resourceUsage().maxRSS * 1024} heapLimit=${v8.getHeapStatistics().heap_size_limit}`)
 		console.log(`[e2e-child] compressed=${scheduledTicks} requested=${ticks}`)
 		let code = 0
 		if (typeof rep.shutdownLabMiningPoolClPayout === 'function') code = await rep.shutdownLabMiningPoolClPayout(Number(process.env.E2E_SHUTDOWN_WAIT_MS ?? 90_000))

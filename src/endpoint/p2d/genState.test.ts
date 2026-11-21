@@ -169,6 +169,12 @@ if (require.main === module && !process.env.NODE_TEST_CONTEXT) {
 			}
 			return a[i + 1]!
 		}
+		if (a.includes('--pending')) {
+			// custom tier: --pending N --consumed M [--history-share f]
+			const pending = Number(get('--pending'))
+			TIERS.custom = { pending, consumed: Number(get('--consumed')), exited: 2_000, historyShare: Number(get('--history-share', String(pending >= 1_900_000 ? 1_800_000 / pending : 1_609_706 / 1_683_285))) }
+			a.push('--tier', 'custom')
+		}
 		const r = await generate({ tier: get('--tier'), forms: get('--form', 'v2,wal,walTail').split(','), out: get('--out'), seed: Number(get('--seed', '1')), tail: Number(get('--tail', '100000')) })
 		process.stdout.write(JSON.stringify(r) + '\n')
 	})().catch((e) => {

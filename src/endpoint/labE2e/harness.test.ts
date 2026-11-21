@@ -252,7 +252,8 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 				await w.close()
 			},
 			run: async (o) => {
-				const loader = process.execArgv.some((a) => a.includes('tsx')) ? [...process.execArgv] : ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href]
+				// the parent's --max-old-space-size is NOT passed on: a scenario sets the child's heap through its own NODE_OPTIONS (P2d old-path heap evidence)
+				const loader = process.execArgv.some((a) => a.includes('tsx')) ? process.execArgv.filter((x) => !x.startsWith('--max-old-space-size')) : ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href]
 				const env = childEnv({ root, dir, stateFile, stateDir, chain, beacon, signer, labPubkeys }, baseEnv, o)
 				const child = spawn(process.execPath, [...loader, path.join(__dirname, 'childMain.test.ts')], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
 				ctx.currentChild = child
