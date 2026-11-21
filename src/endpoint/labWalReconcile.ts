@@ -11,7 +11,9 @@
  *  - the audit goes first: written OUTSIDE the state directory (exclusive create, fsync, directory fsync), together with a verbatim copy of the input file; only then is the single event appended
  *    and fsynced; a `.done.json` record with the seq and the frame hash is written afterwards. A repeated run id fails before anything is appended;
  *  - it appends nothing when the log is not clean (a torn tail or mid-log damage must be repaired first), and it never modifies or removes an existing event or file;
- *  - it does not touch the in-flight record. The audit lists keys that overlap it; a mined in-flight batch is settled by the daemon's own resume path.
+ *  - it REFUSES when any listed key belongs to the current in-flight record (PM decision): the in-flight batch may settle the same keys at the next start, and booking them on both sides
+ *    would confuse the reconciliation. The refusal names the overlapping keys and the in-flight batch (and, for a real run, leaves a `.refused-<time>.json` record in the audit directory;
+ *    it does not use up the run id). First bring the in-flight batch to a final state (settled, or confirmed not sent and released) with the normal in-flight recovery, then run again.
  * `--dry-run` prints the audit and changes nothing (no lock, no files).
  *
  * Usage: node labWalReconcile.js --state-dir <dir> --audit-dir <dir outside the state dir> --run-id <id> --approval <ref> --keys-file <json> [--dry-run]
@@ -46,8 +48,12 @@ export type ReconcileAudit = {
 	keyCount: number
 	keys: (ReconcileInput & { was: 'pending' | 'consumed-already' | 'neither' })[]
 	counts: { wasPending: number; alreadyConsumed: number; neither: number }
-	/** Keys that are part of the current in-flight record: the command does not touch the record; the daemon's resume path settles it. */
+	/** Keys that are part of the current in-flight record. A non-empty list means the command REFUSES (see `refused`). */
 	inFlightOverlap: string[]
+	/** The in-flight batch the overlap belongs to (null when there is no overlap or no in-flight record). */
+	inFlightBatch: { batchId?: string; idempotencyKey?: string; line?: string; amountWei?: string; eventKeyCount?: number; hash?: string } | null
+	/** True when the command refuses to run because of the overlap (a dry run reports it without failing). */
+	refused: boolean
 	/** scalarsSet maxPaidHistoryBlock carried by the event (max over the reconciled HISTORY keys found in pending), or null. */
 	maxPaidHistoryBlock: number | null
 	historyCursor: number | null
@@ -167,6 +173,18 @@ async function reconcileLocked(opts: { stateDir: string; auditDir: string; runId
 		keys: classified,
 		counts: { wasPending: classified.filter((k) => k.was === 'pending').length, alreadyConsumed: classified.filter((k) => k.was === 'consumed-already').length, neither: classified.filter((k) => k.was === 'neither').length },
 		inFlightOverlap: overlap,
+		inFlightBatch:
+			overlap.length > 0 && inFlight
+				? {
+						batchId: typeof inFlight.batchId === 'string' ? inFlight.batchId : undefined,
+						idempotencyKey: typeof inFlight.idempotencyKey === 'string' ? inFlight.idempotencyKey : undefined,
+						line: typeof inFlight.line === 'string' ? inFlight.line : undefined,
+						amountWei: typeof inFlight.amountWei === 'string' ? inFlight.amountWei : undefined,
+						eventKeyCount: Array.isArray(inFlight.eventKeys) ? inFlight.eventKeys.length : undefined,
+						hash: typeof inFlight.hash === 'string' ? inFlight.hash : undefined,
+					}
+				: null,
+		refused: overlap.length > 0,
 		maxPaidHistoryBlock: maxPaid,
 		historyCursor: cursor,
 		maxPaidAboveCursor: maxPaid !== null && cursor !== null && maxPaid > cursor,
@@ -176,10 +194,32 @@ async function reconcileLocked(opts: { stateDir: string; auditDir: string; runId
 			'One manual-reconcile event (consumedAdd + pendingDel per key, idempotent) will be appended at seq ' +
 			eventSeq +
 			'. Keys that are "neither" pending nor consumed are still booked as consumed so the scan cannot re-queue them. ' +
-			(overlap.length > 0 ? `${overlap.length} key(s) belong to the current in-flight record: the record is NOT touched; the daemon resumes it from the signer record. ` : '') +
+			(overlap.length > 0
+				? `REFUSED: ${overlap.length} listed key(s) belong to the current in-flight record (batch ${inFlight?.batchId ?? inFlight?.idempotencyKey ?? '?'}). Bring that batch to a final state first (settled, or confirmed not sent and released), then run again. `
+				: '') +
 			(maxPaid !== null && cursor !== null && maxPaid > cursor ? 'WARNING: the derived maxPaidHistoryBlock is above historyCursor (invariant C): check before starting the daemon. ' : ''),
 	}
 	if (opts.dryRun) return { status: 'dry-run', audit }
+	if (overlap.length > 0) {
+		// leave a record of the refusal outside the state dir (never the main audit file, so the run id stays usable); then refuse
+		try {
+			fs.mkdirSync(opts.auditDir, { recursive: true, mode: 0o700 })
+			const f = path.join(opts.auditDir, `wal-reconcile-${opts.runId}.refused-${now().toISOString().replace(/[:.]/g, '-')}.json`)
+			const fd = fs.openSync(f, 'wx', 0o600)
+			try {
+				fs.writeSync(fd, JSON.stringify(audit, null, 2) + '\n')
+				fs.fsyncSync(fd)
+			} finally {
+				fs.closeSync(fd)
+			}
+		} catch {
+			/* the refusal stands even if the record could not be written */
+		}
+		throw new Error(
+			`labWalReconcile: REFUSED: ${overlap.length} listed key(s) belong to the in-flight batch ${inFlight?.batchId ?? inFlight?.idempotencyKey ?? '?'} (${overlap.slice(0, 3).join(', ')}${overlap.length > 3 ? ', …' : ''}). ` +
+				'Settle it, or confirm it was not sent and release it (normal in-flight recovery), then run again. Nothing was appended'
+		)
+	}
 
 	fs.mkdirSync(opts.auditDir, { recursive: true, mode: 0o700 })
 	const writeExclusive = (name: string, data: string): string => {

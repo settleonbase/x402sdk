@@ -330,23 +330,52 @@ test('G-1 end to end: the settle was lost in a damaged log - after the audited r
 	}
 })
 
-test('keys that belong to the current in-flight record are listed in the audit and the record is NOT touched; a derived maxPaidHistoryBlock above the cursor is flagged', async () => {
-	const rec1 = { batchId: 'b1', idempotencyKey: 'lab-withdrawNative:abc', line: 'history', amountWei: '3000', eventKeys: [K[0], K[1]] }
+test('a listed key that belongs to the current in-flight record REFUSES the run (dry-run reports it without failing); the refusal names the keys and the batch, appends nothing, does not use up the run id; once the in-flight record is cleared the same list runs', async () => {
+	const rec1 = { batchId: 'b1', idempotencyKey: 'lab-withdrawNative:abc', line: 'history', amountWei: '3000', eventKeys: [K[0], K[1]], hash: '0xdead' }
 	const w = await world([{ t: 'scan', ops: ADD3.ops.slice(0, 3).concat([{ op: 'scalarsSet', patch: { historyCursor: 110 } }]) }, { t: 'intent', ops: [{ op: 'inFlightSet', record: rec1 }] }])
 	try {
-		writeKeys(w, [entryFor(K[0]!, 0), entryFor(K[1]!, 1)])
+		writeKeys(w, [entryFor(K[0]!, 0), entryFor(K[2]!, 2)]) // K[0] overlaps, K[2] does not
+		const before = walFiles(w)
 		const dry = await reconcileKeys(args(w, { dryRun: true }))
 		if (dry.status !== 'dry-run') throw new Error('expected a dry run')
-		assert.deepEqual(dry.audit.inFlightOverlap, [K[0], K[1]])
-		assert.equal(dry.audit.maxPaidHistoryBlock, 120)
-		assert.equal(dry.audit.historyCursor, 110)
-		assert.equal(dry.audit.maxPaidAboveCursor, true)
-		assert.match(dry.audit.note, /WARNING: the derived maxPaidHistoryBlock is above historyCursor/)
-		assert.match(dry.audit.note, /2 key\(s\) belong to the current in-flight record: the record is NOT touched/)
-		await reconcileKeys(args(w))
+		assert.equal(dry.audit.refused, true)
+		assert.deepEqual(dry.audit.inFlightOverlap, [K[0]])
+		assert.deepEqual(dry.audit.inFlightBatch, { batchId: 'b1', idempotencyKey: 'lab-withdrawNative:abc', line: 'history', amountWei: '3000', eventKeyCount: 2, hash: '0xdead' })
+		assert.match(dry.audit.note, /REFUSED: 1 listed key\(s\) belong to the current in-flight record \(batch b1\)/)
+		// the real run refuses, names the keys and the batch, appends nothing
+		await assert.rejects(reconcileKeys(args(w)), new RegExp(`REFUSED: 1 listed key\\(s\\) belong to the in-flight batch b1 \\(${K[0]}\\).*Nothing was appended`, 's'))
+		assert.deepEqual(walFiles(w), before)
+		const names = fs.readdirSync(w.auditDir)
+		assert.equal(names.length, 1, 'only the refusal record exists')
+		assert.match(names[0]!, new RegExp(`^wal-reconcile-${RUN}\\.refused-.*\\.json$`))
+		const refused = JSON.parse(fs.readFileSync(path.join(w.auditDir, names[0]!), 'utf8'))
+		assert.equal(refused.refused, true)
+		assert.deepEqual(refused.inFlightOverlap, [K[0]])
+		assert.equal(refused.inFlightBatch.batchId, 'b1')
+		// the list has no overlap with a record for other keys: runs. (a list with only non-overlapping keys is fine while the batch is in flight)
+		writeKeys(w, [entryFor(K[2]!, 2)])
+		const okWhileInFlight = await reconcileKeys(args(w, { runId: 'run-20261121-rec9' }))
+		assert.equal(okWhileInFlight.status, 'appended')
+		// bring the in-flight batch to a final state (the daemon's normal recovery would settle or release it): append a release event as the daemon would
 		const rec = recoverPayoutState(w.stateDir, { readOnly: true })
-		assert.deepEqual(rec.core.getInFlight(), JSON.parse(JSON.stringify(rec1)), 'the in-flight record is exactly as before')
-		assert.ok(rec.warnings.some((x) => /maxPaidHistoryBlock 120 is above historyCursor 110/.test(x)), 'recovery reports the invariant warning, nothing hides it')
+		const wal = new WalWriter({ stateDir: w.stateDir, lastSeq: rec.writerLastSeq, onFatal: fatal })
+		await wal.append('release', [{ op: 'inFlightSet', record: null }]).durable
+		await wal.close()
+		assert.equal(recoverPayoutState(w.stateDir, { readOnly: true }).core.getInFlight(), null)
+		// the refused run id is still usable: the same overlapping list now runs
+		writeKeys(w, [entryFor(K[0]!, 0), entryFor(K[1]!, 1)])
+		const r = await reconcileKeys(args(w))
+		assert.equal(r.status, 'appended')
+		if (r.status !== 'appended') return
+		assert.equal(r.audit.refused, false)
+		assert.deepEqual(r.audit.inFlightOverlap, [])
+		assert.equal(r.audit.maxPaidHistoryBlock, 120)
+		assert.equal(r.audit.maxPaidAboveCursor, true, 'history cursor is 110: the derived high-water 120 is flagged (invariant C)')
+		assert.match(r.audit.note, /WARNING: the derived maxPaidHistoryBlock is above historyCursor/)
+		const after = recoverPayoutState(w.stateDir, { readOnly: true })
+		assert.ok(after.warnings.some((x) => /maxPaidHistoryBlock 120 is above historyCursor 110/.test(x)), 'recovery reports the invariant warning, nothing hides it')
+		assert.equal(after.core.consumedHas(K[0]!), true)
+		assert.equal(after.core.pendingHas(K[0]!), false)
 	} finally {
 		done(w)
 	}
