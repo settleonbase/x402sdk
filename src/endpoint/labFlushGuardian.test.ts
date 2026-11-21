@@ -67,6 +67,6 @@ test('E: flush-summary carries guardianHeld and the identity inspect = dropped +
 	Object.assign(f, { inspect: 200, pendingAtInspect: 1_000_000, droppedChainConsumed: 7, unconfirmed: 3, guardianHeld: 5, held: 0, signable: 185, batches: 2 })
 	assert.equal(f.inspect, f.droppedChainConsumed + f.unconfirmed + f.guardianHeld + f.held + f.signable)
 	const line = formatFlushSummary(f, 185)!
-	assert.match(line, /^flush-summary inspect=200\/1000000 droppedChainConsumed=7 unconfirmed=3 guardianHeld=5 held=0 signable=185 batches=2 settledEntries=185 consumedDelta=192 failed=0$/)
+	assert.match(line, /^flush-summary inspect=200\/1000000 droppedChainConsumed=7 unconfirmed=3 guardianHeld=5 held=0 signable=185 batches=2 settledEntries=185 consumedDelta=192 failed=0 inspectRealtime=0 inspectHistory=0 pendingRealtime=0 pendingHistory=0$/)
 	assert.doesNotMatch(line, /0x/)
 })

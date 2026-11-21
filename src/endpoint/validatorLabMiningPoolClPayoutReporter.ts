@@ -86,6 +86,7 @@ import { planPrune, consumedArchiveDir, appendConsumedArchive } from './labConsu
 import { resolvePendingHighWater, decideLinePauses } from './labBackpressure'
 import { partitionByGuardianBeneficiary } from './labFlushGuardian'
 import { mapWithConcurrency, resolveReadConcurrency, settle } from './labParallel'
+import { selectFlushCandidates } from './labFlushSelect'
 import {
 	inspectSegmentedDir,
 	legacyStateFileExists,
@@ -1207,9 +1208,20 @@ async function flushPendingLabBatches(
 	const flushMax = resolveFlushMaxEntries()
 	const batchEntries = resolveFlushBatchEntries()
 	const maxBatches = resolveFlushMaxBatches()
-	const ordered = [...pending.values()]
-		.sort((a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex)
-		.slice(0, flushMax)
+	const freezeForSelect = state.freezeH?.height
+	// Realtime reserved quota first, then history (see labFlushSelect.ts). Without a freeze height the line cannot be told: oldest-first as before.
+	const selection = selectFlushCandidates(pending.values(), {
+		freezeH: freezeForSelect ?? Number.MAX_SAFE_INTEGER,
+		flushMax,
+		realtimeQuota: freezeForSelect == null ? 0 : resolveRealtimeReservedBatches() * batchEntries,
+		historyFloor: batchEntries,
+		historyHeld: freezeForSelect != null && historyReviewHeld(state),
+	})
+	const ordered = selection.ordered
+	fc.inspectRealtime = selection.realtimeInspected
+	fc.inspectHistory = selection.historyInspected
+	fc.pendingRealtime = selection.realtimePending
+	fc.pendingHistory = selection.historyPending
 	let live: SkimEntry[] = []
 	let droppedConsumed = 0
 	let unconfirmed = 0

@@ -249,7 +249,7 @@ test('scan-summary and flush-summary: integers only, no key, no pubkey, identity
 	assert.equal(formatFlushSummary(f, 0), null)
 	Object.assign(f, { inspect: 200, pendingAtInspect: 1636106, droppedChainConsumed: 7, unconfirmed: 1, guardianHeld: 0, held: 0, signable: 192, batches: 2 })
 	const fl = formatFlushSummary(f, 200)!
-	assert.match(fl, /^flush-summary inspect=200\/1636106 droppedChainConsumed=7 unconfirmed=1 guardianHeld=0 held=0 signable=192 batches=2 settledEntries=200 consumedDelta=207 failed=0$/)
+	assert.match(fl, /^flush-summary inspect=200\/1636106 droppedChainConsumed=7 unconfirmed=1 guardianHeld=0 held=0 signable=192 batches=2 settledEntries=200 consumedDelta=207 failed=0 inspectRealtime=0 inspectHistory=0 pendingRealtime=0 pendingHistory=0$/)
 	assert.doesNotMatch(fl, /0x/)
 	assert.match(formatScanSummary('realtime', Object.assign(newLabScanCounters(), { fetchFailed: true }))!, /fetchFailed=1/)
 	assert.match(formatScanSummary('realtime', Object.assign(newLabScanCounters(), { unconfirmed: true }))!, /unconfirmed=1/)

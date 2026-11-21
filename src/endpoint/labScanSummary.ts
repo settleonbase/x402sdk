@@ -95,10 +95,16 @@ export type LabFlushCounters = {
 	signable: number
 	batches: number
 	failed: boolean
+	/** Of the inspected entries: realtime line / history line (realtime quota first, see labFlushSelect.ts). */
+	inspectRealtime: number
+	inspectHistory: number
+	/** Whole pending pool by line when the flush composed. */
+	pendingRealtime: number
+	pendingHistory: number
 }
 
 export function newLabFlushCounters(): LabFlushCounters {
-	return { inspect: 0, pendingAtInspect: 0, droppedChainConsumed: 0, unconfirmed: 0, guardianHeld: 0, held: 0, signable: 0, batches: 0, failed: false }
+	return { inspect: 0, pendingAtInspect: 0, droppedChainConsumed: 0, unconfirmed: 0, guardianHeld: 0, held: 0, signable: 0, batches: 0, failed: false, inspectRealtime: 0, inspectHistory: 0, pendingRealtime: 0, pendingHistory: 0 }
 }
 
 /** One line per flush that inspected entries or settled a batch; nothing for no-op flushes. */
@@ -107,6 +113,7 @@ export function formatFlushSummary(c: LabFlushCounters, settledEntries: number):
 	return (
 		`flush-summary inspect=${c.inspect}/${c.pendingAtInspect} droppedChainConsumed=${c.droppedChainConsumed} ` +
 		`unconfirmed=${c.unconfirmed} guardianHeld=${c.guardianHeld} held=${c.held} signable=${c.signable} batches=${c.batches} ` +
-		`settledEntries=${settledEntries} consumedDelta=${c.droppedChainConsumed + settledEntries} failed=${c.failed ? 1 : 0}`
+		`settledEntries=${settledEntries} consumedDelta=${c.droppedChainConsumed + settledEntries} failed=${c.failed ? 1 : 0} ` +
+		`inspectRealtime=${c.inspectRealtime} inspectHistory=${c.inspectHistory} pendingRealtime=${c.pendingRealtime} pendingHistory=${c.pendingHistory}`
 	)
 }
