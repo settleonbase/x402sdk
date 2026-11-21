@@ -10,6 +10,8 @@
  *  - it never touches anything when the damage is an ordinary torn tail (scanWal repairs that itself) or when there is no damage;
  *  - it takes the state-directory lock (the same lock the daemon holds) before it reads or cuts anything and refuses when the lock is held (no TOCTOU against a running daemon);
  *  - the cut bytes are stored WHOLE in the audit directory (exclusive create, fsync, sha256 in the audit), not only the decoded summary;
+ *  - frames that cannot be decoded at all (the damaged frame itself) cannot be listed either; the audit gives their inferred seqs, byte ranges and the split by the snapshot, and says that
+ *    at least that many events are lost and every transaction sent in that span must be reconciled (R7);
  *  - the dropped frames are split in the audit: those with seq <= the snapshot's walSeq are COVERED by the snapshot (their effect is already in the state), those above it are
  *    LOST (the operator must check their intents against the signer and the chain). The daemon continues at max(lastGoodSeq, walSeq) + 1 (recovery's writerLastSeq): seqs above that are
  *    REUSED by different events, seqs up to walSeq are not. scanWal accepts the resulting forward jump only because every missing seq lies inside the snapshot (R6);
@@ -98,6 +100,22 @@ export type RepairAudit = {
 	droppedCoveredBySnapshot: { count: number; seqs: number[] }
 	/** R6: dropped frames above snapshotWalSeq: acknowledged events that are really lost by the cut. Check every intent in them. */
 	droppedBeyondSnapshot: { count: number; seqs: number[] }
+	/**
+	 * R7: events that cannot be decoded at all (the damaged frame itself and any other damaged frame between the intact ones). Sequence numbers are contiguous, so they are exactly the
+	 * seqs between lastGoodSeq+1 and the highest decodable later frame that no decodable frame carries. Split by the snapshot like the decodable ones. An undecodable event may have been
+	 * an in-flight record of a transaction that was already sent: it cannot be listed, so the operator must reconcile every transaction sent in that time span.
+	 */
+	undecodableEvents: {
+		count: number
+		seqs: number[]
+		coveredBySnapshot: number[]
+		lostBeyondSnapshot: number[]
+		/** Byte ranges [from, to) of the segment that hold the undecodable frames (all inside the cut part). */
+		byteRanges: { from: number; to: number }[]
+		note: string
+	}
+	/** At least this many acknowledged events are lost by the cut: decodable ones beyond the snapshot plus undecodable ones beyond the snapshot. */
+	lostEventsAtLeast: number
 	/** The seq the next event gets after recovery: max(lastGoodSeq, snapshotWalSeq) + 1. */
 	nextEventSeq: number
 	seqReuseNote: string
@@ -228,6 +246,22 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 	const covered = seqs.filter((x) => x <= snap.walSeq)
 	const beyond = seqs.filter((x) => x > snap.walSeq)
 	const nextSeq = Math.max(mid.lastGoodSeq, snap.walSeq) + 1
+	// R7: the frames that cannot be decoded. Contiguous seqs: everything from lastGoodSeq+1 to the highest decodable later seq that no decodable frame has.
+	const decoded = new Set(seqs)
+	const highest = seqs.length > 0 ? Math.max(...seqs) : mid.lastGoodSeq
+	const undecodable: number[] = []
+	for (let q = mid.lastGoodSeq + 1; q <= highest; q++) if (!decoded.has(q)) undecodable.push(q)
+	const undecCovered = undecodable.filter((x) => x <= snap.walSeq)
+	const undecLost = undecodable.filter((x) => x > snap.walSeq)
+	const byteRanges: { from: number; to: number }[] = []
+	{
+		let from = mid.badOffset
+		for (const off of mid.laterFrameOffsets) {
+			if (off > from) byteRanges.push({ from, to: off })
+			const d = decodeFrameAt(buf, off)
+			from = d.ok ? d.end : off
+		}
+	}
 	const tailSha = createHash('sha256').update(tail).digest('hex')
 	const segmentSha = createHash('sha256').update(buf).digest('hex')
 	const tailName = `wal-midcorruption-${opts.runId}.tail.bin`
@@ -252,6 +286,21 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 		droppedSeqs: seqs.length > 0 ? { first: Math.min(...seqs), last: Math.max(...seqs), count: seqs.length } : null,
 		droppedCoveredBySnapshot: { count: covered.length, seqs: covered },
 		droppedBeyondSnapshot: { count: beyond.length, seqs: beyond },
+		undecodableEvents: {
+			count: undecodable.length,
+			seqs: undecodable,
+			coveredBySnapshot: undecCovered,
+			lostBeyondSnapshot: undecLost,
+			byteRanges,
+			note:
+				undecLost.length > 0
+					? `AT LEAST ${undecLost.length} event(s) above the snapshot could not be decoded and are lost (seq ${undecLost.join(', ')}). They may have been in-flight records of transactions already sent: ` +
+						'reconcile EVERY transaction sent from the signer record and the chain for the whole time span from the last intact event to the end of the segment, and book what was sent as consumed.'
+					: undecodable.length > 0
+						? `${undecodable.length} undecodable event(s) lie inside the snapshot (seq ${undecodable.join(', ')}); their effect is already in the state, nothing is lost by cutting them.`
+						: 'no undecodable event between the intact frames.',
+		},
+		lostEventsAtLeast: beyond.length + undecLost.length,
 		nextEventSeq: nextSeq,
 		seqReuseNote:
 			`After the cut the daemon continues at seq ${nextSeq} (= max(last intact seq ${mid.lastGoodSeq}, snapshot walSeq ${snap.walSeq}) + 1). ` +

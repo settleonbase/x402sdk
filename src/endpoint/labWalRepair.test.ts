@@ -627,3 +627,56 @@ test('R6: snapshot at or behind the last intact frame (the ordinary case) keeps 
 		done(b.root)
 	}
 })
+
+// ------------------------------------------------------------ review R7: the damaged frame itself is a lost event too
+test('R7: the damaged frame is listed as an undecodable event with its inferred seq, byte range and the snapshot split; "at least N lost" counts it; two damaged frames are both found', () => {
+	// walSeq 102, frames 101..105, frame 103 damaged: 104, 105 decodable and lost; 103 undecodable and lost
+	const a = world({ firstSeq: 101, walSeq: 102 })
+	try {
+		const r = repairMidCorruption({ stateDir: a.stateDir, auditDir: a.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' })
+		assert.equal(r.status, 'repaired')
+		if (r.status !== 'repaired') return
+		assert.deepEqual(r.audit.droppedBeyondSnapshot.seqs, [104, 105])
+		assert.equal(r.audit.undecodableEvents.count, 1)
+		assert.deepEqual(r.audit.undecodableEvents.seqs, [103])
+		assert.deepEqual(r.audit.undecodableEvents.lostBeyondSnapshot, [103])
+		assert.deepEqual(r.audit.undecodableEvents.coveredBySnapshot, [])
+		assert.deepEqual(r.audit.undecodableEvents.byteRanges, [{ from: a.starts[2], to: a.starts[3] }])
+		assert.match(r.audit.undecodableEvents.note, /AT LEAST 1 event\(s\) above the snapshot could not be decoded.*reconcile EVERY transaction/s)
+		assert.equal(r.audit.lostEventsAtLeast, 3, '103 (undecodable) + 104 + 105')
+		const onDisk = JSON.parse(readFileSync(r.auditFile, 'utf8'))
+		assert.deepEqual(onDisk.undecodableEvents.seqs, [103])
+	} finally {
+		done(a.root)
+	}
+	// the same damage with the snapshot at 104: the damaged frame 103 lies inside the snapshot, nothing is lost for it
+	const b = world({ firstSeq: 101, walSeq: 104 })
+	try {
+		const r = repairMidCorruption({ stateDir: b.stateDir, auditDir: b.auditDir, runId: RUN, approval: 'PM-2026-11-21-01', dryRun: true })
+		if (r.status !== 'dry-run') throw new Error('expected a dry run')
+		assert.deepEqual(r.audit.undecodableEvents.coveredBySnapshot, [103])
+		assert.deepEqual(r.audit.undecodableEvents.lostBeyondSnapshot, [])
+		assert.match(r.audit.undecodableEvents.note, /inside the snapshot.*nothing is lost/s)
+		assert.equal(r.audit.lostEventsAtLeast, 1, 'only 105 is lost')
+	} finally {
+		done(b.root)
+	}
+	// two damaged frames (102 and 104): both are undecodable, the intact 103 and 105 are listed as decodable
+	const c = world({ firstSeq: 101, walSeq: 100 })
+	try {
+		const buf = Buffer.from(c.damaged)
+		buf[c.starts[3]! + WAL_HEADER_BYTES + 2] = buf[c.starts[3]! + WAL_HEADER_BYTES + 2]! ^ 0x40
+		buf[c.starts[1]! + WAL_HEADER_BYTES + 2] = buf[c.starts[1]! + WAL_HEADER_BYTES + 2]! ^ 0x40
+		buf[c.starts[2]! + WAL_HEADER_BYTES + 2] = c.intact[c.starts[2]! + WAL_HEADER_BYTES + 2]! // frame 103 intact again
+		writeFileSync(c.file, buf)
+		const r = repairMidCorruption({ stateDir: c.stateDir, auditDir: c.auditDir, runId: RUN, approval: 'PM-2026-11-21-01', dryRun: true })
+		if (r.status !== 'dry-run') throw new Error('expected a dry run')
+		assert.equal(r.audit.lastGoodSeq, 101)
+		assert.deepEqual(r.audit.frames.map((f) => f.seq), [103, 105])
+		assert.deepEqual(r.audit.undecodableEvents.seqs, [102, 104])
+		assert.equal(r.audit.undecodableEvents.byteRanges.length, 2)
+		assert.equal(r.audit.lostEventsAtLeast, 4, '102, 103, 104, 105')
+	} finally {
+		done(c.root)
+	}
+})
