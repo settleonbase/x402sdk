@@ -84,6 +84,7 @@ import {
 } from './labScanSummary'
 import { planPrune, consumedArchiveDir, appendConsumedArchive } from './labConsumedPrune'
 import { resolvePendingHighWater, decideLinePauses } from './labBackpressure'
+import { partitionByGuardianBeneficiary } from './labFlushGuardian'
 import {
 	inspectSegmentedDir,
 	legacyStateFileExists,
@@ -1201,7 +1202,7 @@ async function flushPendingLabBatches(
 	const ordered = [...pending.values()]
 		.sort((a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex)
 		.slice(0, flushMax)
-	const live: SkimEntry[] = []
+	let live: SkimEntry[] = []
 	let droppedConsumed = 0
 	let unconfirmed = 0
 	for (const e of ordered) {
@@ -1237,6 +1238,21 @@ async function flushPendingLabBatches(
 				`[labMiningPoolClPayout] flush paid-key dropped=${droppedConsumed} unconfirmed=${unconfirmed} pending=${pending.size}`
 			)
 		)
+	}
+	// Guardian re-check right before signing (see labFlushGuardian.ts): an entry whose pubkey now has an active beneficiary
+	// belongs to the redeem stack. It stays pending and is not marked consumed.
+	{
+		const guardian = await partitionByGuardianBeneficiary(live, defaultLabScanDeps(readContract).guardianBeneficiary)
+		fc.guardianHeld = guardian.held.length
+		fc.unconfirmed += guardian.unconfirmed.length
+		if (guardian.held.length > 0 || guardian.unconfirmed.length > 0) {
+			logger(
+				Colors.yellow(
+					`[labMiningPoolClPayout] flush guardian re-check held=${guardian.held.length} unconfirmed=${guardian.unconfirmed.length}; left pending, not signed`
+				)
+			)
+		}
+		live = guardian.keep
 	}
 	if (!live.length) {
 		if (clearGasWait(state)) persistPending(state, pending)

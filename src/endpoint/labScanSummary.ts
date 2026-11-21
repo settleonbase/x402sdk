@@ -7,6 +7,7 @@
  *     (not required on a line with fetchFailed=1 or unconfirmed=1: the cursor stopped inside a block)
  *   consumedDelta(scan)  = labChainConsumed + nonSkim
  *   consumedDelta(flush) = droppedChainConsumed + settledEntries
+ *   inspect = droppedChainConsumed + unconfirmed + guardianHeld + held + signable   (unconfirmed counts both unreadable views)
  *   change of manifest consumed.lines = sum of every consumedDelta printed since the earlier reading.
  */
 import type { LabScanLine } from './labMiningPoolDualCursor'
@@ -87,6 +88,8 @@ export type LabFlushCounters = {
 	droppedChainConsumed: number
 	/** Entries left pending because the paid-key view could not be confirmed. */
 	unconfirmed: number
+	/** Entries held back because their pubkey gained a guardian with an active beneficiary since they were queued (stay pending, not consumed). */
+	guardianHeld: number
 	/** Entries left pending by the review hold. */
 	held: number
 	signable: number
@@ -95,7 +98,7 @@ export type LabFlushCounters = {
 }
 
 export function newLabFlushCounters(): LabFlushCounters {
-	return { inspect: 0, pendingAtInspect: 0, droppedChainConsumed: 0, unconfirmed: 0, held: 0, signable: 0, batches: 0, failed: false }
+	return { inspect: 0, pendingAtInspect: 0, droppedChainConsumed: 0, unconfirmed: 0, guardianHeld: 0, held: 0, signable: 0, batches: 0, failed: false }
 }
 
 /** One line per flush that inspected entries or settled a batch; nothing for no-op flushes. */
@@ -103,7 +106,7 @@ export function formatFlushSummary(c: LabFlushCounters, settledEntries: number):
 	if (c.inspect === 0 && settledEntries === 0 && !c.failed) return null
 	return (
 		`flush-summary inspect=${c.inspect}/${c.pendingAtInspect} droppedChainConsumed=${c.droppedChainConsumed} ` +
-		`unconfirmed=${c.unconfirmed} held=${c.held} signable=${c.signable} batches=${c.batches} ` +
+		`unconfirmed=${c.unconfirmed} guardianHeld=${c.guardianHeld} held=${c.held} signable=${c.signable} batches=${c.batches} ` +
 		`settledEntries=${settledEntries} consumedDelta=${c.droppedChainConsumed + settledEntries} failed=${c.failed ? 1 : 0}`
 	)
 }
