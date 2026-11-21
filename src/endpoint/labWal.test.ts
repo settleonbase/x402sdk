@@ -4,6 +4,8 @@
  */
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+import { dirname } from 'node:path'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -75,6 +77,9 @@ class Model implements WalApplyTarget {
 	setScalar(n: string, v: unknown): void {
 		this.scalars[n] = v
 	}
+	deleteScalar(n: string): void {
+		delete this.scalars[n]
+	}
 	setInFlight(r: Record<string, unknown> | null): void {
 		this.inFlight = r
 	}
@@ -135,7 +140,7 @@ test('writer: events appended in one turn share one fsync; the promise resolves 
 		const got: number[] = []
 		const r = scanWal(dir, { afterSeq: 0, onEvent: (e) => got.push(e.seq) })
 		assert.deepEqual(got, [1, 2, 3, 4, 5])
-		assert.deepEqual(r, { applied: 5, lastSeq: 5, truncatedBytes: 0, segments: 1 })
+		assert.deepEqual(r, { droppedValidFrames: 0, applied: 5, lastSeq: 5, truncatedBytes: 0, segments: 1 })
 	} finally {
 		done(dir)
 	}
@@ -264,7 +269,7 @@ function writeSeg(dir: string, firstSeq: number, seqs: number[], extra?: Buffer)
 test('recovery: events at or below afterSeq are skipped; an empty log and a missing wal/ are fine', () => {
 	const dir = tmp()
 	try {
-		assert.deepEqual(scanWal(dir, { afterSeq: 0, onEvent: () => assert.fail('no events') }), { applied: 0, lastSeq: 0, truncatedBytes: 0, segments: 0 })
+		assert.deepEqual(scanWal(dir, { afterSeq: 0, onEvent: () => assert.fail('no events') }), { droppedValidFrames: 0, applied: 0, lastSeq: 0, truncatedBytes: 0, segments: 0 })
 		writeSeg(dir, 1, [1, 2, 3, 4, 5])
 		const got: number[] = []
 		const r = scanWal(dir, { afterSeq: 3, onEvent: (e) => got.push(e.seq) })
@@ -470,13 +475,26 @@ test('model: replay from a snapshot point equals replay from zero (skipping even
 })
 
 // ------------------------------------------------------------ real process kill -9 (W7)
+/**
+ * Node arguments for the child (review Z4): reuse the parent's execArgv when it already carries tsx (`tsx --test` passes absolute --require/--import paths, so the child
+ * needs no node_modules above its cwd); otherwise fall back to the absolute tsx loader resolved from the test file.
+ */
+function childNodeArgs(): string[] {
+	if (process.execArgv.some((a) => a.includes('tsx'))) return [...process.execArgv]
+	try {
+		return ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href]
+	} catch {
+		return ['--import', 'tsx']
+	}
+}
+
 test('kill -9: a child appends durable events as fast as it can and is SIGKILLed at random moments; every event it reported durable is in the recovered log, the log is a clean prefix, and recovery equals the reference (12 rounds)', async () => {
 	const r = rng(314159)
 	for (let round = 0; round < 12; round++) {
 		const dir = tmp()
 		try {
 			const seed = 1000 + round
-			const child = spawn(process.execPath, ['--import', 'tsx', join(__dirname, 'labWalKillChild.ts'), dir, String(seed), String(2048 + Math.floor(r() * 4096))], {
+			const child = spawn(process.execPath, [...childNodeArgs(), join(__dirname, 'labWalKillChild.ts'), dir, String(seed), String(2048 + Math.floor(r() * 4096))], {
 				stdio: ['ignore', 'pipe', 'pipe'],
 			})
 			let reported = 0
@@ -516,4 +534,101 @@ test('kill -9: a child appends durable events as fast as it can and is SIGKILLed
 			done(dir)
 		}
 	}
+})
+
+// ------------------------------------------------------------ review Z1 / Z2
+test('Z1: damage in the MIDDLE of the last segment with valid frames after it refuses to start and truncates nothing; damage that runs to the end of the file is a torn tail', () => {
+	const dir = tmp()
+	try {
+		const f = writeSeg(dir, 1, [1, 2, 3, 4, 5])
+		const intact = readFileSync(f)
+		// find the byte range of frame 3 and flip one payload byte
+		let at = 0
+		const starts: number[] = []
+		for (let i = 0; i < 5; i++) {
+			starts.push(at)
+			const d = decodeFrameAt(intact, at)
+			assert.ok(d.ok)
+			if (d.ok) at = d.end
+		}
+		const damaged = Buffer.from(intact)
+		damaged[starts[2]! + WAL_HEADER_BYTES + 2] = damaged[starts[2]! + WAL_HEADER_BYTES + 2]! ^ 0x40
+		writeFileSync(f, damaged)
+		assert.throws(() => scanWal(dir, { afterSeq: 0, onEvent: () => undefined }), (e: unknown) => e instanceof WalCorruptError && /2 valid frame\(s\) follow it/.test(e.message) && new RegExp(`offset ${starts[2]}`).test(e.message))
+		assert.deepEqual(readFileSync(f), damaged, 'nothing was truncated on refusal')
+		// the same damage with the frames after it ALSO gone (the bad region reaches the end of the file): a torn tail, truncated
+		writeFileSync(f, damaged.subarray(0, starts[3]!))
+		const got: number[] = []
+		const r = scanWal(dir, { afterSeq: 0, onEvent: (e) => got.push(e.seq) })
+		assert.deepEqual(got, [1, 2])
+		assert.equal(r.droppedValidFrames, 0)
+		assert.equal(r.truncatedBytes, starts[3]! - starts[2]!)
+		// the operator override: accepts the loss, truncates, and reports how many valid frames were dropped
+		writeFileSync(f, damaged)
+		const r2 = scanWal(dir, { afterSeq: 0, onEvent: () => undefined, acceptMidCorruptionTruncation: true })
+		assert.equal(r2.droppedValidFrames, 2)
+		assert.equal(r2.lastSeq, 2)
+		assert.equal(readFileSync(f).length, starts[2]!)
+		// a bad HEADER (not payload) in the middle is caught the same way
+		writeFileSync(f, intact)
+		const hdr = Buffer.from(intact)
+		hdr[starts[1]!] = 0x00 // magic of frame 2
+		writeFileSync(f, hdr)
+		assert.throws(() => scanWal(dir, { afterSeq: 0, onEvent: () => undefined }), /3 valid frame\(s\) follow it/)
+	} finally {
+		done(dir)
+	}
+})
+
+test('Z1: a torn tail that merely ends the last segment is still truncated (no valid frame after it), and a probe of random garbage finds nothing', () => {
+	const dir = tmp()
+	try {
+		const f = writeSeg(dir, 1, [1, 2, 3])
+		const good = readFileSync(f)
+		const r = rng(77)
+		const junk = Buffer.alloc(500)
+		for (let i = 0; i < junk.length; i++) junk[i] = Math.floor(r() * 256)
+		writeFileSync(f, Buffer.concat([good, junk]))
+		const res = scanWal(dir, { afterSeq: 0, onEvent: () => undefined })
+		assert.equal(res.truncatedBytes, 500)
+		assert.equal(res.droppedValidFrames, 0)
+		assert.deepEqual(readFileSync(f), good)
+	} finally {
+		done(dir)
+	}
+})
+
+test('Z2: scalarsDel deletes scalars, is idempotent, and a replay cannot resurrect a deleted scalar; set-after-delete in the next event brings it back', () => {
+	const m = new Model()
+	const e1: WalOp[] = [{ op: 'scalarsSet', patch: { gasWaitStartedAt: '2026-11-21T00:00:00Z', keep: 1 } }]
+	const e2: WalOp[] = [{ op: 'scalarsDel', names: ['gasWaitStartedAt', 'neverSet'] }]
+	applyOps(m, e1)
+	applyOps(m, e2)
+	assert.equal('gasWaitStartedAt' in m.scalars, false)
+	assert.equal(m.scalars.keep, 1)
+	applyOps(m, e2)
+	assert.equal('gasWaitStartedAt' in m.scalars, false, 'idempotent')
+	// the log replayed in order (set, then delete) ends without the scalar, like the live run
+	const replay = new Model()
+	for (const e of [e1, e2]) applyOps(replay, e)
+	assert.equal(replay.snapshot(), m.snapshot())
+	// set after delete in a later event restores it
+	applyOps(m, [{ op: 'scalarsSet', patch: { gasWaitStartedAt: 'again' } }])
+	assert.equal(m.scalars.gasWaitStartedAt, 'again')
+	// through the real log as well
+	const dir = tmp()
+	return (async () => {
+		try {
+			const w = new WalWriter({ stateDir: dir, lastSeq: 0 })
+			await w.append('t', e1).durable
+			await w.append('t', e2).durable
+			await w.close()
+			const viaLog = new Model()
+			scanWal(dir, { afterSeq: 0, onEvent: (e) => applyOps(viaLog, e.ops) })
+			assert.equal('gasWaitStartedAt' in viaLog.scalars, false)
+			assert.equal(viaLog.scalars.keep, 1)
+		} finally {
+			done(dir)
+		}
+	})()
 })

@@ -51,6 +51,8 @@ export type WalOp =
 	| { op: 'consumedAdd'; key: string }
 	| { op: 'exitedAdd'; pubkey: string }
 	| { op: 'scalarsSet'; patch: Record<string, unknown> }
+	/** Delete scalars (JSON drops undefined, and the daemon deletes e.g. gasWaitStartedAt): an explicit op so a replay cannot resurrect them. Idempotent. */
+	| { op: 'scalarsDel'; names: string[] }
 	| { op: 'inFlightSet'; record: Record<string, unknown> | null }
 
 export type WalEvent = { v: 1; seq: number; ts: string; t: string; ops: WalOp[] }
@@ -150,6 +152,8 @@ function fsyncDir(dir: string): void {
 
 // ------------------------------------------------------------------ recovery scan
 export type ScanResult = {
+	/** Valid frames found AFTER a bad one in the last segment and dropped because acceptMidCorruptionTruncation was set (0 normally). */
+	droppedValidFrames: number
 	/** Events handed to onEvent (seq > afterSeq). */
 	applied: number
 	/** Highest valid seq found in the log (0 when empty); may be <= afterSeq. */
@@ -164,9 +168,38 @@ export type ScanResult = {
  * The log must continue from afterSeq: the first segment cannot start after afterSeq+1 (a gap loses events). Events at or below afterSeq are
  * skipped (already in the snapshot). Only the last segment may end in a torn frame; that tail is truncated (and fsynced) unless `repair` is false.
  */
+/**
+ * Resync probe (review Z1): after a bad frame, look through the rest of the segment for any frame that passes magic, length, CRC and JSON checks.
+ * A torn write can only damage the END of the log (the last write that never finished its fsync), so a valid frame AFTER the damage means the damage is in
+ * the middle: those later frames may be acknowledged events (an intent whose transaction was already sent). Returns the offsets of the valid frames found.
+ */
+export function probeValidFramesAfter(buf: Buffer, badAt: number, maxFrameBytes = WAL_DEFAULT_MAX_FRAME_BYTES): number[] {
+	const found: number[] = []
+	let o = badAt + 1
+	while (o + WAL_HEADER_BYTES <= buf.length) {
+		if (buf[o] === WAL_FRAME_MAGIC0 && buf[o + 1] === WAL_FRAME_MAGIC1) {
+			const r = decodeFrameAt(buf, o, maxFrameBytes)
+			if (r.ok) {
+				found.push(o)
+				o = r.end
+				continue
+			}
+		}
+		o++
+	}
+	return found
+}
+
 export function scanWal(
 	stateDir: string,
-	opts: { afterSeq: number; onEvent: (e: WalEvent) => void; maxFrameBytes?: number; repair?: boolean }
+	opts: {
+		afterSeq: number
+		onEvent: (e: WalEvent) => void
+		maxFrameBytes?: number
+		repair?: boolean
+		/** Operator override, default off: truncate even when valid frames follow the damage (they are dropped and counted in droppedValidFrames). */
+		acceptMidCorruptionTruncation?: boolean
+	}
 ): ScanResult {
 	const walDir = path.join(stateDir, WAL_DIR)
 	const maxFrame = opts.maxFrameBytes ?? WAL_DEFAULT_MAX_FRAME_BYTES
@@ -174,6 +207,7 @@ export function scanWal(
 	let applied = 0
 	let lastSeq = 0
 	let truncatedBytes = 0
+	let droppedValidFrames = 0
 	let expected: number | null = null
 	if (segs.length > 0 && segs[0]!.firstSeq > opts.afterSeq + 1) {
 		throw new WalCorruptError(`labWal: the first segment starts at seq ${segs[0]!.firstSeq} but the snapshot ends at seq ${opts.afterSeq}: events ${opts.afterSeq + 1}..${segs[0]!.firstSeq - 1} are missing`)
@@ -210,6 +244,17 @@ export function scanWal(
 			if (r.reason === 'eof') break
 			// a bad frame
 			if (!isLast) throw new WalCorruptError(`labWal: ${seg.file} offset ${at}: ${r.reason} in a segment that is not the last; refusing to start`)
+			// Z1: a valid frame after the damage is mid-log corruption, not a torn tail: refuse (unless the operator accepts the loss)
+			const later = probeValidFramesAfter(buf, at, maxFrame)
+			if (later.length > 0) {
+				if (!opts.acceptMidCorruptionTruncation) {
+					throw new WalCorruptError(
+						`labWal: ${seg.file} offset ${at}: ${r.reason}, and ${later.length} valid frame(s) follow it (first at offset ${later[0]}). ` +
+							'That is damage in the middle of the log, not a torn tail: those frames may be acknowledged events. Refusing to start and not truncating.'
+					)
+				}
+				droppedValidFrames = later.length
+			}
 			truncatedBytes = buf.length - at
 			if (opts.repair !== false) {
 				const fd = fs.openSync(file, 'r+')
@@ -224,7 +269,7 @@ export function scanWal(
 		}
 		expected = next
 	}
-	return { applied, lastSeq, truncatedBytes, segments: segs.length }
+	return { droppedValidFrames, applied, lastSeq, truncatedBytes, segments: segs.length }
 }
 
 // ------------------------------------------------------------------ writer with group commit
@@ -479,6 +524,7 @@ export interface WalApplyTarget {
 	exitedAdd(pubkey: string): void
 	getScalar(name: string): unknown
 	setScalar(name: string, value: unknown): void
+	deleteScalar(name: string): void
 	setInFlight(record: Record<string, unknown> | null): void
 }
 
@@ -505,6 +551,9 @@ export function applyOps(target: WalApplyTarget, ops: readonly WalOp[]): void {
 						target.setScalar(k, typeof cur === 'number' ? Math.max(cur, v) : v)
 					} else target.setScalar(k, v)
 				}
+				break
+			case 'scalarsDel':
+				for (const n of op.names) target.deleteScalar(n)
 				break
 			case 'inFlightSet':
 				target.setInFlight(op.record)
