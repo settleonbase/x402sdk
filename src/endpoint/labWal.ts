@@ -272,7 +272,9 @@ export function scanWal(
 		const seg = segs[si]!
 		const isLast = si === segs.length - 1
 		const file = path.join(walDir, seg.file)
-		if (expected !== null && seg.firstSeq !== expected) {
+		// R6: a jump FORWARD is accepted only when every missing seq lies inside the snapshot (seq <= afterSeq): that is what an audited repair leaves behind when the
+		// snapshot was ahead of the damaged frame. A jump that hides an event above the snapshot, and any overlap, still refuses.
+		if (expected !== null && seg.firstSeq !== expected && !(seg.firstSeq > expected && seg.firstSeq <= opts.afterSeq + 1)) {
 			throw new WalCorruptError(`labWal: segment ${seg.file} starts at seq ${seg.firstSeq} but the previous segment ended at seq ${expected - 1}`)
 		}
 		const buf = fs.readFileSync(file)

@@ -19,7 +19,7 @@ const key = (i: number): string => `0x${i.toString(16).padStart(64, '0')}`
 const ev = (seq: number, ops: WalOp[], t: string): WalEvent => ({ v: 1, seq, ts: '2026-11-21T00:00:00.000Z', t, ops })
 
 /** A segment of 5 events: 1 scan, 2 intent, 3 hash, 4 settle, 5 scan; frame 3 is then damaged. Returns the file, the intact bytes, and the frame offsets. */
-type WorldOpts = { firstSeq?: number; manifest?: 'v3' | 'v2' | 'none' | 'badjson' | 'nowalseq' | 'v1' }
+type WorldOpts = { firstSeq?: number; walSeq?: number; manifest?: 'v3' | 'v2' | 'none' | 'badjson' | 'nowalseq' | 'v1' }
 function world(o: WorldOpts = {}): { root: string; stateDir: string; auditDir: string; file: string; intact: Buffer; damaged: Buffer; starts: number[] } {
 	const firstSeq = o.firstSeq ?? 1
 	const base = firstSeq - 1
@@ -30,8 +30,9 @@ function world(o: WorldOpts = {}): { root: string; stateDir: string; auditDir: s
 	// the committed manifest the repair reads its scan start from (review R1): the snapshot contains everything up to firstSeq - 1
 	const mf = o.manifest ?? 'v3'
 	const mpath = join(stateDir, 'manifest.json')
-	if (mf === 'v3') writeFileSync(mpath, JSON.stringify({ version: 3, walSeq: base, generation: 'gen-1' }))
-	else if (mf === 'v2') writeFileSync(mpath, JSON.stringify({ version: 2, generation: 'gen-1', scalars: { walSeq: base } }))
+	const snapSeq = o.walSeq ?? base
+	if (mf === 'v3') writeFileSync(mpath, JSON.stringify({ version: 3, walSeq: snapSeq, generation: 'gen-1' }))
+	else if (mf === 'v2') writeFileSync(mpath, JSON.stringify({ version: 2, generation: 'gen-1', scalars: { walSeq: snapSeq } }))
 	else if (mf === 'badjson') writeFileSync(mpath, '{not json')
 	else if (mf === 'nowalseq') writeFileSync(mpath, JSON.stringify({ version: 3, generation: 'gen-1' }))
 	else if (mf === 'v1') writeFileSync(mpath, JSON.stringify({ version: 1, walSeq: base }))
@@ -271,7 +272,7 @@ test('repair gate 2: the cut bytes are stored whole beside the audit (sha256 in 
 		assert.equal(a.tailSha256, createHash('sha256').update(tail).digest('hex'))
 		assert.equal(a.lastGoodSeq, 2)
 		assert.deepEqual(a.droppedSeqs, { first: 4, last: 5, count: 2 })
-		assert.match(a.seqReuseNote, /next event written gets seq 3.*REUSED/s)
+		assert.match(a.seqReuseNote, /continues at seq 3.*reused by different events/s)
 		assert.equal(a.approvalVerified, false)
 		assert.match(a.approvalNote, /plain string.*cannot verify it technically/s)
 		// the dropped seq is really reused: the next event gets seq 3 and the log stays consistent
@@ -549,5 +550,80 @@ test('R5: CLI arguments are strict - a value that starts with -- is refused (--r
 		assert.equal(existsSync(w.auditDir), false)
 	} finally {
 		done(w.root)
+	}
+})
+
+// ------------------------------------------------------------ review R6: the snapshot is AHEAD of the damaged frame
+test('R6: snapshot walSeq 104, frames 101..105, frame 103 damaged: the repair splits the dropped frames into covered (104) and lost (105), the daemon continues at 105, the new event is NOT swallowed as "already in the snapshot", and the log scans cleanly', async () => {
+	const w = world({ firstSeq: 101, walSeq: 104 })
+	try {
+		const r = repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' })
+		assert.equal(r.status, 'repaired')
+		if (r.status !== 'repaired') return
+		assert.equal(r.audit.lastGoodSeq, 102)
+		assert.equal(r.audit.snapshotWalSeq, 104)
+		assert.deepEqual(r.audit.droppedCoveredBySnapshot, { count: 1, seqs: [104] })
+		assert.deepEqual(r.audit.droppedBeyondSnapshot, { count: 1, seqs: [105] })
+		assert.equal(r.audit.nextEventSeq, 105)
+		assert.match(r.audit.seqReuseNote, /continues at seq 105/)
+		assert.match(r.audit.seqReuseNote, /1 lie above it and ARE lost/)
+		// the repaired log (frames 101, 102) scans from the snapshot seq
+		const first: number[] = []
+		const res = scanWal(w.stateDir, { afterSeq: 104, onEvent: (e) => first.push(e.seq) })
+		assert.deepEqual(first, [])
+		assert.equal(res.lastSeq, 102)
+		// recovery's writer start is max(scan.lastSeq, walSeq); its first event is seq 105 in a new segment
+		const wal = new WalWriter({ stateDir: w.stateDir, lastSeq: Math.max(res.lastSeq, 104), onFatal: (e) => { throw e } })
+		const { seq, durable } = wal.append('t', [{ op: 'consumedAdd', key: 'after-repair' }])
+		assert.equal(seq, 105)
+		await durable
+		await wal.close()
+		// the old covered segment (ends at 102) and the new one (starts at 105) are both there: the forward jump 103..104 lies inside the snapshot and is accepted
+		assert.equal(readdirSync(join(w.stateDir, WAL_DIR)).length, 2)
+		const got: number[] = []
+		scanWal(w.stateDir, { afterSeq: 104, onEvent: (e) => got.push(e.seq) })
+		assert.deepEqual(got, [105], 'the event written after the repair is delivered, not dropped')
+		// a LATER snapshot (walSeq 110) still accepts it: the gap only gets more covered
+		scanWal(w.stateDir, { afterSeq: 110, onEvent: () => undefined })
+	} finally {
+		done(w.root)
+	}
+})
+
+test('R6: a forward jump that hides an event ABOVE the snapshot still refuses; so does an overlap', async () => {
+	const w = world({ firstSeq: 101, walSeq: 100 })
+	try {
+		// no damage here: cut the segment to frames 101..102 (intact) and add a second segment that starts at 106 (events 103..105 missing, all above the snapshot at 100)
+		writeFileSync(w.file, w.intact.subarray(0, w.starts[2]))
+		const segB = join(w.stateDir, WAL_DIR, segmentFileName(106))
+		writeFileSync(segB, encodeFrame(ev(106, [{ op: 'consumedAdd', key: 'x' }], 'scan')))
+		assert.throws(() => scanWal(w.stateDir, { afterSeq: 100, onEvent: () => undefined }), /segment .* starts at seq 106 but the previous segment ended at seq 102/)
+		// with the snapshot at 105 the same jump is inside the snapshot: accepted
+		assert.doesNotThrow(() => scanWal(w.stateDir, { afterSeq: 105, onEvent: () => undefined }))
+		// an overlap (second segment starts at 102) refuses whatever the snapshot is
+		rmSync(segB)
+		writeFileSync(join(w.stateDir, WAL_DIR, segmentFileName(102)), encodeFrame(ev(102, [{ op: 'consumedAdd', key: 'y' }], 'scan')))
+		assert.throws(() => scanWal(w.stateDir, { afterSeq: 500, onEvent: () => undefined }), /starts at seq 102 but the previous segment ended at seq 102/)
+	} finally {
+		done(w.root)
+	}
+})
+
+test('R6: snapshot at or behind the last intact frame (the ordinary case) keeps lastGoodSeq + 1; a snapshot beyond ALL frames covers every dropped frame and loses none', () => {
+	const a = world({ firstSeq: 101, walSeq: 100 })
+	const b = world({ firstSeq: 101, walSeq: 110 })
+	try {
+		const ra = repairMidCorruption({ stateDir: a.stateDir, auditDir: a.auditDir, runId: RUN, approval: 'PM-2026-11-21-01', dryRun: true })
+		const rb = repairMidCorruption({ stateDir: b.stateDir, auditDir: b.auditDir, runId: RUN, approval: 'PM-2026-11-21-01', dryRun: true })
+		if (ra.status !== 'dry-run' || rb.status !== 'dry-run') throw new Error('expected dry runs')
+		assert.equal(ra.audit.nextEventSeq, 103)
+		assert.deepEqual(ra.audit.droppedBeyondSnapshot.seqs, [104, 105])
+		assert.equal(ra.audit.droppedCoveredBySnapshot.count, 0)
+		assert.equal(rb.audit.nextEventSeq, 111)
+		assert.equal(rb.audit.droppedBeyondSnapshot.count, 0)
+		assert.deepEqual(rb.audit.droppedCoveredBySnapshot.seqs, [104, 105])
+	} finally {
+		done(a.root)
+		done(b.root)
 	}
 })

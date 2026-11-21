@@ -12,6 +12,7 @@ import { Model, modelView, view } from './labPayoutTestSupport'
 import { opsForSeq } from './labWalKillChild'
 import { LabPayoutStateCore, type PendingEntry } from './labPayoutStateCore'
 import { gracefulStopToV2, postReplayChecks, recoverOrRefuse, recoverPayoutState } from './labPayoutRecovery'
+import { repairMidCorruption } from './labWalRepair'
 import { writeSnapshotCooperative } from './labSnapshotWriter'
 import { WAL_DIR, WalMidCorruptionError, WalWriter, listSegments, segmentFileName, type WalOp } from './labWal'
 import { assertNoWalEvents } from './labWalGuard'
@@ -395,5 +396,56 @@ test('recoverOrRefuse: mid-log damage only alerts (the alert text names the offl
 		assert.throws(() => recoverOrRefuse(path.join(dir, 'missing'), { exit: () => { throw new Exited() } }), /no committed snapshot/)
 	} finally {
 		done(dir)
+	}
+})
+
+test('R6 full stack: snapshot committed at walSeq 12, frame 11 damaged, frames 13..15 beyond the snapshot - after the audited repair recovery starts, continues at 13, and the new events survive another crash and recovery', async () => {
+	const dir = tmp()
+	const audit = tmp()
+	try {
+		let sim = await bootstrap(dir, 91, 100000)
+		await emit(sim, 12)
+		await cycle(sim, 'commit') // manifest walSeq 12; the single segment (events 1..12) is not truncated
+		await emit(sim, 3) // 13..15, acknowledged and then lost by the cut below
+		await sim.wal.close()
+		const file = path.join(dir, WAL_DIR, segmentFileName(1))
+		const buf = fs.readFileSync(file)
+		let off = 0
+		const starts: number[] = []
+		for (let i = 0; i < 15; i++) {
+			starts.push(off)
+			off += 10 + buf.readUInt32LE(off + 2)
+		}
+		buf[starts[10]! + 12] = buf[starts[10]! + 12]! ^ 0x40 // damage the payload of frame 11
+		fs.writeFileSync(file, buf)
+		assert.throws(() => recoverPayoutState(dir), WalMidCorruptionError)
+		const rep = repairMidCorruption({ stateDir: dir, auditDir: path.join(audit, 'a'), runId: 'run-20261121-r6', approval: 'PM-2026-11-21-01' })
+		assert.equal(rep.status, 'repaired')
+		if (rep.status !== 'repaired') return
+		assert.deepEqual(rep.audit.droppedCoveredBySnapshot.seqs, [12])
+		assert.deepEqual(rep.audit.droppedBeyondSnapshot.seqs, [13, 14, 15])
+		assert.equal(rep.audit.nextEventSeq, 13)
+		// recovery: state = the snapshot (12), the covered leftover segment is cleaned, the writer continues at 12
+		const rec = recoverPayoutState(dir)
+		assert.equal(rec.snapshotSeq, 12)
+		assert.equal(rec.replayed, 0)
+		assert.equal(rec.writerLastSeq, 12)
+		assert.equal(rec.cleanedSegments.length, 1)
+		const model = new Model()
+		model.setScalar('freezeH', { height: 500 })
+		for (let q = 1; q <= 12; q++) model.apply(opsForSeq(91, q))
+		assert.equal(view(rec.core), modelView(model))
+		// new life: the events after the repair are different events with seq 13.. and they survive a crash
+		const wal = new WalWriter({ stateDir: dir, lastSeq: rec.writerLastSeq, segmentBytes: 700, onFatal: noFatal })
+		sim = { dir, seed: 92, core: rec.core, wal, model, segmentBytes: 700 }
+		await emit(sim, 4)
+		await wal.close()
+		const rec2 = recoverPayoutState(dir)
+		assert.equal(rec2.replayed, 4, 'the new events are replayed, none swallowed as already in the snapshot')
+		assert.equal(rec2.core.lastAppliedSeq, 16)
+		assert.equal(view(rec2.core), modelView(model))
+	} finally {
+		done(dir)
+		done(audit)
 	}
 })

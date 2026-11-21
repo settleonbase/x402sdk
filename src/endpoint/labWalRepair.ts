@@ -10,7 +10,9 @@
  *  - it never touches anything when the damage is an ordinary torn tail (scanWal repairs that itself) or when there is no damage;
  *  - it takes the state-directory lock (the same lock the daemon holds) before it reads or cuts anything and refuses when the lock is held (no TOCTOU against a running daemon);
  *  - the cut bytes are stored WHOLE in the audit directory (exclusive create, fsync, sha256 in the audit), not only the decoded summary;
- *  - the sequence numbers of the dropped frames are REUSED: after the cut the next event gets lastGoodSeq + 1. The audit says so;
+ *  - the dropped frames are split in the audit: those with seq <= the snapshot's walSeq are COVERED by the snapshot (their effect is already in the state), those above it are
+ *    LOST (the operator must check their intents against the signer and the chain). The daemon continues at max(lastGoodSeq, walSeq) + 1 (recovery's writerLastSeq): seqs above that are
+ *    REUSED by different events, seqs up to walSeq are not. scanWal accepts the resulting forward jump only because every missing seq lies inside the snapshot (R6);
  *  - the scan starts AFTER the snapshot: afterSeq is read from the committed manifest (v3 top-level walSeq, or the informational scalars.walSeq of a v2 downgrade
  *    manifest), never assumed to be 0. A manifest that is missing, unreadable, of another version or without a valid walSeq REFUSES the repair (R1);
  *  - the audit directory is compared with the state directory after realpath (nearest existing ancestor when it does not exist yet), and a symlink as the audit
@@ -92,6 +94,12 @@ export type RepairAudit = {
 	/** Seq of the last intact frame before the damage. The dropped seqs (first..last below) are reused by the next events written after the cut. */
 	lastGoodSeq: number
 	droppedSeqs: { first: number; last: number; count: number } | null
+	/** R6: dropped frames whose seq is <= snapshotWalSeq: already inside the snapshot, nothing is lost by cutting them. */
+	droppedCoveredBySnapshot: { count: number; seqs: number[] }
+	/** R6: dropped frames above snapshotWalSeq: acknowledged events that are really lost by the cut. Check every intent in them. */
+	droppedBeyondSnapshot: { count: number; seqs: number[] }
+	/** The seq the next event gets after recovery: max(lastGoodSeq, snapshotWalSeq) + 1. */
+	nextEventSeq: number
 	seqReuseNote: string
 	/** The raw bytes from the bad offset to the end of the segment, stored beside this audit. */
 	tailFile: string | null
@@ -217,6 +225,9 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 		if (d.ok) frames.push(summarize(d.event, off))
 	}
 	const seqs = frames.map((f) => f.seq)
+	const covered = seqs.filter((x) => x <= snap.walSeq)
+	const beyond = seqs.filter((x) => x > snap.walSeq)
+	const nextSeq = Math.max(mid.lastGoodSeq, snap.walSeq) + 1
 	const tailSha = createHash('sha256').update(tail).digest('hex')
 	const segmentSha = createHash('sha256').update(buf).digest('hex')
 	const tailName = `wal-midcorruption-${opts.runId}.tail.bin`
@@ -239,9 +250,14 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 		dryRun: opts.dryRun === true,
 		lastGoodSeq: mid.lastGoodSeq,
 		droppedSeqs: seqs.length > 0 ? { first: Math.min(...seqs), last: Math.max(...seqs), count: seqs.length } : null,
+		droppedCoveredBySnapshot: { count: covered.length, seqs: covered },
+		droppedBeyondSnapshot: { count: beyond.length, seqs: beyond },
+		nextEventSeq: nextSeq,
 		seqReuseNote:
-			`After the cut the next event written gets seq ${mid.lastGoodSeq + 1}: the dropped sequence numbers are REUSED by different events. ` +
-			'Anything that recorded those seqs (journal lines, receipts) refers to events that no longer exist.',
+			`After the cut the daemon continues at seq ${nextSeq} (= max(last intact seq ${mid.lastGoodSeq}, snapshot walSeq ${snap.walSeq}) + 1). ` +
+			`${covered.length} dropped frame(s) lie inside the snapshot (nothing lost); ${beyond.length} lie above it and ARE lost` +
+			(beyond.length > 0 ? `; seqs ${beyond.filter((x) => x >= nextSeq).length > 0 ? 'from ' + nextSeq : 'none of them'} will be reused by different events` : '') +
+			'. Anything that recorded the lost seqs (journal lines, receipts) refers to events that no longer exist.',
 		tailFile: opts.dryRun ? null : tailName,
 		tailBytes: tail.length,
 		tailSha256: tailSha,

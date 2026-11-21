@@ -161,11 +161,6 @@ export class LayeredMap<K, V> {
 		}
 	}
 
-	/** The frozen map while a snapshot is in flight (what the writer reads), else null. */
-	frozenView(): ReadonlyMap<K, V> | null {
-		return this.frozen
-	}
-
 	/** Delta and tombstone counts (metrics: peak overlay size). */
 	overlaySize(): { delta: number; tombstones: number } {
 		return { delta: this.delta.size, tombstones: this.tombs.size }
@@ -236,9 +231,6 @@ export class LayeredSet<K> {
 	}
 	freeze(): FreezeHandle<K, true> {
 		return this.m.freeze()
-	}
-	frozenView(): ReadonlyMap<K, true> | null {
-		return this.m.frozenView()
 	}
 	overlaySize(): { delta: number; tombstones: number } {
 		return this.m.overlaySize()
