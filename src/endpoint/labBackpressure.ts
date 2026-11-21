@@ -29,13 +29,23 @@ export function nextPaused(wasPaused: boolean, pendingSize: number, high: number
 	return pendingSize >= high
 }
 
-/** Both lines at once. The realtime level is the higher one; a paused realtime line always pauses history too. */
+/**
+ * Both lines at once. The realtime level is the higher one; a paused realtime line always pauses history too.
+ *
+ * Invariant C (labInvariantC.ts): history entries beyond the committed cursor cannot be paid and only become payable as the cursor advances,
+ * yet they sit in the pool. Counting them for the HISTORY pause would freeze the cursor: pool above the level -> history scan paused ->
+ * cursor stuck -> those entries never become payable. So the history line is judged on (total - historyAheadPending) with its own
+ * resume threshold, while the all-lines level (memory guard) still counts the whole pool. With historyAheadPending = 0 (default, or the
+ * invariant off) the result is identical to before.
+ */
 export function decideLinePauses(
 	prev: { history: boolean; realtime: boolean },
 	pendingSize: number,
-	high: { history: number; all: number }
+	high: { history: number; all: number },
+	historyAheadPending = 0
 ): { history: boolean; realtime: boolean } {
 	const realtime = nextPaused(prev.realtime, pendingSize, high.all)
-	const history = nextPaused(prev.history, pendingSize, high.history) || realtime
+	const historyBasis = Math.max(0, pendingSize - Math.max(0, Math.floor(historyAheadPending)))
+	const history = nextPaused(prev.history, historyBasis, high.history) || realtime
 	return { history, realtime }
 }

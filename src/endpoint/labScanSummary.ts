@@ -101,11 +101,33 @@ export type LabFlushCounters = {
 	/** Whole pending pool by line when the flush composed. */
 	pendingRealtime: number
 	pendingHistory: number
+	/**
+	 * Invariant C fields (labInvariantC.ts). null while the invariant is off: the flush-summary line is then byte-identical to before.
+	 * pendingHistory stays the total (= payable + ahead), so existing reconciliation is unchanged.
+	 */
+	invariantC: LabInvariantCFields | null
+}
+
+export type LabInvariantCFields = {
+	/** History entries with blockNumber <= committed cursor. */
+	pendingHistoryPayable: number
+	/** History entries with blockNumber > committed cursor (not payable yet). */
+	pendingHistoryAhead: number
+	/** History candidates refused this flush because their block is beyond the cursor (a count only, not an alert). */
+	histBehindCursorHeld: number
+	/** Committed (persisted) history cursor, null when unset. */
+	histCursor: number | null
+	/** Monotonic high-water of the block of paid history entries, null when unset. */
+	maxPaidHistoryBlock: number | null
+	/** maxPaidHistoryBlock - histCursor; <= 0 is normal, > 0 means a payment passed the cursor. null when unknown. */
+	frontLead: number | null
 }
 
 export function newLabFlushCounters(): LabFlushCounters {
-	return { inspect: 0, pendingAtInspect: 0, droppedChainConsumed: 0, unconfirmed: 0, guardianHeld: 0, held: 0, signable: 0, batches: 0, failed: false, inspectRealtime: 0, inspectHistory: 0, pendingRealtime: 0, pendingHistory: 0 }
+	return { inspect: 0, pendingAtInspect: 0, droppedChainConsumed: 0, unconfirmed: 0, guardianHeld: 0, held: 0, signable: 0, batches: 0, failed: false, inspectRealtime: 0, inspectHistory: 0, pendingRealtime: 0, pendingHistory: 0, invariantC: null }
 }
+
+const dash = (n: number | null): string => (n === null ? '-' : String(n))
 
 /** One line per flush that inspected entries or settled a batch; nothing for no-op flushes. */
 export function formatFlushSummary(c: LabFlushCounters, settledEntries: number): string | null {
@@ -114,6 +136,11 @@ export function formatFlushSummary(c: LabFlushCounters, settledEntries: number):
 		`flush-summary inspect=${c.inspect}/${c.pendingAtInspect} droppedChainConsumed=${c.droppedChainConsumed} ` +
 		`unconfirmed=${c.unconfirmed} guardianHeld=${c.guardianHeld} held=${c.held} signable=${c.signable} batches=${c.batches} ` +
 		`settledEntries=${settledEntries} consumedDelta=${c.droppedChainConsumed + settledEntries} failed=${c.failed ? 1 : 0} ` +
-		`inspectRealtime=${c.inspectRealtime} inspectHistory=${c.inspectHistory} pendingRealtime=${c.pendingRealtime} pendingHistory=${c.pendingHistory}`
+		`inspectRealtime=${c.inspectRealtime} inspectHistory=${c.inspectHistory} pendingRealtime=${c.pendingRealtime} pendingHistory=${c.pendingHistory}` +
+		(c.invariantC === null
+			? ''
+			: ` pendingHistoryPayable=${c.invariantC.pendingHistoryPayable} pendingHistoryAhead=${c.invariantC.pendingHistoryAhead} ` +
+				`histBehindCursorHeld=${c.invariantC.histBehindCursorHeld} histCursor=${dash(c.invariantC.histCursor)} ` +
+				`maxPaidHistoryBlock=${dash(c.invariantC.maxPaidHistoryBlock)} frontLead=${dash(c.invariantC.frontLead)}`)
 	)
 }

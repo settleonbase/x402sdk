@@ -84,6 +84,15 @@ import {
 } from './labScanSummary'
 import { planPrune, consumedArchiveDir, appendConsumedArchive } from './labConsumedPrune'
 import { resolvePendingHighWater, decideLinePauses } from './labBackpressure'
+import {
+	resolveHistoryPayBehindCursor,
+	historyMaxBlockFor,
+	advanceMaxPaidHistoryBlock,
+	initialMaxPaidHistoryBlock,
+	checkInvariantC,
+	frontLead,
+	ScanBottleneckTracker,
+} from './labInvariantC'
 import { partitionByGuardianBeneficiary } from './labFlushGuardian'
 import { mapWithConcurrency, resolveReadConcurrency, settle } from './labParallel'
 import { selectFlushCandidates } from './labFlushSelect'
@@ -251,6 +260,11 @@ type LabClPayoutState = {
 	cursorHighWater?: { backfill?: number; listen?: number }
 	/** withdrawNative batch composed and not yet settled (B-2). Written before the signer is asked to send. */
 	inFlightWithdraw?: LabInFlightWithdraw | null
+	/**
+	 * Invariant C (labInvariantC.ts): monotonic high-water of the block of paid history entries. Only maintained while the invariant is on
+	 * (HISTORY_PAY_BEHIND_CURSOR); absent otherwise. Must stay <= the committed history cursor.
+	 */
+	maxPaidHistoryBlock?: number
 	consumedEventKeys: Record<string, true>
 	exitedPubkeys: Record<string, true>
 	updatedAt: string
@@ -275,6 +289,10 @@ let labSessionState: LabClPayoutState | undefined
 /** Back-pressure state of the two scan lines (labBackpressure.ts). */
 let labHistoryPaused = false
 let labRealtimePaused = false
+/** History cursor as last persisted (invariant C uses this, never an uncommitted in-memory value). undefined until the first persist of this process. */
+let labCommittedHistoryCursor: number | null | undefined
+/** "Scan is the bottleneck" streak for invariant C (informational alert, not the back-pressure pause). */
+const labScanBottleneck = new ScanBottleneckTracker()
 /** Entries marked consumed by settled batches since the process started (flush-summary settledEntries is a delta of this). */
 let labSettledEntriesTotal = 0
 /** Single-writer lock on the v2 state dir, held from start until process exit. */
@@ -1073,6 +1091,14 @@ function makeLabLifecycleDeps(
 		},
 		settle: (keys) => {
 			labSettledEntriesTotal += keys.length
+			if (resolveHistoryPayBehindCursor() && state.freezeH) {
+				const paid: { blockNumber: number }[] = []
+				for (const k of keys) {
+					const e = pending.get(k)
+					if (e) paid.push(e)
+				}
+				state.maxPaidHistoryBlock = advanceMaxPaidHistoryBlock(state.maxPaidHistoryBlock, paid, state.freezeH.height)
+			}
 			for (const k of keys) {
 				pending.delete(k)
 				state.consumedEventKeys[k] = true
@@ -1209,6 +1235,34 @@ async function flushPendingLabBatches(
 	const batchEntries = resolveFlushBatchEntries()
 	const maxBatches = resolveFlushMaxBatches()
 	const freezeForSelect = state.freezeH?.height
+	// Invariant C (labInvariantC.ts): history candidates only up to the committed cursor. Off by default (single-wallet mode): nothing changes.
+	const invC = resolveHistoryPayBehindCursor() && freezeForSelect != null
+	let historyMaxBlock = historyMaxBlockFor(invC, labCommittedHistoryCursor)
+	if (invC) {
+		if (state.maxPaidHistoryBlock === undefined) {
+			const init = initialMaxPaidHistoryBlock(pending.values(), freezeForSelect!, labCommittedHistoryCursor)
+			if (init) {
+				state.maxPaidHistoryBlock = init.value
+				persistPending(state, pending)
+				logger(
+					Colors.cyan(
+						`[labMiningPoolClPayout] invariant C on: maxPaidHistoryBlock initialised to ${init.value} (source=${init.source}) committedHistoryCursor=${labCommittedHistoryCursor ?? 'unset'}`
+					)
+				)
+			} else {
+				logger(Colors.yellow('[labMiningPoolClPayout] invariant C on: maxPaidHistoryBlock cannot be initialised (no pending history and no cursor); self-check inactive'))
+			}
+		}
+		const chk = checkInvariantC(state.maxPaidHistoryBlock, labCommittedHistoryCursor)
+		if (!chk.ok) {
+			logger(
+				Colors.red(
+					`[labMiningPoolClPayout] ALERT invariant C violated: maxPaidHistoryBlock=${state.maxPaidHistoryBlock} > committedHistoryCursor=${labCommittedHistoryCursor ?? 'unset'} (frontLead=${chk.lead}); history claims stopped (fail-closed) until the cursor passes it`
+				)
+			)
+			historyMaxBlock = -1
+		}
+	}
 	// Realtime reserved quota first, then history (see labFlushSelect.ts). Without a freeze height the line cannot be told: oldest-first as before.
 	const selection = selectFlushCandidates(pending.values(), {
 		freezeH: freezeForSelect ?? Number.MAX_SAFE_INTEGER,
@@ -1216,12 +1270,36 @@ async function flushPendingLabBatches(
 		realtimeQuota: freezeForSelect == null ? 0 : resolveRealtimeReservedBatches() * batchEntries,
 		historyFloor: batchEntries,
 		historyHeld: freezeForSelect != null && historyReviewHeld(state),
+		historyMaxBlock,
 	})
 	const ordered = selection.ordered
 	fc.inspectRealtime = selection.realtimeInspected
 	fc.inspectHistory = selection.historyInspected
 	fc.pendingRealtime = selection.realtimePending
 	fc.pendingHistory = selection.historyPending
+	if (invC) {
+		fc.invariantC = {
+			pendingHistoryPayable: selection.historyPayablePending,
+			pendingHistoryAhead: selection.historyAheadPending,
+			histBehindCursorHeld: selection.historyAheadPending,
+			histCursor: labCommittedHistoryCursor ?? null,
+			maxPaidHistoryBlock: state.maxPaidHistoryBlock ?? null,
+			frontLead: frontLead(state.maxPaidHistoryBlock, labCommittedHistoryCursor) ?? null,
+		}
+		// Informational alert (not the back-pressure pause): nothing payable in history, entries ahead of the cursor, and the (single) wallet idle.
+		if (
+			labScanBottleneck.observe(
+				{ payableHistoryCandidates: selection.historyPayablePending, historyAhead: selection.historyAheadPending, idleHistoryWallet: !state.inFlightWithdraw },
+				Date.now()
+			)
+		) {
+			logger(
+				Colors.yellow(
+					`[labMiningPoolClPayout] ALERT scan is the bottleneck: no payable history candidate, ${selection.historyAheadPending} history entries ahead of cursor ${labCommittedHistoryCursor ?? 'unset'}, wallet idle`
+				)
+			)
+		}
+	}
 	let live: SkimEntry[] = []
 	let droppedConsumed = 0
 	let unconfirmed = 0
@@ -1488,6 +1566,7 @@ async function scanWindowAndAdvance(
 			state.lastLiveHeadScanned = Math.max(state.lastLiveHeadScanned ?? 0, okThrough)
 		}
 		persistPending(state, pending)
+		if (line === 'history') labCommittedHistoryCursor = state.historyCursor ?? null
 		const label = line === 'history' ? 'history' : 'realtime'
 		if (added > 0) {
 			logger(
@@ -1539,6 +1618,7 @@ async function labPayoutTick(): Promise<void> {
 		}
 		const freeze = ensureDualCursors(state, liveHead, tipHash)
 		persistPending(state, pending)
+		labCommittedHistoryCursor = state.historyCursor ?? null
 		logSessionStartIfNeeded(state, liveHead, freeze)
 
 		const chunk = resolveChunkBlocks()
@@ -1546,7 +1626,19 @@ async function labPayoutTick(): Promise<void> {
 
 		// Back-pressure: the pending pool must stay below its memory ceiling. A paused line only postpones scanning.
 		const highWater = resolvePendingHighWater()
-		const pauses = decideLinePauses({ history: labHistoryPaused, realtime: labRealtimePaused }, pending.size, highWater)
+		// Invariant C: history entries ahead of the committed cursor are not payable yet; the history pause must not count them (labBackpressure.ts).
+		const invC = resolveHistoryPayBehindCursor()
+		let histTotal = 0
+		let histAhead = 0
+		if (invC) {
+			const cursor = historyMaxBlockFor(true, labCommittedHistoryCursor) as number
+			for (const e of pending.values()) {
+				if (classifyPendingLine(e.blockNumber, freeze.height) !== 'history') continue
+				histTotal++
+				if (e.blockNumber > cursor) histAhead++
+			}
+		}
+		const pauses = decideLinePauses({ history: labHistoryPaused, realtime: labRealtimePaused }, pending.size, highWater, histAhead)
 		labHistoryPaused = pauses.history
 		labRealtimePaused = pauses.realtime
 
@@ -1610,7 +1702,8 @@ async function labPayoutTick(): Promise<void> {
 		logger(
 			Colors.gray(
 				`[labMiningPoolClPayout] progress hist remaining=${prog.remaining} pct=${prog.pct}% ` +
-					`rt tipGap=${lat.tipGapBlocks} pending=${pending.size}`
+					`rt tipGap=${lat.tipGapBlocks} pending=${pending.size}` +
+					(invC ? ` histPayable=${histTotal - histAhead} histAhead=${histAhead}` : '')
 			)
 		)
 

@@ -13,6 +13,10 @@
  * consumed check, guardian check and idempotent batch path. Within a line the order stays oldest block first.
  *
  * Cost: one linear pass over the pending set with two small bounded lists, instead of sorting the whole set on every flush.
+ *
+ * Invariant C (optional, `historyMaxBlock`): history candidates must have blockNumber <= historyMaxBlock (the committed history cursor).
+ * History entries beyond it stay pending, are counted as `historyAheadPending`, and are never offered for payment. With the option
+ * absent or null the function behaves exactly as before. See labInvariantC.ts.
  */
 import { classifyPendingLine } from './labMiningPoolDualCursor.js'
 
@@ -26,6 +30,10 @@ export type FlushSelection<T> = {
 	/** Whole pending set by line (free by-product of the pass; for the journal). */
 	realtimePending: number
 	historyPending: number
+	/** History entries beyond historyMaxBlock (not payable yet). 0 when the limit is off. historyPending = payable + ahead. */
+	historyAheadPending: number
+	/** History entries payable now (blockNumber <= historyMaxBlock, or all of them when the limit is off). */
+	historyPayablePending: number
 	mode: 'quota' | 'oldest-first'
 }
 
@@ -56,6 +64,8 @@ export function selectFlushCandidates<T extends FlushPos>(
 		historyFloor?: number
 		/** History is held back by the review hold: nothing from history can be signed, so every slot goes to realtime. */
 		historyHeld?: boolean
+		/** Invariant C: history candidates need blockNumber <= this (committed history cursor). Absent or null = no limit. */
+		historyMaxBlock?: number | null
 	}
 ): FlushSelection<T> {
 	const cap = Math.max(0, Math.floor(opts.flushMax))
@@ -65,16 +75,31 @@ export function selectFlushCandidates<T extends FlushPos>(
 	const topAll: T[] = []
 	let realtimePending = 0
 	let historyPending = 0
+	let historyAheadPending = 0
+	const maxBlock = opts.historyMaxBlock ?? null
 	for (const e of entries) {
 		const isRt = classifyPendingLine(e.blockNumber, opts.freezeH) === 'realtime'
 		if (isRt) realtimePending++
 		else historyPending++
+		if (!isRt && maxBlock !== null && e.blockNumber > maxBlock) {
+			historyAheadPending++
+			continue
+		}
 		if (quotaOn) insertBounded(isRt ? topRt : topHi, e, cap)
 		else insertBounded(topAll, e, cap)
 	}
 	if (!quotaOn) {
 		const rt = topAll.filter((e) => classifyPendingLine(e.blockNumber, opts.freezeH) === 'realtime').length
-		return { ordered: topAll, realtimeInspected: rt, historyInspected: topAll.length - rt, realtimePending, historyPending, mode: 'oldest-first' }
+		return {
+			ordered: topAll,
+			realtimeInspected: rt,
+			historyInspected: topAll.length - rt,
+			realtimePending,
+			historyPending,
+			historyAheadPending,
+			historyPayablePending: historyPending - historyAheadPending,
+			mode: 'oldest-first',
+		}
 	}
 	let rtTake: number
 	let hiTake: number
@@ -94,6 +119,8 @@ export function selectFlushCandidates<T extends FlushPos>(
 		historyInspected: hiTake,
 		realtimePending,
 		historyPending,
+		historyAheadPending,
+		historyPayablePending: historyPending - historyAheadPending,
 		mode: 'quota',
 	}
 }
