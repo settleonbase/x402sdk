@@ -39,16 +39,20 @@ type ChildReport = {
 	heapUsedBeforeGcBytes: number
 	heapUsedAfterGcBytes: number
 	rssAfterGcBytes: number
+	/** RSS right after the work, BEFORE any forced GC (what a plain measurement of the process shows; the OS does not give freed pages back at once) */
+	rssBeforeGcBytes: number
 	gc: { count: number; maxPauseMs: number; totalPauseMs: number }
 	counts: Record<string, number>
 	extra?: Record<string, unknown>
 }
 
-function gcObserver(): { stop: () => { count: number; maxPauseMs: number; totalPauseMs: number } } {
+function gcObserver(): { stop: () => Promise<{ count: number; maxPauseMs: number; totalPauseMs: number }> } {
 	const obs = new PerformanceObserver(() => undefined)
 	obs.observe({ entryTypes: ['gc'] })
 	return {
-		stop: () => {
+		stop: async () => {
+			// PerformanceObserver entries are queued asynchronously: after purely synchronous work they are only readable once the event loop has turned (the first M0 run read 0 pauses for that reason)
+			for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r))
 			const recs = obs.takeRecords()
 			obs.disconnect()
 			return { count: recs.length, maxPauseMs: recs.reduce((m, r) => Math.max(m, r.duration), 0), totalPauseMs: recs.reduce((a, r) => a + r.duration, 0) }
@@ -78,6 +82,9 @@ async function childMain(mode: string, dir: string): Promise<void> {
 		const t = process.hrtime.bigint()
 		const state = store.readStateFromDisk()
 		lap('readStateMs', t)
+		// the OS high-water mark and the RSS right after the whole-state READ alone, before the per-tick pending map is built (what a plain "read the old state" measurement sees)
+		counts.maxRssAfterReadStateKb = process.resourceUsage().maxRSS
+		counts.rssAfterReadStateKb = Math.round(process.memoryUsage().rss / 1024)
 		const t2 = process.hrtime.bigint()
 		const h = store.newHandle(state)
 		lap('pendingMapMs', t2)
@@ -108,12 +115,13 @@ async function childMain(mode: string, dir: string): Promise<void> {
 		fs.rmSync(scratch, { recursive: true, force: true })
 	} else throw new Error(`unknown child mode ${mode}`)
 	lap('totalMs', t0)
-	const heapBefore = process.memoryUsage().heapUsed
+	const memBefore = process.memoryUsage()
+	const heapBefore = memBefore.heapUsed
 	const maxRssKb = process.resourceUsage().maxRSS
 	gc?.()
 	gc?.()
 	const mem = process.memoryUsage()
-	const gcStats = go.stop()
+	const gcStats = await go.stop()
 	void hold
 	const report: ChildReport = {
 		mode,
@@ -126,6 +134,7 @@ async function childMain(mode: string, dir: string): Promise<void> {
 		heapUsedBeforeGcBytes: heapBefore,
 		heapUsedAfterGcBytes: mem.heapUsed,
 		rssAfterGcBytes: mem.rss,
+		rssBeforeGcBytes: memBefore.rss,
 		gc: gcStats,
 		counts,
 		extra,
@@ -203,8 +212,8 @@ async function m0(out: string, repeats: number, keep: boolean): Promise<void> {
 		platform: `${process.platform}/${process.arch} node ${process.version}`,
 		tier: { name: 'A', ...t },
 		sizesBytes: sizes,
-		recoverWal: { maxRssGB: { ...summarize('recover-wal', (r) => r.report.maxRssBytes / 1024 ** 3) }, psPeakGB: summarize('recover-wal', (r) => r.psPeakBytes / 1024 ** 3), steadyAfterGcGB: summarize('recover-wal', (r) => r.report.rssAfterGcBytes / 1024 ** 3), heapAfterGcGB: summarize('recover-wal', (r) => r.report.heapUsedAfterGcBytes / 1024 ** 3), recoverMs: summarize('recover-wal', (r) => r.report.phases.recoverMs!), gcMaxPauseMs: summarize('recover-wal', (r) => r.report.gc.maxPauseMs) },
-		readLegacy: { maxRssGB: summarize('read-legacy', (r) => r.report.maxRssBytes / 1024 ** 3), psPeakGB: summarize('read-legacy', (r) => r.psPeakBytes / 1024 ** 3), steadyAfterGcGB: summarize('read-legacy', (r) => r.report.rssAfterGcBytes / 1024 ** 3), readStateMs: summarize('read-legacy', (r) => r.report.phases.readStateMs!), pendingMapMs: summarize('read-legacy', (r) => r.report.phases.pendingMapMs!), gcMaxPauseMs: summarize('read-legacy', (r) => r.report.gc.maxPauseMs) },
+		recoverWal: { maxRssGB: { ...summarize('recover-wal', (r) => r.report.maxRssBytes / 1024 ** 3) }, psPeakGB: summarize('recover-wal', (r) => r.psPeakBytes / 1024 ** 3), steadyAfterGcGB: summarize('recover-wal', (r) => r.report.rssAfterGcBytes / 1024 ** 3), rssBeforeGcGB: summarize('recover-wal', (r) => r.report.rssBeforeGcBytes / 1024 ** 3), heapAfterGcGB: summarize('recover-wal', (r) => r.report.heapUsedAfterGcBytes / 1024 ** 3), recoverMs: summarize('recover-wal', (r) => r.report.phases.recoverMs!), gcMaxPauseMs: summarize('recover-wal', (r) => r.report.gc.maxPauseMs) },
+		readLegacy: { maxRssGB: summarize('read-legacy', (r) => r.report.maxRssBytes / 1024 ** 3), psPeakGB: summarize('read-legacy', (r) => r.psPeakBytes / 1024 ** 3), steadyAfterGcGB: summarize('read-legacy', (r) => r.report.rssAfterGcBytes / 1024 ** 3), rssBeforeGcGB: summarize('read-legacy', (r) => r.report.rssBeforeGcBytes / 1024 ** 3), maxRssAfterStateReadOnlyGB: summarize('read-legacy', (r) => (r.report.counts.maxRssAfterReadStateKb! * 1024) / 1024 ** 3), rssAfterStateReadOnlyGB: summarize('read-legacy', (r) => (r.report.counts.rssAfterReadStateKb! * 1024) / 1024 ** 3), readStateMs: summarize('read-legacy', (r) => r.report.phases.readStateMs!), pendingMapMs: summarize('read-legacy', (r) => r.report.phases.pendingMapMs!), gcMaxPauseMs: summarize('read-legacy', (r) => r.report.gc.maxPauseMs) },
 		snapshot: { snapshotMs: summarize('snapshot', (r) => r.report.phases.snapshotMs!), slices: summarize('snapshot', (r) => Number(r.report.extra!.slices)), maxSliceMs: summarize('snapshot', (r) => Number(r.report.extra!.maxSliceMs)), eventLoopMaxMs: summarize('snapshot', (r) => Number((r.report.extra!.eventLoopDelayMs as { max: number }).max)), maxRssGB: summarize('snapshot', (r) => r.report.maxRssBytes / 1024 ** 3), bytesWritten: summarize('snapshot', (r) => Number(r.report.extra!.bytesWritten)) },
 	}
 	const raw = path.join(out, `results-M0-${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
