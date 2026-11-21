@@ -103,6 +103,7 @@ import {
 } from './labStartupConfig'
 import { acquireStateDirLock, type StateDirLock } from './labClPayoutStateLock'
 import { LabPayoutFailClosedGate } from './labClPayoutFailClosed'
+import { LabTickLoop, type LabTickOutcome } from './labTickLoop'
 import {
 	resumeLabWithdrawInFlight,
 	sameEventKeys,
@@ -265,8 +266,9 @@ type SkimEntry = {
 }
 
 let labStarted = false
-let labTimer: ReturnType<typeof setTimeout> | undefined
 let labInFlight = false
+/** Serial tick loop (labTickLoop.ts): working ticks continue at once, idle/fault/skipped ticks wait resolveTickMs(). */
+const labLoop = new LabTickLoop({ tick: () => labPayoutTick(), backoffMs: () => resolveTickMs() })
 let labPubkeySet = new Set<string>()
 let labMiningPool = ''
 let labManifestMtime = 0
@@ -311,6 +313,10 @@ function resolveBeaconRestUrl(): string {
 	return (process.env.CONET_VALIDATOR_BEACON_REST_URL?.trim() || 'http://127.0.0.1:4100').replace(/\/$/, '')
 }
 
+/**
+ * TICK_MS (CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MS) since the continuous tick loop: the wait after a tick that made no progress (idle, fault, skipped; see labTickLoop.ts). A tick that
+ * made progress is followed at once, without any wait. Default 60 s and the "< 15 000 falls back to 60 000" check are unchanged, so idle and persistent faults wait exactly what every tick waited before.
+ */
 function resolveTickMs(): number {
 	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MS || 60_000)
 	return Number.isFinite(n) && n >= 15_000 ? Math.floor(n) : 60_000
@@ -1511,15 +1517,23 @@ function logScanSummary(line: LabScanLine, counters: LabScanCounters): void {
 	if (text) logger(Colors.cyan(`[labMiningPoolClPayout] ${text}`))
 }
 
-async function labPayoutTick(): Promise<void> {
-	if (labInFlight) return
+/**
+ * One tick. Resolves with what it did, for the loop's choice between "next tick at once" and "wait resolveTickMs()":
+ *   progress  a scan advanced at least one block, or a payment batch settled entries (state moved, more work may be waiting)
+ *   idle      nothing to scan, nothing paid (caught up, back-pressure pause, gas wait, held entries: no state moved)
+ *   fault     the tick threw, the tip hash was missing, or a scan stopped on an RPC failure without advancing
+ *   skipped   another tick still in flight, the fail-closed gate is tripped, or the manifest could not be loaded
+ */
+async function labPayoutTick(): Promise<LabTickOutcome> {
+	if (labInFlight) return 'skipped'
 	if (labGate.tripped) {
 		logger(Colors.red(`[labMiningPoolClPayout] ALERT tick skipped: fail-closed (${labGate.tripReason})`))
-		return
+		return 'skipped'
 	}
 	labInFlight = true
 	try {
-		if (!loadManifestIfNeeded()) return
+		if (!loadManifestIfNeeded()) return 'skipped'
+		const settledBefore = labSettledEntriesTotal
 
 		const redeemAddr = resolveLabRedeemAddress()
 		const provider = createLabRpcProvider()
@@ -1529,13 +1543,13 @@ async function labPayoutTick(): Promise<void> {
 		const pending = loadPendingMap(state)
 		const liveHead = Number(await provider.getBlockNumber())
 		const floor = resolveLabScanFloorBlock()
-		if (!Number.isFinite(liveHead) || liveHead < floor) return
+		if (!Number.isFinite(liveHead) || liveHead < floor) return 'idle'
 
 		const tipBlock = await provider.getBlock(liveHead)
 		const tipHash = tipBlock?.hash
 		if (!tipHash || !/^0x[0-9a-fA-F]{64}$/.test(tipHash)) {
 			logger(Colors.yellow(`[labMiningPoolClPayout] skip tick: tip hash missing at ${liveHead}`))
-			return
+			return 'fault'
 		}
 		const freeze = ensureDualCursors(state, liveHead, tipHash)
 		persistPending(state, pending)
@@ -1617,19 +1631,15 @@ async function labPayoutTick(): Promise<void> {
 		await flushPendingLabBatches(provider, readContract, redeemAddr, state, pending)
 		tryPersistListeningCheckpoint(state, liveHead)
 		persistPending(state, pending)
+		if (rtCounters.blocks > 0 || hiCounters.blocks > 0 || labSettledEntriesTotal > settledBefore) return 'progress'
+		if (rtCounters.fetchFailed || rtCounters.unconfirmed || hiCounters.fetchFailed || hiCounters.unconfirmed) return 'fault'
+		return 'idle'
 	} catch (e: unknown) {
 		logger(Colors.red(`[labMiningPoolClPayout] tick error: ${(e as Error)?.message ?? e}`))
+		return 'fault'
 	} finally {
 		labInFlight = false
 	}
-}
-
-function scheduleNextLabTick(): void {
-	if (!labStarted) return
-	labTimer = setTimeout(async () => {
-		await labPayoutTick()
-		scheduleNextLabTick()
-	}, resolveTickMs())
 }
 
 export function startValidatorLabMiningPoolClPayoutReporter(): void {
@@ -1651,24 +1661,22 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	labStarted = true
 	logger(
 		Colors.cyan(
-			`[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=${labPubkeySet.size} tick=${resolveTickMs()}ms ` +
+			`[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=${labPubkeySet.size} tickMode=continuous idleBackoffMs=${resolveTickMs()} (TICK_MS: wait after an idle/fault/skipped tick only, a working tick is followed at once) ` +
 				`${startupConfigLine()} ` +
 				`realtimeReserved=${resolveRealtimeReservedBatches()} ` +
 				`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} txWaitTimeoutMs=${resolveTxWaitTimeoutMs()} pendingPool=on`
 		)
 	)
-	void labPayoutTick().finally(() => scheduleNextLabTick())
+	labLoop.start()
 }
 
 export function stopValidatorLabMiningPoolClPayoutReporter(): void {
+	// first: nothing may be re-armed any more; a tick that is running now finishes (labInFlight) without re-arming
+	labLoop.stop()
 	labStarted = false
 	labSessionState = undefined
 	sessionBackfillFloor = undefined
 	labPhaseLogged = false
-	if (labTimer !== undefined) {
-		clearTimeout(labTimer)
-		labTimer = undefined
-	}
 }
 
 /** Persist listening checkpoint before process exit (next restart backfills from lastListeningEndBlock+1). */
