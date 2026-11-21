@@ -3,6 +3,7 @@
  * consumed and exited sets, same counters, and on a failed read the same error at the same item with the same state changes made
  * by the items before it. Fakes only.
  */
+import { LegacyStateHandle } from './labStateHandle'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ethers } from 'ethers'
@@ -94,7 +95,7 @@ async function runBoth(w: World, block: number, wds: Wd[], pendingKeys: string[]
 	let ra: unknown[] = []
 	let rb: unknown[] = []
 	try { ra = await sequentialCollect(PROXY, block, { withdrawals: wds } as never, a.s as never, a.p as never, ca, depsFor(w)) } catch (e) { ea = e }
-	try { rb = await collectLabSkimEntriesForBlock(noContract, PROXY, block, { withdrawals: wds } as never, b.s as never, b.p as never, cb, depsFor(w), 8) } catch (e) { eb = e }
+	try { rb = await collectLabSkimEntriesForBlock(noContract, PROXY, block, { withdrawals: wds } as never, new LegacyStateHandle({ state: b.s as never, pending: b.p as never, persist: () => undefined }) as never, cb, depsFor(w), 8) } catch (e) { eb = e }
 	return { a, b, ca, cb, ea, eb, ra, rb }
 }
 
@@ -157,7 +158,7 @@ test('parallel is faster and stays within the concurrency bound', async () => {
 	const seq = Date.now() - t1
 	const track = { inFlight: 0, peak: 0 }
 	const t2 = Date.now()
-	const out = await collectLabSkimEntriesForBlock(noContract, PROXY, 900, { withdrawals: wds } as never, fresh() as never, new Map() as never, newLabScanCounters(), depsFor(w, 20, track), 4)
+	const out = await collectLabSkimEntriesForBlock(noContract, PROXY, 900, { withdrawals: wds } as never, new LegacyStateHandle({ state: fresh() as never, pending: new Map() as never, persist: () => undefined }) as never, newLabScanCounters(), depsFor(w, 20, track), 4)
 	const par = Date.now() - t2
 	assert.equal(out.length, 16)
 	assert.ok(track.peak <= 4 && track.peak > 1, `peak ${track.peak}`)

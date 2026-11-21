@@ -200,22 +200,33 @@ export function planInvariantCFlush(input: {
  * keys (history entries only, and only while the invariant is on), then mark the keys consumed and drop them from pending.
  * It reads the block numbers from the pending pool, not from the in-flight record, so it must run before the pending entries are removed.
  */
+/** What settleKeysAndAdvance needs from the state handle (labStateHandle.ts); structural, so this module does not depend on it. */
+export type SettleTarget = {
+	pendingGet(key: string): { blockNumber: number } | undefined
+	pendingDel(key: string): void
+	consumedAdd(key: string): void
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	scalar(name: any): any
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	setScalar(name: any, value: any): void
+}
+
 export function settleKeysAndAdvance(
-	state: { freezeH?: { height: number } | null; maxPaidHistoryBlock?: number; consumedEventKeys: Record<string, true> },
-	pending: Map<string, { blockNumber: number }>,
+	h: SettleTarget,
 	keys: readonly string[],
 	flagOn: boolean
 ): void {
-	if (flagOn && state.freezeH) {
+	const freezeH = h.scalar('freezeH')
+	if (flagOn && freezeH) {
 		const paid: { blockNumber: number }[] = []
 		for (const k of keys) {
-			const e = pending.get(k)
+			const e = h.pendingGet(k)
 			if (e) paid.push(e)
 		}
-		state.maxPaidHistoryBlock = advanceMaxPaidHistoryBlock(state.maxPaidHistoryBlock, paid, state.freezeH.height)
+		h.setScalar('maxPaidHistoryBlock', advanceMaxPaidHistoryBlock(h.scalar('maxPaidHistoryBlock'), paid, freezeH.height))
 	}
 	for (const k of keys) {
-		pending.delete(k)
-		state.consumedEventKeys[k] = true
+		h.pendingDel(k)
+		h.consumedAdd(k)
 	}
 }

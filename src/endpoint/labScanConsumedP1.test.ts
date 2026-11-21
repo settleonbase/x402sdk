@@ -4,6 +4,7 @@
  * identical; the only differences are (a) non-Lab keys that are consumed on chain are no longer recorded, (b) fewer chain reads.
  * Fakes only. No RPC, no beacon, no socket.
  */
+import { LegacyStateHandle } from './labStateHandle'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ethers } from 'ethers'
@@ -69,7 +70,7 @@ const noContract = {} as never // the fakes replace every read; the contract is 
 async function runNew(w: World, block: number, wds: Wd[], state = freshState(), pending = new Map<string, never>()) {
 	const calls: Calls = { chain: 0, beacon: 0, guardian: 0 }
 	const counters = newLabScanCounters()
-	const out = await collectLabSkimEntriesForBlock(noContract, PROXY, block, { withdrawals: wds } as never, state as never, pending as never, counters, depsFor(w, calls))
+	const out = await collectLabSkimEntriesForBlock(noContract, PROXY, block, { withdrawals: wds } as never, new LegacyStateHandle({ state: state as never, pending: pending as never, persist: () => undefined }) as never, counters, depsFor(w, calls))
 	return { entries: out, state, calls, counters }
 }
 async function runOld(w: World, block: number, wds: Wd[], state = freshState(), pending = new Map<string, never>()) {

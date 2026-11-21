@@ -20,6 +20,7 @@ export interface LabStateHandle<E extends PendingLike, S extends object> {
 	// ---- reads
 	readonly pendingSize: number
 	pendingHas(key: string): boolean
+	pendingGet(key: string): E | undefined
 	pendingValues(): IterableIterator<E>
 	readonly consumedSize: number
 	consumedHas(key: string): boolean
@@ -35,6 +36,11 @@ export interface LabStateHandle<E extends PendingLike, S extends object> {
 	delScalar(name: keyof S): void
 	// ---- durability
 	commit(label: StateCommitLabel): Promise<void>
+	/**
+	 * Synchronous best-effort flush for the one place that cannot await: the halt path that is followed by process.exit. The legacy implementation writes the whole state (as haltDaemon always did, errors
+	 * are the caller's to swallow). A log-based implementation may do nothing: whatever was not yet durable was never acted upon, so losing it equals a crash.
+	 */
+	haltFlush(): void
 }
 
 /** The legacy state object the handle wraps: the collections plus the scalars. */
@@ -59,6 +65,9 @@ export class LegacyStateHandle<E extends PendingLike, S extends object> implemen
 	}
 	pendingHas(key: string): boolean {
 		return this.d.pending.has(key)
+	}
+	pendingGet(key: string): E | undefined {
+		return this.d.pending.get(key)
 	}
 	pendingValues(): IterableIterator<E> {
 		return this.d.pending.values()
@@ -99,6 +108,9 @@ export class LegacyStateHandle<E extends PendingLike, S extends object> implemen
 	}
 	delScalar(name: keyof S): void {
 		delete (this.d.state as unknown as S)[name]
+	}
+	haltFlush(): void {
+		this.d.persist()
 	}
 	commit(_label: StateCommitLabel): Promise<void> {
 		void _label

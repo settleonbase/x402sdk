@@ -2,6 +2,7 @@
  * P1 of the Lab pools baseline: invariant C (history pays only blocks <= the committed cursor), the back-pressure fix, and the observability fields.
  * Pure functions and a small in-memory simulation. No RPC, no beacon, no socket, no files.
  */
+import { LegacyStateHandle } from './labStateHandle'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -472,7 +473,7 @@ test('C settle hook (M3): the high-water advances with the settle; a crash befor
 		confirmBeforeSend: async () => undefined,
 		send: async () => ({ hash: `0x${'cd'.repeat(32)}` }),
 		waitReceipt: async () => ({ status: 1 }),
-		settle: (keys) => settleKeysAndAdvance(w.state, w.pending, keys, true),
+		settle: (keys) => settleKeysAndAdvance(new LegacyStateHandle({ state: w.state as never, pending: w.pending as never, persist: () => undefined }), keys, true),
 		log: () => undefined,
 	})
 	// first attempt: the hook ran in memory, then the persist "crashes"
@@ -498,7 +499,7 @@ test('C settle hook (M3): the high-water advances with the settle; a crash befor
 test('C settle hook: flag off leaves the high-water untouched and still consumes the keys', () => {
 	const pending = new Map([['0xa', { blockNumber: 100 }]])
 	const state = { freezeH: { height: H }, maxPaidHistoryBlock: 90, consumedEventKeys: {} as Record<string, true> }
-	settleKeysAndAdvance(state, pending, ['0xa'], false)
+	settleKeysAndAdvance(new LegacyStateHandle({ state: state as never, pending: pending as never, persist: () => undefined }), ['0xa'], false)
 	assert.equal(state.maxPaidHistoryBlock, 90)
 	assert.deepEqual(state.consumedEventKeys, { '0xa': true })
 	assert.equal(pending.size, 0)

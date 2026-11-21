@@ -113,6 +113,7 @@ import {
 import { acquireStateDirLock, type StateDirLock } from './labClPayoutStateLock'
 import { assertNoWalEvents } from './labWalGuard'
 import { LabPayoutFailClosedGate } from './labClPayoutFailClosed'
+import { LegacyStateHandle, type LabStateHandle } from './labStateHandle'
 import {
 	resumeLabWithdrawInFlight,
 	sameEventKeys,
@@ -120,6 +121,9 @@ import {
 	type LabInFlightWithdraw,
 	type LabLifecycleDeps,
 } from './labClPayoutBatchLifecycle'
+
+/** The reporter reads and changes its state only through this handle (labStateHandle.ts). */
+type LabHandle = LabStateHandle<SkimEntry, LabClPayoutState>
 
 /** Fixed lane for Lab executor payouts (signer EOA is opaque behind socket). */
 const LAB_MINING_POOL_ONCHAIN_LANE = 'lab-mining-pool-executor-payout'
@@ -416,10 +420,10 @@ function noteSettledBatch(state: LabClPayoutState): void {
 	}
 }
 
-function haltDaemon(state: LabClPayoutState, pending: Map<string, SkimEntry>, code: number, reason: string): void {
+function haltDaemon(h: LabHandle, code: number, reason: string): void {
 	logger(Colors.red(`[labMiningPoolClPayout] HALT (exit ${code}): ${reason}`))
 	try {
-		persistPending(state, pending)
+		h.haltFlush()
 	} catch {
 		/* the state was already persisted by the lifecycle write; exit regardless */
 	}
@@ -455,10 +459,10 @@ function resolveReviewHoldBeforeBlock(): number | null {
  * A full consumed map may have dropped older keys. Those history lines stay
  * pending unless an explicit release is set. Realtime lines are not held here.
  */
-function historyReviewHeld(state: LabClPayoutState): boolean {
+function historyReviewHeld(h: LabHandle): boolean {
 	// The cap no longer holds history: oldest consumed keys are pruned instead (see labConsumedPrune.planPrune: soft cap, prune to 90%, cold archive).
 	return historyHeldFor(
-		Object.keys(state.consumedEventKeys || {}).length,
+		h.consumedSize,
 		resolveConsumedKeysPersistMax(),
 		process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_RELEASE_HISTORY === '1'
 	)
@@ -558,17 +562,6 @@ function persistPending(state: LabClPayoutState, pending: Map<string, SkimEntry>
 	writeState(state)
 }
 
-function mergeIntoPending(pending: Map<string, SkimEntry>, entries: SkimEntry[]): number {
-	let added = 0
-	for (const e of entries) {
-		const key = e.eventKey.toLowerCase()
-		if (pending.has(key)) continue
-		pending.set(key, { ...e, eventKey: key })
-		added++
-	}
-	return added
-}
-
 function resolveFullExitFloorWei(): bigint {
 	const raw = process.env.CONET_LAB_MINING_POOL_CL_FULL_EXIT_FLOOR_WEI?.trim()
 	if (raw) {
@@ -579,10 +572,6 @@ function resolveFullExitFloorWei(): bigint {
 		}
 	}
 	return DEFAULT_SKIM_MAX_WITHDRAWAL_WEI
-}
-
-function markLabValidatorExited(state: LabClPayoutState, pubkey: string): void {
-	state.exitedPubkeys[pubkey.toLowerCase()] = true
 }
 
 /** True when EL withdrawal is too large to be CL skim (treat as exit/principal inflow). */
@@ -918,8 +907,7 @@ export async function collectLabSkimEntriesForBlock(
 	proxyLower: string,
 	blockNumber: number,
 	block: RpcBlock,
-	state: LabClPayoutState,
-	pending: Map<string, SkimEntry>,
+	h: LabHandle,
 	counters: LabScanCounters = newLabScanCounters(),
 	depsOverride?: Partial<LabScanDeps>,
 	concurrency: number = resolveReadConcurrency()
@@ -944,7 +932,7 @@ export async function collectLabSkimEntriesForBlock(
 			continue
 		}
 		const eventKey = withdrawalEventKey(blockNumber, withdrawalIndex)
-		if (state.consumedEventKeys[eventKey] || pending.has(eventKey.toLowerCase())) {
+		if (h.consumedHas(eventKey) || h.pendingHas(eventKey.toLowerCase())) {
 			items.push({ kind: 'local' })
 			continue
 		}
@@ -1000,13 +988,13 @@ export async function collectLabSkimEntriesForBlock(
 		const ch = chain[i]!
 		if (!ch.ok) throw unconfirmed(c.eventKey, ch.error)
 		if (ch.value) {
-			state.consumedEventKeys[c.eventKey] = true
+			h.consumedAdd(c.eventKey)
 			counters.labChainConsumed++
 			continue
 		}
 		if (isNonSkimWithdrawal(c.amountWei, floorWei)) {
-			markLabValidatorExited(state, pubkey)
-			state.consumedEventKeys[c.eventKey] = true
+			h.exitedAdd(pubkey)
+			h.consumedAdd(c.eventKey)
 			counters.nonSkim++
 			logger(
 				Colors.yellow(
@@ -1016,7 +1004,7 @@ export async function collectLabSkimEntriesForBlock(
 			continue
 		}
 		if (status !== LAB_SKIM_ELIGIBLE_STATUS) {
-			markLabValidatorExited(state, pubkey)
+			h.exitedAdd(pubkey)
 			counters.nonActive++
 			logger(
 				Colors.gray(
@@ -1044,7 +1032,7 @@ export async function collectLabSkimEntriesForBlock(
 
 function makeLabLifecycleDeps(
 	state: LabClPayoutState,
-	pending: Map<string, SkimEntry>,
+	h: LabHandle,
 	provider: ethers.JsonRpcProvider,
 	gasPriceWei: bigint
 ): LabLifecycleDeps {
@@ -1055,12 +1043,12 @@ function makeLabLifecycleDeps(
 			if (v) state.inFlightWithdraw = v
 			else delete state.inFlightWithdraw
 		},
-		persist: () => persistPending(state, pending),
+		persist: (step) => h.commit(step),
 		countSettled: () => {
 			state.settledBatchCount = (state.settledBatchCount ?? 0) + 1
 		},
 		stopBeforeSend: () => shouldStopAfterSettled(state.settledBatchCount ?? 0, resolveMaxSettledBatches()),
-		halt: (code, reason) => haltDaemon(state, pending, code, reason),
+		halt: (code, reason) => haltDaemon(h, code, reason),
 		send: async (rec) => {
 			// One send. No recovery and no retry here: the lifecycle holds an unknown outcome (B-2).
 			const sent = await sendConfiguredLabWithdrawNative({
@@ -1094,7 +1082,7 @@ function makeLabLifecycleDeps(
 		},
 		settle: (keys) => {
 			labSettledEntriesTotal += keys.length
-			settleKeysAndAdvance(state, pending, keys, resolveHistoryPayBehindCursor())
+			settleKeysAndAdvance(h, keys, resolveHistoryPayBehindCursor())
 		},
 		log: (line) => logger(Colors.cyan(`[labMiningPoolClPayout] ${line}`)),
 	}
@@ -1105,7 +1093,7 @@ async function submitLabSkimBatch(
 	redeemAddr: string,
 	entries: SkimEntry[],
 	state: LabClPayoutState,
-	pending: Map<string, SkimEntry>,
+	h: LabHandle,
 	gasPriceWei: bigint,
 	line: LabScanLine
 ): Promise<boolean> {
@@ -1141,7 +1129,7 @@ async function submitLabSkimBatch(
 			LAB_MINING_POOL_ONCHAIN_LANE,
 			`lab withdrawNative n=${entries.length} line=${line}`,
 			() =>
-				submitWithdrawBatchDurably(makeLabLifecycleDeps(state, pending, provider, gasPriceWei), {
+				submitWithdrawBatchDurably(makeLabLifecycleDeps(state, h, provider, gasPriceWei), {
 					redeem: redeemAddr,
 					pool: labMiningPool,
 					amount: total,
@@ -1163,10 +1151,10 @@ async function flushPendingLabBatches(
 	readContract: ethers.Contract,
 	redeemAddr: string,
 	state: LabClPayoutState,
-	pending: Map<string, SkimEntry>
+	h: LabHandle
 ): Promise<void> {
-	if (!pending.size && !state.inFlightWithdraw) {
-		if (clearGasWait(state)) persistPending(state, pending)
+	if (!h.pendingSize && !state.inFlightWithdraw) {
+		if (clearGasWait(state)) await h.commit('scalars')
 		return
 	}
 	// One journal line per flush that inspected entries or settled a batch (integers only; see labScanSummary.ts).
@@ -1187,7 +1175,7 @@ async function flushPendingLabBatches(
 		const now = Date.now()
 		if (!state.gasWaitStartedAt) {
 			state.gasWaitStartedAt = new Date(now).toISOString()
-			persistPending(state, pending)
+			await h.commit('scalars')
 		}
 		const startedMs = Date.parse(state.gasWaitStartedAt)
 		const elapsedMs = Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : forceMs
@@ -1195,7 +1183,7 @@ async function flushPendingLabBatches(
 			logger(
 				Colors.yellow(
 					`[labMiningPoolClPayout] skip flush: gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei > max=${ethers.formatUnits(maxGas, 'gwei')} gwei ` +
-						`wait ${formatWaitCountdown(elapsedMs, forceMs)} pending=${pending.size}`
+						`wait ${formatWaitCountdown(elapsedMs, forceMs)} pending=${h.pendingSize}`
 				)
 			)
 			return
@@ -1204,11 +1192,11 @@ async function flushPendingLabBatches(
 		logger(
 			Colors.yellow(
 				`[labMiningPoolClPayout] force flush: gas wait ${Math.floor(elapsedMs / 1000)}s ≥ ${Math.floor(forceMs / 1000)}s; ` +
-					`ignoring max=${ethers.formatUnits(maxGas, 'gwei')} gwei, using live gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei (pending=${pending.size})`
+					`ignoring max=${ethers.formatUnits(maxGas, 'gwei')} gwei, using live gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei (pending=${h.pendingSize})`
 			)
 		)
 	} else if (clearGasWait(state)) {
-		persistPending(state, pending)
+		await h.commit('scalars')
 	}
 
 	// B-2: settle or resume an unresolved withdrawNative batch before composing anything new.
@@ -1216,7 +1204,7 @@ async function flushPendingLabBatches(
 		const flight = await enqueueOnchainTxWork(
 			LAB_MINING_POOL_ONCHAIN_LANE,
 			'lab withdrawNative in-flight',
-			() => resumeLabWithdrawInFlight(makeLabLifecycleDeps(state, pending, provider, gasPrice)),
+			() => resumeLabWithdrawInFlight(makeLabLifecycleDeps(state, h, provider, gasPrice)),
 			'[labMiningPoolClPayout]'
 		)
 		if (flight === 'pending') return
@@ -1235,12 +1223,12 @@ async function flushPendingLabBatches(
 		committedHistoryCursor: labCommittedHistoryCursor,
 		maxPaidHistoryBlock: state.maxPaidHistoryBlock,
 		initDone: labInvariantCInitDone,
-		pending: pending.values(),
+		pending: h.pendingValues(),
 	})
 	labInvariantCInitDone = invPlan.initDone
 	if (invC) {
 		state.maxPaidHistoryBlock = invPlan.maxPaidHistoryBlock
-		if (invPlan.stateChanged) persistPending(state, pending)
+		if (invPlan.stateChanged) await h.commit('scalars')
 		for (const line of invPlan.logs) {
 			const text = `[labMiningPoolClPayout] ${line}`
 			logger(line.startsWith('ALERT') ? Colors.red(text) : line.startsWith('WARN') ? Colors.yellow(text) : Colors.cyan(text))
@@ -1248,12 +1236,12 @@ async function flushPendingLabBatches(
 	}
 	const historyMaxBlock = invPlan.historyMaxBlock
 	// Realtime reserved quota first, then history (see labFlushSelect.ts). Without a freeze height the line cannot be told: oldest-first as before.
-	const selection = selectFlushCandidates(pending.values(), {
+	const selection = selectFlushCandidates(h.pendingValues(), {
 		freezeH: freezeForSelect ?? Number.MAX_SAFE_INTEGER,
 		flushMax,
 		realtimeQuota: freezeForSelect == null ? 0 : resolveRealtimeReservedBatches() * batchEntries,
 		historyFloor: batchEntries,
-		historyHeld: freezeForSelect != null && historyReviewHeld(state),
+		historyHeld: freezeForSelect != null && historyReviewHeld(h),
 		historyMaxBlock,
 	})
 	const ordered = selection.ordered
@@ -1306,22 +1294,22 @@ async function flushPendingLabBatches(
 			continue
 		}
 		if (r.value) {
-			state.consumedEventKeys[e.eventKey] = true
-			pending.delete(e.eventKey)
+			h.consumedAdd(e.eventKey)
+			h.pendingDel(e.eventKey)
 			droppedConsumed++
 			continue
 		}
 		live.push(e)
 	}
 	fc.inspect = ordered.length
-	fc.pendingAtInspect = pending.size + droppedConsumed
+	fc.pendingAtInspect = h.pendingSize + droppedConsumed
 	fc.droppedChainConsumed = droppedConsumed
 	fc.unconfirmed = unconfirmed
 	if (droppedConsumed > 0 || unconfirmed > 0) {
-		persistPending(state, pending)
+		await h.commit('drop')
 		logger(
 			Colors.cyan(
-				`[labMiningPoolClPayout] flush paid-key dropped=${droppedConsumed} unconfirmed=${unconfirmed} pending=${pending.size}`
+				`[labMiningPoolClPayout] flush paid-key dropped=${droppedConsumed} unconfirmed=${unconfirmed} pending=${h.pendingSize}`
 			)
 		)
 	}
@@ -1341,7 +1329,7 @@ async function flushPendingLabBatches(
 		live = guardian.keep
 	}
 	if (!live.length) {
-		if (clearGasWait(state)) persistPending(state, pending)
+		if (clearGasWait(state)) await h.commit('scalars')
 		emitFlushSummary()
 		return
 	}
@@ -1354,7 +1342,7 @@ async function flushPendingLabBatches(
 	}
 
 	const holdBefore = resolveReviewHoldBeforeBlock()
-	const holdHistory = historyReviewHeld(state)
+	const holdHistory = historyReviewHeld(h)
 	const signable = live.filter((e) => {
 		if (holdBefore != null && e.blockNumber <= holdBefore) return false
 		if (holdHistory && classifyPendingLine(e.blockNumber, freezeH) === 'history') return false
@@ -1364,7 +1352,7 @@ async function flushPendingLabBatches(
 	if (held > 0) {
 		logger(
 			Colors.yellow(
-				`[labMiningPoolClPayout] review-hold n=${held} pending=${pending.size} historyAtCap=${holdHistory} holdBefore=${holdBefore ?? 'unset'}; left pending, not signed`
+				`[labMiningPoolClPayout] review-hold n=${held} pending=${h.pendingSize} historyAtCap=${holdHistory} holdBefore=${holdBefore ?? 'unset'}; left pending, not signed`
 			)
 		)
 	}
@@ -1413,7 +1401,7 @@ async function flushPendingLabBatches(
 	const prog = formatHistoryProgress(histCursor, freezeH)
 	logger(
 		Colors.cyan(
-			`[labMiningPoolClPayout] flush inspect=${ordered.length}/${pending.size} live=${live.length} → ${batches.length} batch(es) ` +
+			`[labMiningPoolClPayout] flush inspect=${ordered.length}/${h.pendingSize} live=${live.length} → ${batches.length} batch(es) ` +
 				`A2 rtFirst=${scheduled.realtimeFirst} hist=${scheduled.historyCount} reserved=${reserved} ` +
 				`rtLatency tipGap=${lat.tipGapBlocks} histProgress remaining=${prog.remaining} pct=${prog.pct}% ` +
 				`(maxEntries=${flushMax} batchEntries=${batchEntries} maxBatches=${maxBatches}) ` +
@@ -1427,26 +1415,26 @@ async function flushPendingLabBatches(
 			redeemAddr,
 			batch.entries,
 			state,
-			pending,
+			h,
 			gasPrice,
 			batch.line
 		)
 		if (!ok) {
 			logger(
 				Colors.yellow(
-					`[labMiningPoolClPayout] batch failed line=${batch.line} n=${batch.entries.length}; remaining stay in pending pool (pending=${pending.size})`
+					`[labMiningPoolClPayout] batch failed line=${batch.line} n=${batch.entries.length}; remaining stay in pending pool (pending=${h.pendingSize})`
 				)
 			)
-			persistPending(state, pending)
+			await h.commit('scalars')
 			fc.failed = true
 			emitFlushSummary()
 			return
 		}
-		for (const e of batch.entries) pending.delete(e.eventKey)
-		persistPending(state, pending)
+		for (const e of batch.entries) h.pendingDel(e.eventKey)
+		await h.commit('settle')
 	}
 
-	if (!pending.size && clearGasWait(state)) persistPending(state, pending)
+	if (!h.pendingSize && clearGasWait(state)) await h.commit('scalars')
 	emitFlushSummary()
 }
 
@@ -1456,8 +1444,7 @@ async function processBlockRange(
 	redeemAddr: string,
 	fromBlock: number,
 	toBlock: number,
-	state: LabClPayoutState,
-	pending: Map<string, SkimEntry>,
+	h: LabHandle,
 	counters: LabScanCounters
 ): Promise<{ okThrough: number | null; added: number; fetchFailed: boolean; unconfirmed: boolean }> {
 	const proxyLower = redeemAddr.toLowerCase()
@@ -1478,8 +1465,7 @@ async function processBlockRange(
 				proxyLower,
 				bn,
 				block,
-				state,
-				pending,
+				h,
 				counters
 			)
 		} catch (err: unknown) {
@@ -1493,7 +1479,7 @@ async function processBlockRange(
 			}
 			throw err
 		}
-		const merged = mergeIntoPending(pending, entries)
+		const merged = h.pendingAdd(entries)
 		added += merged
 		counters.added += merged
 		counters.blocks++
@@ -1522,7 +1508,7 @@ async function scanWindowAndAdvance(
 	from: number,
 	to: number,
 	state: LabClPayoutState,
-	pending: Map<string, SkimEntry>,
+	h: LabHandle,
 	line: LabScanLine,
 	counters: LabScanCounters
 ): Promise<{ okThrough: number | null; added: number }> {
@@ -1532,8 +1518,7 @@ async function scanWindowAndAdvance(
 		redeemAddr,
 		from,
 		to,
-		state,
-		pending,
+		h,
 		counters
 	)
 	if (counters.from == null) counters.from = from
@@ -1549,13 +1534,13 @@ async function scanWindowAndAdvance(
 			state.realtimeCursor = okThrough
 			state.lastLiveHeadScanned = Math.max(state.lastLiveHeadScanned ?? 0, okThrough)
 		}
-		persistPending(state, pending)
+		await h.commit('scan')
 		if (line === 'history') labCommittedHistoryCursor = state.historyCursor ?? null
 		const label = line === 'history' ? 'history' : 'realtime'
 		if (added > 0) {
 			logger(
 				Colors.cyan(
-					`[labMiningPoolClPayout] ${label} queued +${added} (pending=${pending.size}) ${from}-${okThrough}`
+					`[labMiningPoolClPayout] ${label} queued +${added} (pending=${h.pendingSize}) ${from}-${okThrough}`
 				)
 			)
 		} else {
@@ -1589,7 +1574,8 @@ async function labPayoutTick(): Promise<void> {
 		const readContract = new ethers.Contract(redeemAddr, READ_ABI, provider)
 
 		const state = getLabSessionState()
-		const pending = loadPendingMap(state)
+		const pendingMap = loadPendingMap(state)
+		const h: LabHandle = new LegacyStateHandle<SkimEntry, LabClPayoutState>({ state: state as never, pending: pendingMap, persist: () => persistPending(state, pendingMap) })
 		const liveHead = Number(await provider.getBlockNumber())
 		const floor = resolveLabScanFloorBlock()
 		if (!Number.isFinite(liveHead) || liveHead < floor) return
@@ -1601,7 +1587,7 @@ async function labPayoutTick(): Promise<void> {
 			return
 		}
 		const freeze = ensureDualCursors(state, liveHead, tipHash)
-		persistPending(state, pending)
+		await h.commit('scalars')
 		labCommittedHistoryCursor = state.historyCursor ?? null
 		logSessionStartIfNeeded(state, liveHead, freeze)
 
@@ -1614,8 +1600,8 @@ async function labPayoutTick(): Promise<void> {
 		const invC = resolveHistoryPayBehindCursor()
 		let histTotal = 0
 		let histAhead = 0
-		if (invC) ({ histTotal, histAhead } = countHistoryAhead(pending.values(), freeze.height, labCommittedHistoryCursor))
-		const pauses = decideLinePauses({ history: labHistoryPaused, realtime: labRealtimePaused }, pending.size, highWater, histAhead)
+		if (invC) ({ histTotal, histAhead } = countHistoryAhead(h.pendingValues(), freeze.height, labCommittedHistoryCursor))
+		const pauses = decideLinePauses({ history: labHistoryPaused, realtime: labRealtimePaused }, h.pendingSize, highWater, histAhead)
 		labHistoryPaused = pauses.history
 		labRealtimePaused = pauses.realtime
 
@@ -1634,7 +1620,7 @@ async function labPayoutTick(): Promise<void> {
 					w.from,
 					w.to,
 					state,
-					pending,
+					h,
 					'realtime',
 					rtCounters
 				)
@@ -1659,7 +1645,7 @@ async function labPayoutTick(): Promise<void> {
 					w.from,
 					w.to,
 					state,
-					pending,
+					h,
 					'history',
 					hiCounters
 				)
@@ -1672,21 +1658,21 @@ async function labPayoutTick(): Promise<void> {
 		const prog = formatHistoryProgress(state.historyCursor ?? freeze.height, freeze.height)
 		const lat = formatRealtimeLatency({
 			tipBlock: liveHead,
-			oldestRealtimePendingBlock: [...pending.values()]
+			oldestRealtimePendingBlock: [...h.pendingValues()]
 				.filter((e) => classifyPendingLine(e.blockNumber, freeze.height) === 'realtime')
 				.reduce<number | null>((m, e) => (m == null ? e.blockNumber : Math.min(m, e.blockNumber)), null),
 		})
 		logger(
 			Colors.gray(
 				`[labMiningPoolClPayout] progress hist remaining=${prog.remaining} pct=${prog.pct}% ` +
-					`rt tipGap=${lat.tipGapBlocks} pending=${pending.size}` +
+					`rt tipGap=${lat.tipGapBlocks} pending=${h.pendingSize}` +
 					(invC ? ` histPayable=${histTotal - histAhead} histAhead=${histAhead}` : '')
 			)
 		)
 
-		await flushPendingLabBatches(provider, readContract, redeemAddr, state, pending)
+		await flushPendingLabBatches(provider, readContract, redeemAddr, state, h)
 		tryPersistListeningCheckpoint(state, liveHead)
-		persistPending(state, pending)
+		await h.commit('scalars')
 	} catch (e: unknown) {
 		logger(Colors.red(`[labMiningPoolClPayout] tick error: ${(e as Error)?.message ?? e}`))
 	} finally {
