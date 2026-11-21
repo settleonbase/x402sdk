@@ -168,3 +168,38 @@ test('C5 finding: the lock file is never half-written - a crash between writing 
 		fs.rmSync(dir, { recursive: true, force: true })
 	}
 })
+
+test('lock acquisition cleans its own temp file when any step fails, and says what a file system without hard links needs', () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'labsl2-'))
+	const stateDir = path.join(dir, 'state.v2')
+	const lockFile = stateDirLockPath(stateDir)
+	const tmpFiles = (): string[] => fs.readdirSync(dir).filter((n) => n.includes('.tmp.'))
+	const realFsync = fs.fsyncSync
+	const realLink = fs.linkSync
+	try {
+		// an fsync failure: the temp file (already created and written) is removed
+		;(fs as unknown as { fsyncSync: unknown }).fsyncSync = () => {
+			throw Object.assign(new Error('simulated fsync failure'), { code: 'EIO' })
+		}
+		assert.throws(() => acquireStateDirLock(stateDir), /simulated fsync failure/)
+		;(fs as unknown as { fsyncSync: unknown }).fsyncSync = realFsync
+		assert.deepEqual(tmpFiles(), [], 'no temp file left after an fsync failure')
+		assert.equal(fs.existsSync(lockFile), false)
+		// a file system without hard links: a clear message, no temp file, no lock
+		for (const code of ['ENOTSUP', 'EPERM', 'EXDEV']) {
+			;(fs as unknown as { linkSync: unknown }).linkSync = () => {
+				throw Object.assign(new Error('operation not supported'), { code })
+			}
+			assert.throws(() => acquireStateDirLock(stateDir), new RegExp(`link\\(\\) failed with ${code}.*must support hard links`), code)
+			;(fs as unknown as { linkSync: unknown }).linkSync = realLink
+			assert.deepEqual(tmpFiles(), [], `no temp file left after ${code}`)
+			assert.equal(fs.existsSync(lockFile), false)
+		}
+	} finally {
+		;(fs as unknown as { fsyncSync: unknown }).fsyncSync = realFsync
+		;(fs as unknown as { linkSync: unknown }).linkSync = realLink
+	}
+	const lock = acquireStateDirLock(stateDir)
+	lock.release()
+	fs.rmSync(dir, { recursive: true, force: true })
+})

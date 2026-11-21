@@ -169,8 +169,12 @@ export function acquireStateDirLock(stateDir: string): StateDirLock {
 			}
 			try {
 				fs.linkSync(tmp, file)
-			} finally {
-				fs.rmSync(tmp, { force: true })
+			} catch (e) {
+				const code = (e as NodeJS.ErrnoException).code
+				if (code === 'ENOTSUP' || code === 'EOPNOTSUPP' || code === 'EPERM' || code === 'EXDEV' || code === 'ENOSYS' || code === 'EMLINK') {
+					throw new Error(`lab state lock: link() failed with ${code} (${(e as Error).message}); the file system of the state directory must support hard links (the lock is published atomically with link())`)
+				}
+				throw e
 			}
 			const lock: StateDirLock = { file, token, release: () => releaseIfOwner(file, token) }
 			held.set(file, lock)
@@ -178,6 +182,9 @@ export function acquireStateDirLock(stateDir: string): StateDirLock {
 			return lock
 		} catch (e) {
 			if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+		} finally {
+			// whatever failed above (open, write, fsync, link), this process's temp file does not outlive the attempt (already gone after a successful link)
+			fs.rmSync(tmp, { force: true })
 		}
 		const holder = readHolder(file)
 		if (holder === null) continue
