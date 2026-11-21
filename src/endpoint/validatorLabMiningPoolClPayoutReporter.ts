@@ -77,6 +77,13 @@ import {
 } from './labMiningPoolPayoutSigner'
 import { beaconHttpIsUnconfirmed, PaidKeyViewUnconfirmed } from './clPaidKeyGate'
 import {
+	newLabScanCounters,
+	newLabFlushCounters,
+	formatScanSummary,
+	formatFlushSummary,
+	type LabScanCounters,
+} from './labScanSummary'
+import {
 	inspectSegmentedDir,
 	legacyStateFileExists,
 	readSegmentedState,
@@ -261,6 +268,8 @@ let labMiningPool = ''
 let labManifestMtime = 0
 let labPhaseLogged = false
 let labSessionState: LabClPayoutState | undefined
+/** Entries marked consumed by settled batches since the process started (flush-summary settledEntries is a delta of this). */
+let labSettledEntriesTotal = 0
 /** Single-writer lock on the v2 state dir, held from start until process exit. */
 let labStateLock: StateDirLock | undefined
 /** Set on the first state write failure. Blocks every later payment in this process (B-3). */
@@ -833,15 +842,48 @@ function withdrawalEventKey(blockNumber: number, withdrawalIndex: number): strin
 	)
 }
 
-async function collectLabSkimEntriesForBlock(
+/**
+ * Everything the per-withdrawal classification reads from outside. The defaults are the live reads; tests inject fakes.
+ * Order of use (P1): the Lab pubkey filter comes first, so a withdrawal of any other validator never causes a chain read
+ * and is never recorded in consumedEventKeys. Only a Lab pubkey is checked against the on-chain paid-key view, and that
+ * check still happens before any entry can reach the pending pool.
+ */
+export type LabScanDeps = {
+	/** consumedRewardEventKey(eventKey) on the VDR. Throws when the view cannot be read. */
+	chainConsumed: (eventKey: string) => Promise<boolean>
+	fetchValidator: (validatorIndex: number) => Promise<{ pubkey: string | null; status: string | null }>
+	isLabPubkey: (pubkey: string) => boolean
+	/** guardianIdBeneficiary of the pubkey's guardian; the zero address when the pubkey has no guardian. */
+	guardianBeneficiary: (pubkeyHash: string) => Promise<string>
+	exitFloorWei: () => bigint
+}
+
+function defaultLabScanDeps(readContract: ethers.Contract): LabScanDeps {
+	return {
+		chainConsumed: async (eventKey) => Boolean(await readContract.consumedRewardEventKey!(eventKey)),
+		fetchValidator: fetchValidatorByIndex,
+		isLabPubkey: (pubkey) => labPubkeySet.has(pubkey),
+		guardianBeneficiary: async (pubkeyHash) => {
+			const guardianId = BigInt(await readContract.getNodeByValidatorPubkeyHash!(pubkeyHash))
+			if (guardianId <= 0n) return ethers.ZeroAddress
+			return String(await readContract.guardianIdBeneficiary!(guardianId))
+		},
+		exitFloorWei: resolveFullExitFloorWei,
+	}
+}
+
+export async function collectLabSkimEntriesForBlock(
 	readContract: ethers.Contract,
 	proxyLower: string,
 	blockNumber: number,
 	block: RpcBlock,
 	state: LabClPayoutState,
-	pending: Map<string, SkimEntry>
+	pending: Map<string, SkimEntry>,
+	counters: LabScanCounters = newLabScanCounters(),
+	depsOverride?: Partial<LabScanDeps>
 ): Promise<SkimEntry[]> {
-	const floorWei = resolveFullExitFloorWei()
+	const deps: LabScanDeps = { ...defaultLabScanDeps(readContract), ...depsOverride }
+	const floorWei = deps.exitFloorWei()
 	const entries: SkimEntry[] = []
 	for (const w of block.withdrawals ?? []) {
 		const addr = String(w.address ?? '').toLowerCase()
@@ -851,17 +893,50 @@ async function collectLabSkimEntriesForBlock(
 		const amountWei = amountGwei * 1_000_000_000n
 		const validatorIndex = Number(w.validatorIndex)
 		const withdrawalIndex = Number(w.index)
-		if (!Number.isFinite(validatorIndex) || validatorIndex < 0) continue
-		if (!Number.isFinite(withdrawalIndex) || withdrawalIndex < 0) continue
+		counters.proxyWithdrawals++
+		if (!Number.isFinite(validatorIndex) || validatorIndex < 0) {
+			counters.invalid++
+			continue
+		}
+		if (!Number.isFinite(withdrawalIndex) || withdrawalIndex < 0) {
+			counters.invalid++
+			continue
+		}
 
 		const eventKey = withdrawalEventKey(blockNumber, withdrawalIndex)
-		if (state.consumedEventKeys[eventKey]) continue
-		if (pending.has(eventKey.toLowerCase())) continue
+		if (state.consumedEventKeys[eventKey]) {
+			counters.localHit++
+			continue
+		}
+		if (pending.has(eventKey.toLowerCase())) {
+			counters.localHit++
+			continue
+		}
 
+		// P1: whose withdrawal is this? Only a Lab pubkey is ever read against the chain or recorded.
+		let pubkey: string | null
+		let status: string | null
 		try {
-			const consumedOnChain = await readContract.consumedRewardEventKey!(eventKey)
+			const fetched = await deps.fetchValidator(validatorIndex)
+			pubkey = fetched.pubkey
+			status = fetched.status
+		} catch (err: unknown) {
+			throw new PaidKeyViewUnconfirmed(
+				eventKey,
+				err instanceof Error ? err.message : String(err)
+			)
+		}
+		if (!pubkey || !deps.isLabPubkey(pubkey)) {
+			counters.nonLab++
+			continue
+		}
+
+		// Still before anything can reach the pending pool: a key another path already settled on chain is never paid here.
+		try {
+			const consumedOnChain = await deps.chainConsumed(eventKey)
 			if (consumedOnChain) {
 				state.consumedEventKeys[eventKey] = true
+				counters.labChainConsumed++
 				continue
 			}
 		} catch (err: unknown) {
@@ -871,23 +946,10 @@ async function collectLabSkimEntriesForBlock(
 			)
 		}
 
-		let pubkey: string | null
-		let status: string | null
-		try {
-			const fetched = await fetchValidatorByIndex(validatorIndex)
-			pubkey = fetched.pubkey
-			status = fetched.status
-		} catch (err: unknown) {
-			throw new PaidKeyViewUnconfirmed(
-				eventKey,
-				err instanceof Error ? err.message : String(err)
-			)
-		}
-		if (!pubkey || !labPubkeySet.has(pubkey)) continue
-
 		if (isNonSkimWithdrawal(amountWei, floorWei)) {
 			markLabValidatorExited(state, pubkey)
 			state.consumedEventKeys[eventKey] = true
+			counters.nonSkim++
 			logger(
 				Colors.yellow(
 					`[labMiningPoolClPayout] non-skim inflow (≥exit floor) block=${blockNumber} validator=${pubkey.slice(0, 14)}… amount=${ethers.formatEther(amountWei)} CNET status=${status ?? '?'}`
@@ -898,6 +960,7 @@ async function collectLabSkimEntriesForBlock(
 
 		if (status !== LAB_SKIM_ELIGIBLE_STATUS) {
 			markLabValidatorExited(state, pubkey)
+			counters.nonActive++
 			logger(
 				Colors.gray(
 					`[labMiningPoolClPayout] skip non-active validator block=${blockNumber} status=${status ?? '?'} pubkey=${pubkey.slice(0, 14)}…`
@@ -908,11 +971,11 @@ async function collectLabSkimEntriesForBlock(
 
 		try {
 			const pkHash = ethers.keccak256(pubkey)
-			const guardianId = BigInt(await readContract.getNodeByValidatorPubkeyHash!(pkHash))
-			if (guardianId > 0n) {
-				const beneficiary = String(await readContract.guardianIdBeneficiary!(guardianId))
-				// Active redeem guardian (beneficiary set) → validatorClRewardPayoutReporter on redeem listener host.
-				if (beneficiary !== ethers.ZeroAddress) continue
+			const beneficiary = await deps.guardianBeneficiary(pkHash)
+			// Active redeem guardian (beneficiary set) → validatorClRewardPayoutReporter on redeem listener host.
+			if (beneficiary !== ethers.ZeroAddress) {
+				counters.guardianBeneficiary++
+				continue
 			}
 		} catch (err: unknown) {
 			throw new PaidKeyViewUnconfirmed(
@@ -982,6 +1045,7 @@ function makeLabLifecycleDeps(
 			}
 		},
 		settle: (keys) => {
+			labSettledEntriesTotal += keys.length
 			for (const k of keys) {
 				pending.delete(k)
 				state.consumedEventKeys[k] = true
@@ -1059,6 +1123,13 @@ async function flushPendingLabBatches(
 	if (!pending.size && !state.inFlightWithdraw) {
 		if (clearGasWait(state)) persistPending(state, pending)
 		return
+	}
+	// One journal line per flush that inspected entries or settled a batch (integers only; see labScanSummary.ts).
+	const fc = newLabFlushCounters()
+	const settledBefore = labSettledEntriesTotal
+	const emitFlushSummary = (): void => {
+		const text = formatFlushSummary(fc, labSettledEntriesTotal - settledBefore)
+		if (text) logger(Colors.cyan(`[labMiningPoolClPayout] ${text}`))
 	}
 
 	const maxGas = resolveMaxGasPriceWei()
@@ -1138,6 +1209,10 @@ async function flushPendingLabBatches(
 		}
 		live.push(e)
 	}
+	fc.inspect = ordered.length
+	fc.pendingAtInspect = pending.size + droppedConsumed
+	fc.droppedChainConsumed = droppedConsumed
+	fc.unconfirmed = unconfirmed
 	if (droppedConsumed > 0 || unconfirmed > 0) {
 		persistPending(state, pending)
 		logger(
@@ -1148,12 +1223,14 @@ async function flushPendingLabBatches(
 	}
 	if (!live.length) {
 		if (clearGasWait(state)) persistPending(state, pending)
+		emitFlushSummary()
 		return
 	}
 
 	const freezeH = state.freezeH?.height
 	if (freezeH == null) {
 		logger(Colors.yellow('[labMiningPoolClPayout] skip flush: freezeH not set yet'))
+		emitFlushSummary()
 		return
 	}
 
@@ -1172,7 +1249,12 @@ async function flushPendingLabBatches(
 			)
 		)
 	}
-	if (!signable.length) return
+	fc.held = held
+	fc.signable = signable.length
+	if (!signable.length) {
+		emitFlushSummary()
+		return
+	}
 
 	// Pack per-line batches. withdrawNative has no 32×count floor. A batch larger than
 	// the contract balance is refused inside submit and left pending.
@@ -1197,7 +1279,11 @@ async function flushPendingLabBatches(
 	const reserved = resolveRealtimeReservedBatches()
 	const scheduled = scheduleFlushBatches(packed, reserved)
 	const batches = scheduled.ordered.slice(0, maxBatches)
-	if (!batches.length) return
+	fc.batches = batches.length
+	if (!batches.length) {
+		emitFlushSummary()
+		return
+	}
 
 	const tipBlock = Number(await provider.getBlockNumber().catch(() => freezeH))
 	const oldestRt = realtimeLive.length
@@ -1233,6 +1319,8 @@ async function flushPendingLabBatches(
 				)
 			)
 			persistPending(state, pending)
+			fc.failed = true
+			emitFlushSummary()
 			return
 		}
 		for (const e of batch.entries) pending.delete(e.eventKey)
@@ -1240,6 +1328,7 @@ async function flushPendingLabBatches(
 	}
 
 	if (!pending.size && clearGasWait(state)) persistPending(state, pending)
+	emitFlushSummary()
 }
 
 async function processBlockRange(
@@ -1249,15 +1338,16 @@ async function processBlockRange(
 	fromBlock: number,
 	toBlock: number,
 	state: LabClPayoutState,
-	pending: Map<string, SkimEntry>
-): Promise<{ okThrough: number | null; added: number; fetchFailed: boolean }> {
+	pending: Map<string, SkimEntry>,
+	counters: LabScanCounters
+): Promise<{ okThrough: number | null; added: number; fetchFailed: boolean; unconfirmed: boolean }> {
 	const proxyLower = redeemAddr.toLowerCase()
 	let okThrough: number | null = null
 	let added = 0
 	for (let bn = fromBlock; bn <= toBlock; bn++) {
 		const block = await fetchBlockWithWithdrawals(provider, bn)
 		if (!block) {
-			return { okThrough, added, fetchFailed: true }
+			return { okThrough, added, fetchFailed: true, unconfirmed: false }
 		}
 		let entries: SkimEntry[]
 		try {
@@ -1267,7 +1357,8 @@ async function processBlockRange(
 				bn,
 				block,
 				state,
-				pending
+				pending,
+				counters
 			)
 		} catch (err: unknown) {
 			if (err instanceof PaidKeyViewUnconfirmed) {
@@ -1276,14 +1367,17 @@ async function processBlockRange(
 						`[labMiningPoolClPayout] paid-key view unconfirmed block=${bn} eventKey=${err.eventKey} ${err.message}; cursor stays ${okThrough ?? 'unset'}`
 					)
 				)
-				return { okThrough, added, fetchFailed: false }
+				return { okThrough, added, fetchFailed: false, unconfirmed: true }
 			}
 			throw err
 		}
-		added += mergeIntoPending(pending, entries)
+		const merged = mergeIntoPending(pending, entries)
+		added += merged
+		counters.added += merged
+		counters.blocks++
 		okThrough = bn
 	}
-	return { okThrough, added, fetchFailed: false }
+	return { okThrough, added, fetchFailed: false, unconfirmed: false }
 }
 
 function logSessionStartIfNeeded(state: LabClPayoutState, liveHead: number, freeze: LabFreezeH): void {
@@ -1307,17 +1401,23 @@ async function scanWindowAndAdvance(
 	to: number,
 	state: LabClPayoutState,
 	pending: Map<string, SkimEntry>,
-	line: LabScanLine
+	line: LabScanLine,
+	counters: LabScanCounters
 ): Promise<{ okThrough: number | null; added: number }> {
-	const { okThrough, added, fetchFailed } = await processBlockRange(
+	const { okThrough, added, fetchFailed, unconfirmed } = await processBlockRange(
 		provider,
 		readContract,
 		redeemAddr,
 		from,
 		to,
 		state,
-		pending
+		pending,
+		counters
 	)
+	if (counters.from == null) counters.from = from
+	if (okThrough != null) counters.through = okThrough
+	if (fetchFailed) counters.fetchFailed = true
+	if (unconfirmed) counters.unconfirmed = true
 	if (okThrough != null) {
 		// Cursor + enqueue are persisted together (anti-power-loss).
 		if (line === 'history') {
@@ -1343,6 +1443,12 @@ async function scanWindowAndAdvance(
 		logger(Colors.yellow(`[labMiningPoolClPayout] ${line} fetch failed at ${from}-${to}; cursor not advanced past okThrough=${okThrough}`))
 	}
 	return { okThrough, added }
+}
+
+/** One journal line per scan line and tick (integers only). Silent when the tick processed no block and nothing failed. */
+function logScanSummary(line: LabScanLine, counters: LabScanCounters): void {
+	const text = formatScanSummary(line, counters)
+	if (text) logger(Colors.cyan(`[labMiningPoolClPayout] ${text}`))
 }
 
 async function labPayoutTick(): Promise<void> {
@@ -1379,6 +1485,7 @@ async function labPayoutTick(): Promise<void> {
 		const chunksPerTick = resolveChunksPerTick()
 
 		// 1) Realtime line first (tip-fill) — reserved capacity for latency.
+		const rtCounters = newLabScanCounters()
 		{
 			let windows = 0
 			while (windows < chunksPerTick) {
@@ -1392,14 +1499,17 @@ async function labPayoutTick(): Promise<void> {
 					w.to,
 					state,
 					pending,
-					'realtime'
+					'realtime',
+					rtCounters
 				)
 				windows++
 				if ((state.realtimeCursor ?? 0) < w.to) break
 			}
 		}
+		logScanSummary('realtime', rtCounters)
 
 		// 2) History line keeps advancing toward H (must not stall forever behind realtime).
+		const hiCounters = newLabScanCounters()
 		{
 			let windows = 0
 			while (windows < chunksPerTick) {
@@ -1413,12 +1523,14 @@ async function labPayoutTick(): Promise<void> {
 					w.to,
 					state,
 					pending,
-					'history'
+					'history',
+					hiCounters
 				)
 				windows++
 				if ((state.historyCursor ?? 0) < w.to) break
 			}
 		}
+		logScanSummary('history', hiCounters)
 
 		const prog = formatHistoryProgress(state.historyCursor ?? freeze.height, freeze.height)
 		const lat = formatRealtimeLatency({
