@@ -32,6 +32,10 @@ export type RollbackHooks = {
 	beforeConvert?: () => void
 	/** Test hook between the verified version 2 manifest and the removal of the log segments (throw to simulate the crash there). */
 	beforeRemoveSegments?: () => void
+	/** Test hook after the log is removed and before the verification (tamper with the converted directory to prove the verification can fail). */
+	beforeVerify?: () => void
+	/** Test seam: the plain version 2 reader used for the read-back (default readSegmentedState). A test returns a valid-looking but different state to prove the comparison, not the store's own checksum, catches it. */
+	plainReader?: (stateDir: string) => unknown
 }
 
 export type RollbackOptions = {
@@ -175,17 +179,30 @@ async function rollbackLocked(opts: RollbackOptions): Promise<RollbackResult> {
 	const wal = new WalWriter({ stateDir: opts.stateDir, lastSeq: rec.writerLastSeq, onFatal: (e) => { throw e } })
 	const stop = await gracefulStopToV2(core, wal, opts.stateDir, { beforeRemoveSegments: opts.hooks?.beforeRemoveSegments })
 
+	opts.hooks?.beforeVerify?.()
 	// verification against the state before
 	const checks: Record<string, boolean | string | number> = {}
 	const after = recoverPayoutState(opts.stateDir, { readOnly: true })
 	checks.manifestVersion = readManifest(opts.stateDir).version
 	checks.logSegmentsLeft = listSegments(walDir).length
 	checks.logicalStateIdentical = logicalDigest(after.core) === before
+	// K2: what an older build reads with the PLAIN version 2 reader must equal the recovered state in full, not just in count: the pending key set, the consumed keys IN ORDER, the exited keys,
+	// the in-flight record as a whole, and every pending entry
 	let plainReaderOk = false
 	try {
-		const plain = readSegmentedState(opts.stateDir) as { pending?: unknown[]; consumedEventKeys?: Record<string, true> }
-		plainReaderOk = Array.isArray(plain.pending) ? plain.pending.length === core.pendingSize : true
-		checks.plainReaderConsumed = Object.keys(plain.consumedEventKeys ?? {}).length
+		const plain = (opts.hooks?.plainReader ?? readSegmentedState)(opts.stateDir) as { pending?: ({ eventKey: string } & Record<string, unknown>)[]; consumedEventKeys?: Record<string, true>; exitedPubkeys?: Record<string, true>; inFlightWithdraw?: unknown }
+		const pendingNow = [...core.pendingEntries()].map((e) => e.eventKey).sort()
+		const plainPending = (plain.pending ?? []).map((e) => e.eventKey).sort()
+		const plainConsumed = Object.keys(plain.consumedEventKeys ?? {})
+		const plainExited = Object.keys(plain.exitedPubkeys ?? {}).sort()
+		checks.plainPendingKeysEqual = canonicalJson(plainPending) === canonicalJson(pendingNow)
+		checks.plainConsumedOrderEqual = canonicalJson(plainConsumed) === canonicalJson([...core.consumedKeys()])
+		checks.plainExitedEqual = canonicalJson(plainExited) === canonicalJson([...core.exited.keys()].sort())
+		checks.plainInFlightEqual = canonicalJson(plain.inFlightWithdraw ?? null) === canonicalJson(core.getInFlight())
+		const entriesNow = new Map([...core.pendingEntries()].map((e) => [e.eventKey, canonicalJson({ ...e })]))
+		checks.plainPendingEntriesEqual = (plain.pending ?? []).every((e) => entriesNow.get(e.eventKey) === canonicalJson({ ...e }))
+		checks.plainReaderConsumed = plainConsumed.length
+		plainReaderOk = checks.plainPendingKeysEqual === true && checks.plainConsumedOrderEqual === true && checks.plainExitedEqual === true && checks.plainInFlightEqual === true && checks.plainPendingEntriesEqual === true
 	} catch (e) {
 		checks.plainReaderError = e instanceof Error ? e.message : String(e)
 	}

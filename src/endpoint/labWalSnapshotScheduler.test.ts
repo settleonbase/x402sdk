@@ -221,6 +221,8 @@ test('s12 spec: with 10,300 consumed keys and cap 10,000 the COMMITTED manifest 
 	try {
 		const keys = await seed10300(w)
 		// what the legacy implementation leaves, computed by the legacy code itself
+		// TIME POINT of the comparison: the legacy prune runs at its first write, on exactly this seeded set (no paid keys added yet), so the sets are identical. In the end-to-end golden the legacy path then
+		// ADDS the 5 keys it pays (9,005 left) while WAL prunes at the snapshot/stop after those 5 were added (10,305 -> 9,000): the WAL set is the golden set minus its 5 oldest survivors (see labE2eWalShutdown).
 		const archDir = path.join(w.dir, 'legacy-archive')
 		const logsLegacy: string[] = []
 		const legacy = createLegacyStateStore({ stateFile: () => path.join(w.dir, 'legacy.json'), segmentedDir: () => path.join(w.dir, 'legacy.v2'), consumedCap: () => 10_000, scanFloor: () => 100, tripPersist: () => undefined, logger: (...a: unknown[]) => void logsLegacy.push(String(a[0])) })
@@ -274,6 +276,130 @@ test('s12 spec: when the archive fails nothing is pruned this time (the committe
 		await w.settle(s2)
 		assert.equal(archived.length, 1300)
 		assert.equal(w.core.consumedSize, 9000)
+	} finally {
+		await w.done()
+	}
+})
+
+// ---- K1: failures AFTER the manifest is committed
+function watchUnhandled(): { seen: unknown[]; stop: () => void } {
+	const seen: unknown[] = []
+	const h = (e: unknown): void => void seen.push(e)
+	process.on('unhandledRejection', h)
+	return { seen, stop: () => void process.off('unhandledRejection', h) }
+}
+const turn = (ms = 30): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+test('K1: trimming the log fails AFTER the commit: the snapshot counts as committed, truncateFailed is counted, an ALERT is logged, nothing is rejected, finishSnapshot(false) is never called, and the next snapshot trims the log', async () => {
+	const w = await world(700)
+	const uh = watchUnhandled()
+	try {
+		await fill(w.h, 1, 30)
+		const realTruncate = w.wal.truncateThrough.bind(w.wal)
+		let boom = true
+		w.wal.truncateThrough = (seq: number) => {
+			if (boom) throw Object.assign(new Error('EIO: i/o error, unlink'), { code: 'EIO' })
+			return realTruncate(seq)
+		}
+		const finish = w.core.finishSnapshot.bind(w.core)
+		const calls: boolean[] = []
+		w.core.finishSnapshot = ((src: never, outcome: { committed: boolean }) => {
+			calls.push(outcome.committed)
+			return finish(src, outcome as never)
+		}) as typeof w.core.finishSnapshot
+		const s = w.mk()
+		w.clock.t += 600_000
+		s.poke()
+		await w.settle(s)
+		await turn()
+		assert.equal(s.stats.committed, 1, 'the commit counts')
+		assert.equal(s.stats.failed, 0, 'it is not a failed snapshot')
+		assert.equal(s.stats.truncateFailed, 1)
+		assert.deepEqual(calls, [true], 'finishSnapshot(committed:false) was never called after the commit')
+		assert.ok(w.logs.some((l) => /ALERT snapshot committed at walSeq 30 but trimming the log failed: EIO/.test(l)), w.logs.join('\n'))
+		assert.equal(w.core.snapshotInFlight, false)
+		assert.equal(recoverPayoutState(w.stateDir, { readOnly: true }).snapshotSeq, 30, 'the committed snapshot is the recovery base; the untrimmed log is harmless')
+		assert.equal(uh.seen.length, 0, 'no unhandled rejection')
+		// the next snapshot works and trims what the failed one left
+		boom = false
+		await fill(w.h, 100, 3)
+		w.clock.t += 600_000
+		const segsBefore = listSegments(path.join(w.stateDir, 'wal')).length
+		s.poke()
+		await w.settle(s)
+		assert.equal(s.stats.committed, 2)
+		assert.ok(listSegments(path.join(w.stateDir, 'wal')).length < segsBefore, 'old segments trimmed by the next snapshot')
+		assert.equal(w.logical(recoverPayoutState(w.stateDir, { readOnly: true }).core), w.logical(w.core))
+	} finally {
+		uh.stop()
+		await w.done()
+	}
+})
+
+test('K1: the in-memory bookkeeping throws after the commit, or anything unexpected happens inside a run: ALERT, counted, no rejection, finishSnapshot(false) not called after a commit', async () => {
+	const w = await world()
+	const uh = watchUnhandled()
+	try {
+		await fill(w.h, 1, 10)
+		const finish = w.core.finishSnapshot.bind(w.core)
+		const calls: boolean[] = []
+		w.core.finishSnapshot = ((src: never, outcome: { committed: boolean }) => {
+			calls.push(outcome.committed)
+			if (outcome.committed) throw new Error('bookkeeping broke')
+			return finish(src, outcome as never)
+		}) as typeof w.core.finishSnapshot
+		const s = w.mk()
+		w.clock.t += 600_000
+		s.poke()
+		await w.settle(s)
+		await turn()
+		assert.equal(s.stats.committed, 1)
+		assert.equal(s.stats.bookkeepingFailed, 1)
+		assert.deepEqual(calls, [true])
+		assert.ok(w.logs.some((l) => /ALERT snapshot committed at walSeq 10 but the in-memory bookkeeping failed: bookkeeping broke/.test(l)))
+		// the core is still marked as snapshotting (finishSnapshot never completed), so the next attempt throws inside run(): that must be an ALERT, not a rejection
+		w.clock.t += 600_000
+		s.poke()
+		await w.settle(s)
+		await turn()
+		assert.ok(w.logs.some((l) => /ALERT snapshot scheduler internal error/.test(l)), w.logs.join('\n'))
+		assert.equal(uh.seen.length, 0, 'no unhandled rejection')
+	} finally {
+		uh.stop()
+		await w.done()
+	}
+})
+
+// ---- K3: a snapshot that does not happen is itself an alert, even when ticks never end
+test('K3: no committed snapshot for more than 3 intervals is an ALERT (once per interval, reset by a commit); the scheduler heartbeat starts a due snapshot with no tick at all, and stop() ends it', async () => {
+	const w = await world()
+	try {
+		await fill(w.h, 1, 5)
+		const s = w.mk({ walBytes: () => 0 })
+		w.clock.t += 3 * 600_000
+		s.checkStale()
+		assert.equal(w.logs.filter((l) => /ALERT no snapshot has committed/.test(l)).length, 0, 'exactly 3 intervals is not yet "more than"')
+		w.clock.t += 1000
+		s.checkStale()
+		s.checkStale()
+		assert.equal(w.logs.filter((l) => /ALERT no snapshot has committed for 1801s/.test(l)).length, 1, 'alerted once')
+		assert.equal(s.stats.staleAlerts, 1)
+		w.clock.t += 600_000
+		s.checkStale()
+		assert.equal(s.stats.staleAlerts, 2, 'and again one interval later')
+		// the heartbeat: no poke from any tick, the timer alone starts the due snapshot
+		assert.equal(s.timerActive, false)
+		s.start(5)
+		assert.equal(s.timerActive, true)
+		await w.settle({ get inFlight() { return false } } as never)
+		for (let i = 0; i < 100 && s.stats.committed === 0; i++) await turn(10)
+		assert.equal(s.stats.committed, 1, 'a snapshot started by the heartbeat alone')
+		const alerts = s.stats.staleAlerts
+		w.clock.t += 600_000
+		s.checkStale()
+		assert.equal(s.stats.staleAlerts, alerts, 'a commit resets the staleness')
+		await s.stop()
+		assert.equal(s.timerActive, false, 'stop() ends the heartbeat')
 	} finally {
 		await w.done()
 	}

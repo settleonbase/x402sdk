@@ -193,3 +193,47 @@ test('the command line: arguments only (no environment), --dry-run prints the pl
 		gone(w)
 	}
 })
+
+test('K2: the read-back is a full comparison - a plain reader that returns a different consumed ORDER, pending key, pending entry, exited key or in-flight record makes the command fail with "did not verify" (the audit stays, no done record); the store checksum catches a tampered file too', async () => {
+	type Plain = { pending: ({ eventKey: string } & Record<string, unknown>)[]; consumedEventKeys: Record<string, true>; exitedPubkeys: Record<string, true>; inFlightWithdraw?: Record<string, unknown> }
+	const cases: { name: string; change: (p: Plain) => Plain }[] = [
+		{ name: 'consumed order swapped', change: (p) => ({ ...p, consumedEventKeys: Object.fromEntries(Object.keys(p.consumedEventKeys).reverse().map((k) => [k, true] as const)) }) },
+		{ name: 'a pending key changed', change: (p) => ({ ...p, pending: p.pending.map((e, i) => (i === 0 ? { ...e, eventKey: hex(0xa9) } : e)) }) },
+		{ name: 'a pending entry amount changed', change: (p) => ({ ...p, pending: p.pending.map((e, i) => (i === 0 ? { ...e, amount: '999999' } : e)) }) },
+		{ name: 'an exited key missing', change: (p) => ({ ...p, exitedPubkeys: {} }) },
+		{ name: 'the in-flight record changed (hash)', change: (p) => ({ ...p, inFlightWithdraw: { ...(p.inFlightWithdraw ?? {}), hash: hex(0xdead) } }) },
+		{ name: 'the in-flight record missing', change: (p) => ({ ...p, inFlightWithdraw: undefined }) },
+	]
+	for (const c of cases) {
+		const w = await world({ inFlight: true })
+		try {
+			await assert.rejects(rollbackToV2(args(w, { hooks: { plainReader: (d) => c.change(readSegmentedState(d) as Plain) } })), /did not verify/, c.name)
+			assert.ok(fs.existsSync(path.join(w.auditDir, `wal-rollback-${RUN}.json`)), 'the audit stays')
+			assert.equal(fs.existsSync(path.join(w.auditDir, `wal-rollback-${RUN}.done.json`)), false, 'no done record for a failed verification')
+		} finally {
+			gone(w)
+		}
+	}
+	// and a really tampered file is refused by the store's own checksum
+	const w = await world({ inFlight: true })
+	try {
+		await assert.rejects(
+			rollbackToV2(
+				args(w, {
+					hooks: {
+						beforeVerify: () => {
+							const m = readManifest(w.stateDir)
+							const f = path.join(w.stateDir, m.generation, 'consumed.jsonl')
+							const lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean)
+							;[lines[0], lines[1]] = [lines[1]!, lines[0]!]
+							fs.writeFileSync(f, lines.join('\n') + '\n')
+						},
+					},
+				})
+			),
+			/sha256 does not match manifest/
+		)
+	} finally {
+		gone(w)
+	}
+})

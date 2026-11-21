@@ -333,23 +333,30 @@ test('the consumed prune: planned on the frozen views, archived BEFORE the commi
 
 // ------------------------------------------------------------------ slicing and event loop
 test('a large snapshot runs in many short slices and the event loop keeps turning (timer ticks) while it is written', async () => {
-	const core = makeCore(150_000, 300_000, 5_000)
-	const dir = tmp()
-	let ticks = 0
-	const timer = setInterval(() => ticks++, 5)
-	try {
-		const src = core.freezeForSnapshot()
-		const res = await writeSnapshotCooperative(src, { dir, mode: 'wal', sliceMs: 15 })
-		core.finishSnapshot(src, { committed: true, prunedKeys: [], frozenHistCounts: res.frozenHistCounts })
-		assert.ok(res.stats.slices >= 10, `slices ${res.stats.slices}`)
-		assert.ok(res.stats.maxSliceMs < 250, `longest synchronous stretch ${res.stats.maxSliceMs.toFixed(1)} ms`)
-		assert.ok(ticks >= 10, `timer ticks during the snapshot: ${ticks}`)
-		assert.equal(core.counts.driftEvents, 0)
-		console.log(`# snapshot 150k pending + 300k consumed: ${res.stats.totalMs.toFixed(0)} ms in ${res.stats.slices} slices, longest ${res.stats.maxSliceMs.toFixed(1)} ms`)
-	} finally {
-		clearInterval(timer)
-		done(dir)
+	// The longest synchronous stretch is a WALL-CLOCK figure: when the machine is busy (this file runs in parallel with the end-to-end children in the full suite) the OS can preempt the process inside
+	// a slice and inflate it (291 ms was seen under that load, 15-60 ms alone). Contention can only make a stretch longer, never shorter, so the property "the writer yields in short slices" is
+	// proven by ANY of up to 3 attempts meeting the limit; a writer that really did not yield would miss it every time.
+	let last = ''
+	for (let attempt = 1; attempt <= 3; attempt++) {
+		const core = makeCore(150_000, 300_000, 5_000)
+		const dir = tmp()
+		let ticks = 0
+		const timer = setInterval(() => ticks++, 5)
+		try {
+			const src = core.freezeForSnapshot()
+			const res = await writeSnapshotCooperative(src, { dir, mode: 'wal', sliceMs: 15 })
+			core.finishSnapshot(src, { committed: true, prunedKeys: [], frozenHistCounts: res.frozenHistCounts })
+			assert.ok(res.stats.slices >= 10, `slices ${res.stats.slices}`)
+			assert.equal(core.counts.driftEvents, 0)
+			console.log(`# snapshot 150k pending + 300k consumed (attempt ${attempt}): ${res.stats.totalMs.toFixed(0)} ms in ${res.stats.slices} slices, longest ${res.stats.maxSliceMs.toFixed(1)} ms, timer ticks ${ticks}`)
+			if (res.stats.maxSliceMs < 250 && ticks >= 10) return
+			last = `longest synchronous stretch ${res.stats.maxSliceMs.toFixed(1)} ms, timer ticks ${ticks}`
+		} finally {
+			clearInterval(timer)
+			done(dir)
+		}
 	}
+	assert.fail(`3 attempts all missed the limit (stretch < 250 ms and >= 10 timer ticks): ${last}`)
 })
 
 // ------------------------------------------------------------------ counts reconcile

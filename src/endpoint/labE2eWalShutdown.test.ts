@@ -16,7 +16,8 @@ import { FIXTURE_DIR, runScenario, type ScenarioResult } from './labE2e/harness.
 import { eventKeyOf, headPlan, scenarios, seedValidators, seedWithdrawals } from './labE2e/scenarios.test'
 
 const golden = (name: string): ScenarioResult & { logs: string[][] } => JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, `${name}.golden.json`), 'utf8'))
-const noiseLine = (l: string): boolean => /^\[labMiningPoolClPayout\] (WAL mode:|WAL graceful stop:|snapshot committed)/.test(l)
+// with the artificial 1 ms interval a snapshot can still be running when the next one is due under machine load: that skip is correct behaviour, its ALERT line is timing noise for these comparisons
+const noiseLine = (l: string): boolean => /^\[labMiningPoolClPayout\] (WAL mode:|WAL graceful stop:|snapshot committed|ALERT snapshot due \(interval\) but the previous one is still running)/.test(l)
 const stripUpdatedAt = (v: unknown): unknown => {
 	if (v && typeof v === 'object' && !Array.isArray(v)) return Object.fromEntries(Object.entries(v as Record<string, unknown>).filter(([k]) => k !== 'updatedAt').map(([k, x]) => [k, stripUpdatedAt(x)]))
 	return v

@@ -1,0 +1,229 @@
+/** The offline rollback conversion (errata C6): WAL state directory -> plain version 2 state an older build can start from. Local temp dirs only. */
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { test } from 'node:test'
+import { acquireStateDirLock } from './labClPayoutStateLock'
+import { readManifest, readSegmentedState } from './labClPayoutStateStore'
+import { LabPayoutStateCore } from './labPayoutStateCore'
+import { recoverPayoutState } from './labPayoutRecovery'
+import { writeSnapshotCooperative } from './labSnapshotWriter'
+import { WAL_DIR, WalWriter, listSegments, type WalOp } from './labWal'
+import { assertNoWalEvents } from './labWalGuard'
+import { logicalDigest, rollbackToV2, type RollbackOptions } from './labWalRollback'
+
+const hex = (n: number): string => `0x${n.toString(16).padStart(64, '0')}`
+const RUN = 'run-20261121-rb01'
+const APPROVAL = 'PM-2026-11-21-07'
+const fatal = (e: Error): void => {
+	throw e
+}
+type World = { root: string; stateDir: string; auditDir: string }
+
+async function world(opts: { inFlight?: boolean; segmentBytes?: number; extraEvents?: number } = {}): Promise<World> {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'labrollback-'))
+	const stateDir = path.join(root, 'state.v2')
+	const core = new LabPayoutStateCore({ scalars: { freezeH: { height: 500 }, lastBackfillProcessedBlock: 99 } })
+	const src = core.freezeForSnapshot()
+	const res = await writeSnapshotCooperative(src, { dir: stateDir, mode: 'wal' })
+	core.finishSnapshot(src, { committed: true, prunedKeys: [], frozenHistCounts: res.frozenHistCounts })
+	const wal = new WalWriter({ stateDir, lastSeq: 0, segmentBytes: opts.segmentBytes ?? 100000, onFatal: fatal })
+	const ps: Promise<void>[] = []
+	const add: WalOp[] = [1, 2, 3, 4, 5].map((i) => ({ op: 'pendingAdd', entry: { eventKey: hex(0xa0 + i), blockNumber: 100 + i, withdrawalIndex: i % 3, amount: String(1000 * i), pubkey: '0xabc' } }))
+	add.push({ op: 'scalarsSet', patch: { historyCursor: 150, settledBatchCount: 3 } })
+	ps.push(core.record(wal, 'scan', add).durable)
+	ps.push(core.record(wal, 'settle', [{ op: 'consumedAdd', key: hex(0xb1) }, { op: 'consumedAdd', key: hex(0xb2) }, { op: 'pendingDel', key: hex(0xa1) }, { op: 'exitedAdd', pubkey: '0xdead' }]).durable)
+	for (let i = 0; i < (opts.extraEvents ?? 0); i++) ps.push(core.record(wal, 'scan', [{ op: 'consumedAdd', key: hex(0xc000 + i) }]).durable)
+	if (opts.inFlight) ps.push(core.record(wal, 'intent', [{ op: 'inFlightSet', record: { line: 'history', amountWei: '2000', eventKeys: [hex(0xa2)], idempotencyKey: 'lab-withdrawNative:abc', hash: hex(0xeee1), requestFingerprint: '0xf', createdAt: '2026-11-21T00:00:00.000Z' } }]).durable)
+	await Promise.all(ps)
+	await wal.close()
+	return { root, stateDir, auditDir: path.join(root, 'audit') }
+}
+const gone = (w: World): void => fs.rmSync(w.root, { recursive: true, force: true })
+const args = (w: World, over: Partial<RollbackOptions> = {}): RollbackOptions => ({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: APPROVAL, ...over })
+const treeSha = (dir: string): string => {
+	const h = createHash('sha256')
+	const walk = (d: string): void => {
+		for (const n of fs.readdirSync(d).sort()) {
+			const f = path.join(d, n)
+			if (fs.statSync(f).isDirectory()) walk(f)
+			else h.update(f.slice(dir.length)).update(fs.readFileSync(f))
+		}
+	}
+	walk(dir)
+	return h.digest('hex')
+}
+
+test('converts a WAL state (snapshot + several segments + an in-flight record) to a plain version 2 state: same logical state, version 2 manifest, no segment, the plain reader and the P1 guard accept it; audit first, done record', async () => {
+	const w = await world({ inFlight: true, segmentBytes: 700, extraEvents: 30 })
+	try {
+		const before = recoverPayoutState(w.stateDir, { readOnly: true })
+		assert.ok(listSegments(path.join(w.stateDir, WAL_DIR)).length > 1, 'the log has several segments')
+		assert.throws(() => assertNoWalEvents(w.stateDir), /refus/i, 'an older build refuses the directory before the conversion')
+		const digest = logicalDigest(before.core)
+		const r = await rollbackToV2(args(w))
+		assert.equal(r.status, 'converted')
+		if (r.status !== 'converted') return
+		assert.equal(r.audit.inFlight.present, true)
+		assert.equal(r.audit.counts.pending, 4)
+		assert.equal(r.walSeq, before.writerLastSeq)
+		assert.equal(readManifest(w.stateDir).version, 2)
+		assert.equal(listSegments(path.join(w.stateDir, WAL_DIR)).length, 0)
+		assert.equal(logicalDigest(recoverPayoutState(w.stateDir, { readOnly: true }).core), digest)
+		const plain = readSegmentedState(w.stateDir) as { pending: { eventKey: string }[]; consumedEventKeys: Record<string, true>; inFlightWithdraw?: { idempotencyKey?: string } }
+		assert.equal(plain.pending.length, 4)
+		assert.equal(Object.keys(plain.consumedEventKeys).length, 32)
+		assert.equal(plain.inFlightWithdraw?.idempotencyKey, 'lab-withdrawNative:abc', 'an older build sees the in-flight record and resumes it itself')
+		assert.doesNotThrow(() => assertNoWalEvents(w.stateDir))
+		assert.ok(fs.existsSync(r.auditFile) && fs.existsSync(r.doneFile))
+		const audit = JSON.parse(fs.readFileSync(r.auditFile, 'utf8'))
+		assert.equal(audit.approvalVerified, false)
+		assert.equal(audit.manifestVersionBefore, 3)
+		const doneRec = JSON.parse(fs.readFileSync(r.doneFile, 'utf8'))
+		assert.equal(doneRec.checks.logicalStateIdentical, true)
+		assert.equal(doneRec.logicalStateSha256, createHash('sha256').update(digest).digest('hex'))
+		assert.equal(JSON.stringify(r).includes(w.auditDir), true)
+	} finally {
+		gone(w)
+	}
+})
+
+test('a second conversion finds nothing to do', async () => {
+	const w = await world()
+	try {
+		await rollbackToV2(args(w))
+		const again = await rollbackToV2(args(w, { runId: 'run-20261121-rb02' }))
+		assert.equal(again.status, 'nothing-to-do')
+	} finally {
+		gone(w)
+	}
+})
+
+test('dry-run writes nothing (not even an audit) and takes no lock; the state directory is byte-identical afterwards', async () => {
+	const w = await world({ inFlight: true })
+	try {
+		const sha = treeSha(w.stateDir)
+		const r = await rollbackToV2(args(w, { dryRun: true }))
+		assert.equal(r.status, 'dry-run')
+		assert.equal(treeSha(w.stateDir), sha)
+		assert.equal(fs.existsSync(w.auditDir), false)
+		const held = acquireStateDirLock(w.stateDir)
+		try {
+			assert.equal((await rollbackToV2(args(w, { dryRun: true }))).status, 'dry-run', 'a dry run works while the daemon holds the lock')
+		} finally {
+			held.release()
+		}
+	} finally {
+		gone(w)
+	}
+})
+
+test('refusals change nothing: missing run id / approval, audit dir inside the state dir, lock held, torn tail, mid-log damage', async () => {
+	const w = await world({ segmentBytes: 400, extraEvents: 12 })
+	try {
+		const sha = treeSha(w.stateDir)
+		await assert.rejects(rollbackToV2(args(w, { runId: '' })), /run id/)
+		await assert.rejects(rollbackToV2(args(w, { approval: '' })), /approval/)
+		await assert.rejects(rollbackToV2(args(w, { auditDir: path.join(w.stateDir, 'audit') })), /outside|inside/i)
+		const held = acquireStateDirLock(w.stateDir)
+		try {
+			await assert.rejects(rollbackToV2(args(w)), /state directory lock|stop the daemon/)
+		} finally {
+			held.release()
+		}
+		assert.equal(treeSha(w.stateDir), sha, 'nothing changed so far')
+		// torn tail: append garbage bytes to the last segment
+		const segs = listSegments(path.join(w.stateDir, WAL_DIR))
+		const last = path.join(w.stateDir, WAL_DIR, segs[segs.length - 1]!.file)
+		const original = fs.readFileSync(last)
+		fs.appendFileSync(last, Buffer.from([0x57, 0x4c, 0x00, 0x00, 0x00, 0x10, 0x01]))
+		await assert.rejects(rollbackToV2(args(w)), /torn tail/)
+		fs.writeFileSync(last, original)
+		// damage in the middle: flip a byte in the first segment (there are later valid frames)
+		const first = path.join(w.stateDir, WAL_DIR, segs[0]!.file)
+		const firstBytes = Buffer.from(fs.readFileSync(first))
+		firstBytes[Math.floor(firstBytes.length / 2)] ^= 0xff
+		fs.writeFileSync(first, firstBytes)
+		await assert.rejects(rollbackToV2(args(w)), /damage in the middle|torn tail|corrupt/i)
+		assert.equal(fs.existsSync(w.auditDir), false, 'no audit file for a refused run')
+		assert.equal(readManifest(w.stateDir).version, 3)
+	} finally {
+		gone(w)
+	}
+})
+
+test('a crash between the verified version 2 manifest and the removal of the segments keeps the log: the directory is a version 2 manifest with the log still there (an older build refuses it, the WAL daemon recovers it), and the command can be run again', async () => {
+	const w = await world({ segmentBytes: 700, extraEvents: 20 })
+	try {
+		const digest = logicalDigest(recoverPayoutState(w.stateDir, { readOnly: true }).core)
+		await assert.rejects(rollbackToV2(args(w, { hooks: { beforeRemoveSegments: () => { throw new Error('power cut') } } })), /power cut/)
+		assert.ok(listSegments(path.join(w.stateDir, WAL_DIR)).length > 0, 'the log is still there')
+		assert.throws(() => assertNoWalEvents(w.stateDir), /refus/i)
+		assert.equal(logicalDigest(recoverPayoutState(w.stateDir, { readOnly: true }).core), digest, 'recovery still gives the same state')
+		await assert.rejects(rollbackToV2(args(w)), /already used/, 'the crashed run left its audit file: the same run id is refused')
+		const r = await rollbackToV2(args(w, { runId: 'run-20261121-rb03' }))
+		assert.equal(r.status, 'converted')
+		assert.doesNotThrow(() => assertNoWalEvents(w.stateDir))
+		assert.equal(logicalDigest(recoverPayoutState(w.stateDir, { readOnly: true }).core), digest)
+	} finally {
+		gone(w)
+	}
+})
+
+test('the command line: arguments only (no environment), --dry-run prints the plan, a real run converts, an unknown argument exits 2', async () => {
+	const w = await world()
+	try {
+		const loader = ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href]
+		const run = (extra: string[], env: Record<string, string> = {}) => spawnSync(process.execPath, [...loader, path.join(__dirname, 'labWalRollback.ts'), ...extra], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', ...env } })
+		const base = ['--state-dir', w.stateDir, '--audit-dir', w.auditDir, '--run-id', RUN, '--approval', APPROVAL]
+		const dry = run([...base, '--dry-run'])
+		assert.equal(dry.status, 0, dry.stderr)
+		assert.equal(JSON.parse(dry.stdout).status, 'dry-run')
+		assert.equal(run([...base, '--bogus']).status, 2)
+		const real = run(base, { CONET_LAB_MINING_POOL_CL_PAYOUT_WAL: '1' })
+		assert.equal(real.status, 0, real.stderr)
+		assert.equal(JSON.parse(real.stdout).status, 'converted')
+		assert.equal(readManifest(w.stateDir).version, 2)
+	} finally {
+		gone(w)
+	}
+})
+
+test('K2: the read-back is a full comparison - an altered consumed order, pending key or in-flight record in the converted directory makes the command fail (the audit stays, the error says it did not verify)', async () => {
+	const cases: { name: string; tamper: (stateDir: string) => void }[] = [
+		{
+			name: 'consumed order swapped',
+			tamper: (d) => {
+				const m = readManifest(d)
+				const f = path.join(d, m.generation, 'consumed.jsonl')
+				const lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean)
+				;[lines[0], lines[1]] = [lines[1]!, lines[0]!]
+				fs.writeFileSync(f, lines.join('\n') + '\n')
+			},
+		},
+		{
+			name: 'a pending key changed',
+			tamper: (d) => {
+				const m = readManifest(d)
+				const seg = m.pending.segments[0]!
+				const f = path.join(d, m.generation, seg.file)
+				fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace(hex(0xa3), hex(0xa9)))
+			},
+		},
+	]
+	for (const c of cases) {
+		const w = await world({ inFlight: true })
+		try {
+			await assert.rejects(rollbackToV2(args(w, { hooks: { beforeVerify: () => c.tamper(w.stateDir) } })), /did not verify|checksum|digest|mismatch|integrity|sha/i, c.name)
+			assert.ok(fs.existsSync(path.join(w.auditDir, `wal-rollback-${RUN}.json`)), 'the audit stays')
+			assert.equal(fs.existsSync(path.join(w.auditDir, `wal-rollback-${RUN}.done.json`)), false, 'no done record for a failed verification')
+		} finally {
+			gone(w)
+		}
+	}
+})

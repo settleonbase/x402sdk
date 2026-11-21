@@ -9,6 +9,7 @@
  *   - snapshot failed / skipped because the previous is still running
  *   - consumed archive failed (the snapshot committed, nothing was pruned this time)
  *   - the log is more than twice the size limit (snapshots are not keeping up)
+ *   - no snapshot committed for more than `staleIntervals` (default 3) intervals (K3): checked by poke() AND by the scheduler's own unref'd timer, so a tick that never ends cannot hide it
  *   - the history-block counts drifted (found at a snapshot or on a removal; the session also wires the core's own drift callback)
  */
 import fs from 'node:fs'
@@ -20,6 +21,7 @@ import type { LabPayoutStateCore } from './labPayoutStateCore'
 export const SNAPSHOT_DEFAULT_INTERVAL_MS = 10 * 60_000
 export const SNAPSHOT_DEFAULT_WAL_MAX_BYTES = 256 * 1024 * 1024
 const RETRY_BACKOFF_MS = 120_000
+const STALE_FLOOR_MS = 30_000
 const SIZE_ALERT_EVERY_MS = 10 * 60_000
 
 export type SchedulerOptions = {
@@ -29,6 +31,8 @@ export type SchedulerOptions = {
 	log: (line: string) => void
 	intervalMs?: number
 	walMaxBytes?: number
+	/** ALERT when no snapshot committed for this many intervals (default 3). */
+	staleIntervals?: number
 	consumedCap?: number
 	archive?: (keys: string[]) => void
 	now?: () => number
@@ -45,6 +49,10 @@ export type SchedulerStats = {
 	failed: number
 	skippedBusy: number
 	archiveFailed: number
+	/** The snapshot committed but trimming the log failed (K1); bookkeepingFailed: finishSnapshot(true) threw after the commit. */
+	truncateFailed: number
+	bookkeepingFailed: number
+	staleAlerts: number
 	lastCommittedAt: number | null
 	lastError: string | null
 }
@@ -63,7 +71,7 @@ export function walTotalBytes(stateDir: string): number {
 }
 
 export class WalSnapshotScheduler {
-	readonly stats: SchedulerStats = { started: 0, committed: 0, failed: 0, skippedBusy: 0, archiveFailed: 0, lastCommittedAt: null, lastError: null }
+	readonly stats: SchedulerStats = { started: 0, committed: 0, failed: 0, skippedBusy: 0, archiveFailed: 0, truncateFailed: 0, bookkeepingFailed: 0, staleAlerts: 0, lastCommittedAt: null, lastError: null }
 	private cur: Promise<void> | null = null
 	private stopped = false
 	private readonly intervalMs: number
@@ -72,12 +80,45 @@ export class WalSnapshotScheduler {
 	private lastCommitAt: number
 	private nextTryAt = 0
 	private lastSizeAlertAt = -Infinity
+	private lastStaleAlertAt = -Infinity
+	private timer: ReturnType<typeof setInterval> | null = null
 
 	constructor(private readonly o: SchedulerOptions) {
 		this.intervalMs = o.intervalMs ?? SNAPSHOT_DEFAULT_INTERVAL_MS
 		this.walMaxBytes = o.walMaxBytes ?? SNAPSHOT_DEFAULT_WAL_MAX_BYTES
 		this.now = o.now ?? Date.now
 		this.lastCommitAt = this.now() // a fresh start counts as "just snapshotted": the recovery that preceded it is not a reason to snapshot at once
+	}
+
+	get timerActive(): boolean {
+		return this.timer !== null
+	}
+
+	/**
+	 * The scheduler's own heartbeat (K3): a tick can last minutes (a receipt wait), and poke() only runs between ticks; snapshots are cooperative and safe to start while a tick runs, so the timer
+	 * pokes too. Unref'd (never keeps the process alive), stopped by stop().
+	 */
+	start(periodMs?: number): void {
+		if (this.timer || this.stopped) return
+		const p = periodMs ?? Math.min(30_000, Math.max(1000, Math.floor(this.intervalMs / 2)))
+		this.timer = setInterval(() => this.poke(), p)
+		this.timer.unref()
+	}
+
+	/** ALERT when no snapshot has committed for more than staleIntervals intervals; at most once per interval. Never throws. */
+	checkStale(): void {
+		try {
+			const limit = Math.max(STALE_FLOOR_MS, (this.o.staleIntervals ?? 3) * this.intervalMs) // the floor keeps a deliberately tiny test interval from alerting on every poke
+			const t = this.now()
+			const age = t - this.lastCommitAt
+			if (age > limit && t - this.lastStaleAlertAt >= Math.max(STALE_FLOOR_MS, this.intervalMs)) {
+				this.lastStaleAlertAt = t
+				this.stats.staleAlerts++
+				this.o.log(`[labMiningPoolClPayout] ALERT no snapshot has committed for ${Math.round(age / 1000)}s (more than ${this.o.staleIntervals ?? 3} intervals of ${Math.round(this.intervalMs / 1000)}s): committed=${this.stats.committed} failed=${this.stats.failed} truncateFailed=${this.stats.truncateFailed} skippedBusy=${this.stats.skippedBusy} inFlight=${this.cur !== null}; the log keeps growing`)
+			}
+		} catch {
+			/* an alert must never break the daemon */
+		}
 	}
 
 	get inFlight(): boolean {
@@ -100,6 +141,7 @@ export class WalSnapshotScheduler {
 	/** Cheap; the daemon calls it at the end of every tick. Starts a snapshot when one is due and none is running; never throws. */
 	poke(): void {
 		if (this.stopped) return
+		this.checkStale()
 		try {
 			const bytes = this.bytes()
 			if (bytes > this.walMaxBytes * 2 && this.now() - this.lastSizeAlertAt >= SIZE_ALERT_EVERY_MS) {
@@ -126,15 +168,31 @@ export class WalSnapshotScheduler {
 	/** No new snapshot starts after this; resolves when the running one (if any) has finished (either way). */
 	async stop(): Promise<void> {
 		this.stopped = true
+		if (this.timer) {
+			clearInterval(this.timer)
+			this.timer = null
+		}
 		if (this.cur) await this.cur
 	}
 
+	/** Never rejects (K1): whatever happens inside is an ALERT line, so `poke()`'s promise can never become an unhandled rejection. */
 	private async run(reason: string): Promise<void> {
+		try {
+			await this.runInner(reason)
+		} catch (e) {
+			this.stats.failed++
+			this.stats.lastError = (e as Error)?.message ?? String(e)
+			this.o.log(`[labMiningPoolClPayout] ALERT snapshot scheduler internal error: ${this.stats.lastError}`)
+		}
+	}
+
+	private async runInner(reason: string): Promise<void> {
 		const { core, wal, stateDir } = this.o
 		this.stats.started++
 		const src = core.freezeForSnapshot()
+		let res: Awaited<ReturnType<typeof writeSnapshotCooperative>>
 		try {
-			const res = await writeSnapshotCooperative(src, {
+			res = await writeSnapshotCooperative(src, {
 				dir: stateDir,
 				mode: 'wal',
 				consumedCap: this.o.consumedCap,
@@ -142,19 +200,8 @@ export class WalSnapshotScheduler {
 				waitDurable: (seq) => wal.whenDurable(seq),
 				...this.o.writeOptions,
 			})
-			const fin = core.finishSnapshot(src, { committed: true, prunedKeys: res.prunedKeys, frozenHistCounts: res.frozenHistCounts })
-			if (fin.drift) this.o.log(`[labMiningPoolClPayout] ALERT history-block counts drifted: the incremental counts and the snapshot's own count differed at walSeq ${src.walSeq}; the live counts were corrected`)
-			const removed = wal.truncateThrough(src.walSeq)
-			this.stats.committed++
-			this.stats.lastCommittedAt = this.now()
-			this.lastCommitAt = this.now()
-			if (res.stats.archiveFailed) {
-				this.stats.archiveFailed++
-				this.o.log(`[labMiningPoolClPayout] ALERT consumed archive failed: the snapshot at walSeq ${src.walSeq} committed but nothing was pruned this time (archiveFailed=${this.stats.archiveFailed})`)
-			}
-			this.o.log(`[labMiningPoolClPayout] snapshot committed walSeq=${src.walSeq} reason=${reason} slices=${res.stats.slices} maxSliceMs=${res.stats.maxSliceMs.toFixed(0)} totalMs=${res.stats.totalMs.toFixed(0)} pending=${res.stats.pendingLines} consumed=${res.stats.consumedLines} pruned=${res.prunedKeys.length} removedSegments=${removed.length}`)
-			this.o.onFinished?.({ committed: true, walSeq: src.walSeq, stats: res.stats })
 		} catch (e) {
+			// the snapshot did NOT commit: unfreeze, alert, back off
 			core.finishSnapshot(src, { committed: false })
 			const msg = (e as Error)?.message ?? String(e)
 			this.stats.failed++
@@ -162,6 +209,32 @@ export class WalSnapshotScheduler {
 			this.nextTryAt = this.now() + Math.min(this.intervalMs, RETRY_BACKOFF_MS)
 			this.o.log(`[labMiningPoolClPayout] ALERT snapshot failed (${reason}): ${msg}; the events already fsynced are unaffected, next try in ${Math.round(Math.min(this.intervalMs, RETRY_BACKOFF_MS) / 1000)}s`)
 			this.o.onFinished?.({ committed: false, walSeq: src.walSeq, error: msg })
+			return
 		}
+		// From here on the manifest IS committed on disk. Nothing below may call finishSnapshot(committed:false) (K1): the snapshot is real, only the bookkeeping or the log trimming can fail.
+		this.stats.committed++
+		this.stats.lastCommittedAt = this.now()
+		this.lastCommitAt = this.now()
+		let drift = false
+		try {
+			drift = core.finishSnapshot(src, { committed: true, prunedKeys: res.prunedKeys, frozenHistCounts: res.frozenHistCounts }).drift
+		} catch (e) {
+			this.stats.bookkeepingFailed++
+			this.o.log(`[labMiningPoolClPayout] ALERT snapshot committed at walSeq ${src.walSeq} but the in-memory bookkeeping failed: ${(e as Error)?.message ?? e}; the snapshot is valid on disk, a restart recovers cleanly`)
+		}
+		if (drift) this.o.log(`[labMiningPoolClPayout] ALERT history-block counts drifted: the incremental counts and the snapshot's own count differed at walSeq ${src.walSeq}; the live counts were corrected`)
+		let removed: string[] = []
+		try {
+			removed = wal.truncateThrough(src.walSeq)
+		} catch (e) {
+			this.stats.truncateFailed++
+			this.o.log(`[labMiningPoolClPayout] ALERT snapshot committed at walSeq ${src.walSeq} but trimming the log failed: ${(e as Error)?.message ?? e} (truncateFailed=${this.stats.truncateFailed}); data is safe (the snapshot is committed, the log is still there), the next snapshot trims it`)
+		}
+		if (res.stats.archiveFailed) {
+			this.stats.archiveFailed++
+			this.o.log(`[labMiningPoolClPayout] ALERT consumed archive failed: the snapshot at walSeq ${src.walSeq} committed but nothing was pruned this time (archiveFailed=${this.stats.archiveFailed})`)
+		}
+		this.o.log(`[labMiningPoolClPayout] snapshot committed walSeq=${src.walSeq} reason=${reason} slices=${res.stats.slices} maxSliceMs=${res.stats.maxSliceMs.toFixed(0)} totalMs=${res.stats.totalMs.toFixed(0)} pending=${res.stats.pendingLines} consumed=${res.stats.consumedLines} pruned=${res.prunedKeys.length} removedSegments=${removed.length}`)
+		this.o.onFinished?.({ committed: true, walSeq: src.walSeq, stats: res.stats })
 	}
 }
