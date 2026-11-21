@@ -43,21 +43,22 @@ export function advanceMaxPaidHistoryBlock(current: number | undefined, paid: It
 }
 
 /**
- * First-run initial value of maxPaidHistoryBlock (J1): the oldest pending history block minus one (everything older has been paid or
- * dropped), taken once from the pending pool and recorded with its source. With no pending history it falls back to cursor-1.
+ * First-run initial value of maxPaidHistoryBlock (J1, tightened by review note K1): the oldest pending history block B itself. Payment is oldest-first
+ * by (block, index), so every paid key has a block <= B and B may be only partly paid; B-1 would understate the high-water. Taken once from the
+ * pending pool and recorded with its source. With no pending history it falls back to cursor-1.
  * Returns null when neither is available (then the field stays unset and the self-check cannot fire; the caller logs it).
  */
 export function initialMaxPaidHistoryBlock(
 	pending: Iterable<{ blockNumber: number }>,
 	freezeH: number,
 	committedHistoryCursor: number | null | undefined
-): { value: number; source: 'oldest-pending-history-minus-1' | 'cursor-minus-1' } | null {
+): { value: number; source: 'oldest-pending-history' | 'cursor-minus-1' } | null {
 	let oldest: number | null = null
 	for (const e of pending) {
 		if (classifyPendingLine(e.blockNumber, freezeH) !== 'history') continue
 		if (oldest === null || e.blockNumber < oldest) oldest = e.blockNumber
 	}
-	if (oldest !== null) return { value: oldest - 1, source: 'oldest-pending-history-minus-1' }
+	if (oldest !== null) return { value: oldest, source: 'oldest-pending-history' }
 	if (committedHistoryCursor != null && Number.isFinite(committedHistoryCursor)) return { value: committedHistoryCursor - 1, source: 'cursor-minus-1' }
 	return null
 }

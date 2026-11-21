@@ -190,13 +190,13 @@ test('C back-pressure (a): a small ahead stock, payable + realtime push the tota
 })
 
 // ------------------------------------------------------------ maxPaidHistoryBlock, self-check, lead
-test('C maxPaid: monotonic, history entries only, never decreases, and the first-run initial value comes from the oldest pending history block', () => {
+test('C maxPaid: monotonic, history entries only, never decreases, and the first-run initial value is the oldest pending history block (K1)', () => {
 	assert.equal(advanceMaxPaidHistoryBlock(undefined, [], H), undefined)
 	assert.equal(advanceMaxPaidHistoryBlock(undefined, [{ blockNumber: 500 }, { blockNumber: 300 }], H), 500)
 	assert.equal(advanceMaxPaidHistoryBlock(500, [{ blockNumber: 400 }], H), 500, 'never goes back')
 	assert.equal(advanceMaxPaidHistoryBlock(500, [{ blockNumber: 900 }, { blockNumber: H + 5 }], H), 900, 'realtime blocks do not count')
 	assert.equal(advanceMaxPaidHistoryBlock(undefined, [{ blockNumber: H + 5 }], H), undefined)
-	assert.deepEqual(initialMaxPaidHistoryBlock([{ blockNumber: 700 }, { blockNumber: 650 }, { blockNumber: H + 1 }], H, 2000), { value: 649, source: 'oldest-pending-history-minus-1' })
+	assert.deepEqual(initialMaxPaidHistoryBlock([{ blockNumber: 700 }, { blockNumber: 650 }, { blockNumber: H + 1 }], H, 2000), { value: 650, source: 'oldest-pending-history' })
 	assert.deepEqual(initialMaxPaidHistoryBlock([{ blockNumber: H + 1 }], H, 2000), { value: 1999, source: 'cursor-minus-1' })
 	assert.equal(initialMaxPaidHistoryBlock([], H, null), null)
 })
