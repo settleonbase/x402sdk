@@ -137,7 +137,8 @@ async function childMain(mode: string, dir: string): Promise<void> {
 function runChild(mode: string, dir: string, extraNodeArgs: string[] = []): Promise<{ report: ChildReport; psPeakBytes: number; psSamples: number; wallMs: number }> {
 	if (process.env.P2D_CHILD) throw new Error('p2d: a measurement child must not start children of its own')
 	const loader = process.execArgv.some((a) => a.includes('tsx')) ? [...process.execArgv] : ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href]
-	const args = [...loader.filter((a) => !a.startsWith('--expose-gc')), '--expose-gc', ...extraNodeArgs, __filename, '--child', mode, '--dir', dir]
+	// the parent may run with a big heap only to GENERATE data; a measured child gets exactly the flags passed in extraNodeArgs (default: Node's own default old-space limit), and its flags are recorded in its report
+	const args = [...loader.filter((a) => !a.startsWith('--expose-gc') && !a.startsWith('--max-old-space-size')), '--expose-gc', ...extraNodeArgs, __filename, '--child', mode, '--dir', dir]
 	const t0 = Date.now()
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH ?? '', HOME: os.tmpdir(), P2D_CHILD: '1' } })
