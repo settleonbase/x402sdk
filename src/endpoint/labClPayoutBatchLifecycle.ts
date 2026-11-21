@@ -48,6 +48,9 @@ export type LabBatchRequest = {
 	line: LabWithdrawLine
 }
 
+/** Which durable step the lifecycle is at (the WAL event label of the persist). A failure of any of them is B-2 fail-closed: nothing is sent after it. */
+export type LabPersistStep = 'intent' | 'hash' | 'settle' | 'release'
+
 export type LabLifecycleDeps = {
 	/** Optional. Called inside the same durable write as the consumed set (before 'persist settled batch'). */
 	countSettled?: () => void
@@ -59,7 +62,7 @@ export type LabLifecycleDeps = {
 	getInFlight: () => LabInFlightWithdraw | null
 	setInFlight: (v: LabInFlightWithdraw | null) => void
 	/** Persist the whole state. Throws on failure. */
-	persist: () => void
+	persist: (step: LabPersistStep) => void | Promise<void>
 	/**
 	 * Ask the signer to send the record. Recover-first: the signer returns the original hash when its
 	 * journal already holds this idempotencyKey. Throws when no hash is obtained.
@@ -121,9 +124,9 @@ export function buildLabInFlightWithdraw(req: LabBatchRequest, now: Date): LabIn
 	}
 }
 
-function persistOrTrip(deps: LabLifecycleDeps, where: string): void {
+async function persistOrTrip(deps: LabLifecycleDeps, where: string, step: LabPersistStep): Promise<void> {
 	try {
-		deps.persist()
+		await deps.persist(step)
 	} catch (e) {
 		deps.gate.trip(where, e)
 		throw e
@@ -161,7 +164,7 @@ export async function resumeLabWithdrawInFlight(deps: LabLifecycleDeps): Promise
 		} catch (e) {
 			if (e instanceof LabRefusedBeforeBroadcast) {
 				deps.setInFlight(null)
-				persistOrTrip(deps, 'persist refused release')
+				await persistOrTrip(deps, 'persist refused release', 'release')
 				deps.log(`ALERT withdrawNative refused before broadcast; nothing sent, record released, entries stay pending: ${errMsg(e)}`)
 				return 'refused'
 			}
@@ -170,7 +173,7 @@ export async function resumeLabWithdrawInFlight(deps: LabLifecycleDeps): Promise
 		}
 		hash = sent.hash
 		rec.hash = hash
-		persistOrTrip(deps, 'persist broadcast hash')
+		await persistOrTrip(deps, 'persist broadcast hash', 'hash')
 	}
 	const receipt = await deps.waitReceipt(hash)
 	if (receipt === null) {
@@ -181,7 +184,7 @@ export async function resumeLabWithdrawInFlight(deps: LabLifecycleDeps): Promise
 	}
 	if (receipt.status !== 1) {
 		deps.setInFlight(null)
-		persistOrTrip(deps, 'persist reverted release')
+		await persistOrTrip(deps, 'persist reverted release', 'release')
 		deps.log(`withdrawNative reverted hash=${hash}; batch released, entries stay pending`)
 		// Status 0 is final for this key: stop, do not re-send under the same key without operator review.
 		deps.halt?.(3, 'receipt status 0: halted, batch released, no same-key re-send')
@@ -190,7 +193,7 @@ export async function resumeLabWithdrawInFlight(deps: LabLifecycleDeps): Promise
 	deps.settle(rec.eventKeys)
 	deps.setInFlight(null)
 	deps.countSettled?.()
-	persistOrTrip(deps, 'persist settled batch')
+	await persistOrTrip(deps, 'persist settled batch', 'settle')
 	deps.log(`withdrawNative ok hash=${hash} n=${rec.eventKeys.length}`)
 	return 'settled'
 }
@@ -220,7 +223,7 @@ export async function submitWithdrawBatchDurably(deps: LabLifecycleDeps, req: La
 	const rec = buildLabInFlightWithdraw(req, now)
 	deps.setInFlight(rec)
 	try {
-		persistOrTrip(deps, 'persist intent')
+		await persistOrTrip(deps, 'persist intent', 'intent')
 	} catch (e) {
 		deps.setInFlight(null)
 		throw e
