@@ -6,26 +6,28 @@
   },
   "crossCheck": {
     "commit": "df78e6b0c487a5c69620d37c369da301849bbb79",
-    "result": "15 of 16 scenarios identical (state digests, signer requests, key log lines); only s02_invariant_c_on differs: df78e6b has no invariant C and pays all five pending entries in one batch, P1 holds the ones ahead of the committed cursor (two batches 4+1) - the known P1 change"
+    "result": "16 of 17 scenarios identical (state digests, signer requests, per-event-key payment counts, key log lines); only s02_invariant_c_on differs: df78e6b has no invariant C and pays all five pending entries in one batch, P1 holds the ones ahead of the committed cursor (two batches 4+1) - the known P1 change"
   },
   "normalization": "see labE2e/harness.test.ts header: ANSI and logger prefix removed; ISO timestamps, durations and the wall-clock scalars updatedAt/createdAt/gasWaitStartedAt/frozenAt become placeholders; generation names and manifest writtenAt dropped; nothing else is relaxed",
-  "determinism": "recorded once, then compared 3 times on the P1 root and once on the P2 checkout: identical; the first comparison exposed freezeH.frozenAt (wall clock) which is now normalized",
+  "determinism": "recorded once, then compared twice more on the P1 root and once on the P2 checkout: identical; the first comparison exposed freezeH.frozenAt (wall clock) which is normalized",
   "goldens": {
-    "s01_two_lines_pay.golden.json": "e2573637084244518ac094f7c44109eb84ee164f86638172077a8c43f6b156d3",
-    "s02_invariant_c_on.golden.json": "a5a32a98083a64f5ad3f1e1236d666bd4eab1be89024d6e56a5c8b25ebce0c31",
-    "s03_invariant_c_off.golden.json": "1aedd669c51f36d7ccf93b6c184f240b6e6ec688b85e68d227a5747045894e16",
-    "s04_gas_wait_then_force.golden.json": "ba718cc5f202deacbaaf315dc42c19b114e20ed85a9b62f49ac5be1696d8c36c",
-    "s05_receipt_reverted.golden.json": "cd152319da5374ba18fdec6687aa2370a7500feb93a883afe04d7ec22295c08d",
-    "s06_receipt_lost_then_restart.golden.json": "5a85e451ea1a467a093f056f885ab9698ed8caef3332c374aac86a79c9fad31d",
-    "s07_receipt_delayed.golden.json": "b63312d5223560ef0cb3dae78364e6675599e1da19ac8b01f207355b827f0d8e",
-    "s08_signer_ack_lost.golden.json": "db6ac2c02a35d9c39b018908c3f15bb820292926ec796387c3bb614e097a91c4",
-    "s09_signer_rejected_then_ok.golden.json": "48c1c189d0052d870f86f85c06edab981fa9d524310c20fa5ec33f1408beb9a2",
-    "s10_guardian_hold.golden.json": "ef8b87bc9616eeb5d1fd95f6de788cd5fabd35a881644372585925619bdc1701",
-    "s11_backpressure.golden.json": "be647a40fe4725b3f7086770bd66f907d8257b42370be7ef047ccf00ee5bc965",
-    "s12_consumed_prune.golden.json": "233a1906dc44eaf67d38e1cc8f8b1cf94b714b241d3c7e480e46c361d5f3e00d",
-    "s13_beacon_5xx.golden.json": "7ae1def6a699ed5e3d769bd6b8af482814cd17018d538d9299de3d27aece996e",
-    "s14_first_batch_gate.golden.json": "c6518a6eeb8d20ca90db180df150439cce89dc7d8292c10cfd62e5e1e6fdf418",
-    "s15_kill_after_signer_records.golden.json": "5ee8402052091aa4ef473c1cccc4ab8dcdea14a770dfffce7161466500d34ada",
-    "s16_kill_before_settle.golden.json": "66409d7c5342761c8b183b0420e4874ce69c34bc05fdd5fa640b603148c5299e"
-  }
+    "s01_two_lines_pay.golden.json": "ea78cb821b962e6082d791e4931c4d3b0bf1c0c549df573a2fbc8ec0dd4e5425",
+    "s02_invariant_c_on.golden.json": "0069d22011ee18ba5e61aca84d06ed96cdaa06e7d7d487219e47a7cbf70c4b00",
+    "s03_invariant_c_off.golden.json": "c6e6d6d43af4bb427e485b349855267e968e9cd56f922f619ab829f5450eb455",
+    "s04_gas_wait_then_force.golden.json": "39ac6a98b47a626aa5d1d95396eba97836a229020821b30d4559a2d0673b5af7",
+    "s05_receipt_reverted.golden.json": "db61fa8721c65dcbc296b2c108cfdd5fdb81e9e21a68e86fb6d70ed8d67a6a8f",
+    "s06_receipt_lost_then_restart.golden.json": "6885a6cb36ce65e120f22273d771af151f72a229abd2e6a02cf00c0feb3a2baf",
+    "s07_receipt_delayed.golden.json": "385aac859a866ded7d09a4f75a90353b1587931c34ac47735fc114aa3c37d13c",
+    "s08_signer_ack_lost.golden.json": "1260a622a7793a67552af4043ffd6407a940530cdedeb7379713cbce82792800",
+    "s09_signer_rejected_then_ok.golden.json": "ab3afca9bd3b31d91d871ca638eba0536c3b54d957a7189f40587b586dae3718",
+    "s10_guardian_hold.golden.json": "fe2ae77e81fa46880f243ce81c0c91696e8c6a6923f6c2053966d416e52e61c4",
+    "s11_backpressure.golden.json": "1e13359e2de25c5508dc707f3f4a172a1b44b26e4e71532cf16373e633a6a1bf",
+    "s12_consumed_prune.golden.json": "0db1239700f8c06d4d7e4b93c648aee5bcd6ec6e310016bc7ffdf11fb3d8e75d",
+    "s13_beacon_5xx.golden.json": "792f0b6e6faf7a21c32642e2f79f71349d983045abcb37cc8064d9f4783863d6",
+    "s14_first_batch_gate.golden.json": "2350e5aca12f58f5fcb98791db9eff9a19b6ff39a9dfbc580059c110fa578e5c",
+    "s15_kill_after_signer_records.golden.json": "71da8d323d87ae521e0dcf9a0ff3f4fffd63652368fbf43d88ec9129943e6ca8",
+    "s16_kill_before_settle.golden.json": "3692d67228adba3869f70aded450d0b9a93ce215d8a5028d4099990f26ede02c",
+    "s17_many_batches_two_lines.golden.json": "9281888afb8c3dd8aca2d06e36b76e81bf2572f698df29e14598da7416890781"
+  },
+  "review": "independent review of efbc3fd: F1 per-event-key payment counts (asserted <= 1 in every scenario), F2 stray output must be empty, F3 only the reporter tick scheduler timer is shortened (delay 15000 and stack contains scheduleNextLabTick), F4 the group runs by default; scenario s17 added"
 }

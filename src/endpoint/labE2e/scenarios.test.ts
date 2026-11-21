@@ -290,4 +290,16 @@ export const scenarios: Scenario[] = [
 			await ctx.run({ ticks: 1 })
 		},
 	},
+	{
+		// many more entries than one batch, both lines, several batches per tick, over many ticks: order and the per-line quotas
+		name: 's17_many_batches_two_lines',
+		env: { CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_BATCH_ENTRIES: '25', CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_MAX_BATCHES: '4', CONET_LAB_MINING_POOL_CL_PAYOUT_REALTIME_RESERVED: '1' },
+		body: async (ctx) => {
+			seedValidators(ctx)
+			for (let b = 100; b < 120; b++) for (let i = 0; i < 10; i++) ctx.chain.addWithdrawal(b, { index: i, validatorIndex: (b + i) % 6, amountGwei: BigInt(1_000_000 + b * 10 + i) })
+			for (let b = 121; b < 141; b++) for (let i = 0; i < 3; i++) ctx.chain.addWithdrawal(b, { index: i, validatorIndex: (b + i) % 6, amountGwei: BigInt(2_000_000 + b * 10 + i) })
+			headPlan(ctx, [120, 130, 140, 140, 140, 140, 140, 140])
+			await ctx.run({ ticks: 8 })
+		},
+	},
 ]

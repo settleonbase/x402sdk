@@ -41,8 +41,12 @@
       "[labMiningPoolClPayout] MAX_SETTLED_BATCHES already reached at start; exiting 0 before any tick"
     ]
   ],
-  "paymentsPerKey": {
-    "lab-withdrawNative:86c25413332ad1d41f1baeeda84c8fd1d783d597a1ecabbe8788aa5af41a02ab": 1
+  "paymentsPerEventKey": {
+    "0x2cc30221e0553428287371236269b4e2f6f11f95f33fb976fdb79b586bb6c342": 1,
+    "0x366a7b92acda364086cc991f618bf9f10b629ec0f7ae94543f96b691b69ec992": 1,
+    "0x422cccb7cea5c0e46f340bb7b21b81debac329f72e31669c20ff0f3a05cc2b5b": 1,
+    "0x6ce4024642c4779dc119f2ece9b9cc34663ef4cfd6a7942d809a7de1813aca7d": 1,
+    "0x7786f24ec8e68c1f537753be90a834aeb9797aa2ade11dc9f54973d24a879c0e": 1
   },
   "signerRequests": [
     {
@@ -127,5 +131,6 @@
       "updatedAt": "<ts>"
     }
   },
+  "strayOutput": [],
   "unknownRpcMethods": []
 }

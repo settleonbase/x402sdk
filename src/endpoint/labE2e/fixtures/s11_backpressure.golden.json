@@ -46,9 +46,17 @@
       "[e2e-child] E2E_DONE; draining"
     ]
   ],
-  "paymentsPerKey": {
-    "lab-withdrawNative:07d911f99761d7946ae6614ea28256ca5961b95b55720fe9b2f4631bc6df4e3d": 1,
-    "lab-withdrawNative:3e9672cf3c120235ae5a1ae9292f1ca789c87b6687710e89e2b8a48214a4c40d": 1
+  "paymentsPerEventKey": {
+    "0x27ad97d347c5aac91be7b5f1e7697a15037d7dd3a6d7b5e6ab40150a5535dc19": 1,
+    "0x34966b6f99f9178349f4135a833c025f1953421a26392d0f66613a38ad30318c": 1,
+    "0x60143a4fd6cc2701d6a8f4fb31e4c1da75e1110f936998e124c93c70d2fe0422": 1,
+    "0x650234c2fedef5b5cdbbf85e8eae84b3271308d0d43069d5db69d285c5a965b0": 1,
+    "0x68ff5aa0d3d395b63c7d13437473fd851e32c1d1471eea4ef3a8cfd334da6c8c": 1,
+    "0x8ba513ff21e84c2f184da9e35003328a06713a12989c726f3b10dff5dd8b5d14": 1,
+    "0xbbc0f32e727212b97bb2dd45d3f1d266b93341f17504f8944fd81c75fcb9ce1c": 1,
+    "0xd4f97b7188f5e51283de9c7987c054bc565b916a9584807585b410167243cee6": 1,
+    "0xda3473933219fe5e10252f527d788e67b2118a28be1c7a363ef8fcaa0784ea39": 1,
+    "0xfd72baef1de38a94f31ed8e64313bfafa997ed2b87e0df50cc7f80d03d1b0b27": 1
   },
   "signerRequests": [
     {
@@ -70453,5 +70461,6 @@
       "updatedAt": "<ts>"
     }
   },
+  "strayOutput": [],
   "unknownRpcMethods": []
 }

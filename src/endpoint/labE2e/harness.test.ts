@@ -109,7 +109,10 @@ export function digestState(stateDir: string): StateDigest | null {
 export type ScenarioResult = {
 	state: StateDigest | null
 	signerRequests: unknown[]
-	paymentsPerKey: Record<string, number>
+	/** Number of distinct transactions (idempotency keys) per EVENT key, from the daemon's persisted in-flight record at the moment the signer received each send. */
+	paymentsPerEventKey: Record<string, number>
+	/** Output lines that are not the reporter's own prefixed lines (stack traces, unhandled rejections, library warnings): must be empty. */
+	strayOutput: string[]
 	logs: string[][]
 	exits: { code: number | null; signal: string | null; killed: boolean }[]
 	chainSent: { amountWei: string; idempotencyKey: string; to: string; value: string; keyArray: string; mined: boolean }[]
@@ -165,6 +168,18 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 		const stateFile = path.join(dir, 'state.json')
 		const stateDir = path.join(dir, 'state.v2')
 		const runs: RunResult[] = []
+		signer.eventKeysOf = (idem) => {
+			for (let attempt = 0; attempt < 5; attempt++) {
+				try {
+					const st = readSegmentedState(stateDir) as { inFlightWithdraw?: { idempotencyKey?: string; eventKeys?: string[] } }
+					const rec = st.inFlightWithdraw
+					if (rec && rec.idempotencyKey === idem && Array.isArray(rec.eventKeys)) return [...rec.eventKeys].sort()
+				} catch {
+					/* a generation was being replaced: read again */
+				}
+			}
+			return []
+		}
 		const ctx: Ctx = {
 			root,
 			dir,
@@ -219,10 +234,12 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 			},
 		}
 		await s.body(ctx)
-		const paymentsPerKey: Record<string, number> = {}
-		for (const t of chain.sent.values()) {
-			const key = t.idempotencyKey
-			paymentsPerKey[key] = (paymentsPerKey[key] ?? 0) + 1
+		const paymentsPerEventKey: Record<string, number> = {}
+		for (const t of chain.sent.values()) for (const k of t.eventKeys) paymentsPerEventKey[k] = (paymentsPerEventKey[k] ?? 0) + 1
+		const strayOutput: string[] = []
+		for (const r of runs) for (const l of r.lines) {
+			const n = normalizeLine(l)
+			if (n && !/^\[(labMiningPoolClPayout|labMiningPoolClPayoutDaemon|e2e-child)\]/.test(n)) strayOutput.push(n)
 		}
 		return {
 			state: digestState(stateDir),
@@ -230,7 +247,8 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 				const p = r.params as Record<string, unknown>
 				return { keyArray: p.keyArray, chainId: p.chainId, to: p.to, data: p.data, value: p.value, gasLimit: p.gasLimit, idempotencyKey: p.idempotencyKey, requestFingerprint: p.requestFingerprint }
 			}),
-			paymentsPerKey,
+			paymentsPerEventKey,
+			strayOutput,
 			logs: runs.map((r) => keyLines(r.lines)),
 			exits: runs.map((r) => ({ code: r.code, signal: r.signal, killed: r.killed })),
 			chainSent: [...chain.sent.values()].map((t) => ({ amountWei: t.amountWei.toString(), idempotencyKey: t.idempotencyKey, to: t.to, value: t.value, keyArray: t.keyArray, mined: t.mined })),

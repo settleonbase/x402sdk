@@ -36,8 +36,12 @@
       "[e2e-child] E2E_DONE; draining"
     ]
   ],
-  "paymentsPerKey": {
-    "lab-withdrawNative:42bec52b59d482fadf20ef75676a29e89713fea4e6a4bb29694332a9752e0f88": 1
+  "paymentsPerEventKey": {
+    "0x4a7203f705e51df4a56139a9b86b4a0970bed7ab7a3446eaffe2289989c1645c": 1,
+    "0x682158d08466d11c566d5712d4396197fdd67e65be71d83c97ef719ec468867b": 1,
+    "0x915da9abdae48b56e38f1c8581eb1f6060cdb1aac1fd60a1040a8eab69db2431": 1,
+    "0xaa31d2a33b224bee3888830916f2f56f41bb5a40ed8a3273c6e72e6992d6223a": 1,
+    "0xe670ad3737592689b6d0787c59715ff4f5de89240d521457493a4f75d9962a79": 1
   },
   "signerRequests": [
     {
@@ -126,5 +130,6 @@
       "updatedAt": "<ts>"
     }
   },
+  "strayOutput": [],
   "unknownRpcMethods": []
 }

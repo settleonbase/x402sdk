@@ -24,7 +24,7 @@ const VDR_IFACE = new ethers.Interface([
 ])
 
 export type Withdrawal = { index: number; validatorIndex: number; address: string; amountGwei: bigint }
-export type SentTx = { hash: string; idempotencyKey: string; to: string; data: string; value: string; gasLimit: string; keyArray: string; chainId: number; amountWei: bigint; status: 0 | 1 | null; mined: boolean }
+export type SentTx = { eventKeys: string[]; hash: string; idempotencyKey: string; to: string; data: string; value: string; gasLimit: string; keyArray: string; chainId: number; amountWei: bigint; status: 0 | 1 | null; mined: boolean }
 
 const hex = (n: number | bigint): string => '0x' + BigInt(n).toString(16)
 const hash32 = (s: string): string => ethers.keccak256(ethers.toUtf8Bytes(s))
@@ -245,6 +245,8 @@ export class FakeSigner {
 	/** Fault injection hooks, called before / after the signer records a send. */
 	beforeRecord?: (tx: Record<string, unknown>) => void
 	afterRecord?: (tx: Record<string, unknown>, hash: string) => void
+	/** Reads the event keys of the batch behind a send from the daemon's persisted in-flight record (the intent is persisted before the send). Set by the harness. */
+	eventKeysOf?: (idempotencyKey: string) => string[]
 	private server?: http.Server
 	private counter = 0
 	socketPath = ''
@@ -291,7 +293,7 @@ export class FakeSigner {
 				const hash = hash32(`tx:${++this.counter}:${key}`)
 				this.byKey.set(key, { fingerprint, hash })
 				const dec = WITHDRAW_NATIVE_IFACE.decodeFunctionData('withdrawNative', String(tx.data))
-				this.chain.sent.set(hash.toLowerCase(), { hash, idempotencyKey: key, to: String(tx.to), data: String(tx.data), value: String(tx.value), gasLimit: String(tx.gasLimit), keyArray: String(tx.keyArray), chainId: Number(tx.chainId), amountWei: BigInt(dec[1]), status: null, mined: false })
+				this.chain.sent.set(hash.toLowerCase(), { eventKeys: this.eventKeysOf?.(key) ?? [], hash, idempotencyKey: key, to: String(tx.to), data: String(tx.data), value: String(tx.value), gasLimit: String(tx.gasLimit), keyArray: String(tx.keyArray), chainId: Number(tx.chainId), amountWei: BigInt(dec[1]), status: null, mined: false })
 				this.afterRecord?.(tx, hash)
 				if (this.mode === 'lose-ack') {
 					req.socket.destroy()
