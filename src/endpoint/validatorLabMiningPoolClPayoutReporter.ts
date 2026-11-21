@@ -375,18 +375,18 @@ function resolveRealtimeReservedBatches(): number {
 	return Number.isFinite(n) && n >= 0 ? Math.min(16, Math.floor(n)) : 1
 }
 
-function ensureDualCursors(state: LabClPayoutState, tipHeight: number, tipHash: string): LabFreezeH {
-	const freeze = ensureFreezeH(state.freezeH ?? null, tipHeight, tipHash)
-	state.freezeH = freeze
-	if (state.historyCursor == null || state.realtimeCursor == null) {
+function ensureDualCursors(h: LabHandle, tipHeight: number, tipHash: string): LabFreezeH {
+	const freeze = ensureFreezeH(h.scalar('freezeH') ?? null, tipHeight, tipHash)
+	h.setScalar('freezeH', freeze)
+	if (h.scalar('historyCursor') == null || h.scalar('realtimeCursor') == null) {
 		const seeded = seedCursorsFromLegacy({
 			freezeH: freeze,
-			lastListeningEndBlock: state.lastListeningEndBlock,
-			lastBackfillProcessedBlock: state.lastBackfillProcessedBlock,
+			lastListeningEndBlock: h.scalar('lastListeningEndBlock'),
+			lastBackfillProcessedBlock: h.scalar('lastBackfillProcessedBlock'),
 			scanFloor: resolveLabScanFloorBlock(),
 		})
-		if (state.historyCursor == null) state.historyCursor = seeded.historyCursor
-		if (state.realtimeCursor == null) state.realtimeCursor = seeded.realtimeCursor
+		if (h.scalar('historyCursor') == null) h.setScalar('historyCursor', seeded.historyCursor)
+		if (h.scalar('realtimeCursor') == null) h.setScalar('realtimeCursor', seeded.realtimeCursor)
 	}
 	return freeze
 }
@@ -411,9 +411,9 @@ function resolveMaxSettledBatches(): number | null {
 }
 
 /** The settled count is persisted in the same write as the consumed set (lifecycle countSettled). Exit only after that write. */
-function noteSettledBatch(state: LabClPayoutState): void {
+function noteSettledBatch(h: LabHandle): void {
 	const max = resolveMaxSettledBatches()
-	if (shouldStopAfterSettled(state.settledBatchCount ?? 0, max)) {
+	if (shouldStopAfterSettled(h.scalar('settledBatchCount') ?? 0, max)) {
 		logger(Colors.cyan(`[labMiningPoolClPayout] MAX_SETTLED_BATCHES=${max} reached (persisted); exiting 0`))
 		stopValidatorLabMiningPoolClPayoutReporter()
 		process.exit(0)
@@ -493,9 +493,9 @@ export function pruneConsumedEventKeys(state: LabClPayoutState): number {
 	return drop.size
 }
 
-function clearGasWait(state: LabClPayoutState): boolean {
-	if (!state.gasWaitStartedAt) return false
-	delete state.gasWaitStartedAt
+function clearGasWait(h: LabHandle): boolean {
+	if (!h.scalar('gasWaitStartedAt')) return false
+	h.delScalar('gasWaitStartedAt')
 	return true
 }
 
@@ -601,8 +601,8 @@ function normalizeScanBlock(raw: unknown): number | undefined {
 }
 
 /** Inclusive first block for backfill on this process start. */
-function resolveSessionBackfillFloor(state: LabClPayoutState): number {
-	const lastListen = normalizeScanBlock(state.lastListeningEndBlock)
+function resolveSessionBackfillFloor(lastListeningEndBlock: unknown): number {
+	const lastListen = normalizeScanBlock(lastListeningEndBlock)
 	if (lastListen != null) return lastListen + 1
 	return resolveLabScanFloorBlock()
 }
@@ -614,7 +614,7 @@ function migrateLegacyStateFields(state: LabClPayoutState): void {
 	if (state.lastBackfillProcessedBlock == null) {
 		const legacy = normalizeScanBlock(state.lastProcessedBlock)
 		state.lastBackfillProcessedBlock =
-			legacy != null ? legacy : resolveSessionBackfillFloor(state) - 1
+			legacy != null ? legacy : resolveSessionBackfillFloor(state.lastListeningEndBlock) - 1
 	}
 	delete state.lastProcessedBlock
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -629,12 +629,12 @@ function alignBackfillCursorForSession(state: LabClPayoutState, floor: number): 
 	}
 }
 
-function tryPersistListeningCheckpoint(state: LabClPayoutState, liveHead: number): void {
+function tryPersistListeningCheckpoint(h: LabHandle, liveHead: number): void {
 	const upper = resolveBackfillUpperBound(liveHead)
-	if (state.lastBackfillProcessedBlock < upper) return
-	if (state.lastLiveHeadScanned !== liveHead) return
-	const prev = state.lastListeningEndBlock
-	state.lastListeningEndBlock = liveHead
+	if (h.scalar('lastBackfillProcessedBlock') < upper) return
+	if (h.scalar('lastLiveHeadScanned') !== liveHead) return
+	const prev = h.scalar('lastListeningEndBlock')
+	h.setScalar('lastListeningEndBlock', liveHead)
 	if (prev !== liveHead) {
 		logger(
 			Colors.green(
@@ -727,7 +727,7 @@ function readStateFromDisk(): LabClPayoutState {
 /** Process boot: parallel listen+backfill; resume backfill cursor; freeze session floor from lastListeningEndBlock. */
 function initLabSessionState(): LabClPayoutState {
 	const state = readStateFromDisk()
-	sessionBackfillFloor = resolveSessionBackfillFloor(state)
+	sessionBackfillFloor = resolveSessionBackfillFloor(state.lastListeningEndBlock)
 	// R1: a scan floor above the history seed would silently skip blocks between them. Refuse to start instead.
 	assertNoSkippedHistory(resolveLabScanFloorBlock(), state.lastBackfillProcessedBlock)
 	alignBackfillCursorForSession(state, sessionBackfillFloor)
@@ -1031,23 +1031,22 @@ export async function collectLabSkimEntriesForBlock(
  */
 
 function makeLabLifecycleDeps(
-	state: LabClPayoutState,
 	h: LabHandle,
 	provider: ethers.JsonRpcProvider,
 	gasPriceWei: bigint
 ): LabLifecycleDeps {
 	return {
 		gate: labGate,
-		getInFlight: () => state.inFlightWithdraw ?? null,
+		getInFlight: () => h.scalar('inFlightWithdraw') ?? null,
 		setInFlight: (v) => {
-			if (v) state.inFlightWithdraw = v
-			else delete state.inFlightWithdraw
+			if (v) h.setScalar('inFlightWithdraw', v)
+			else h.delScalar('inFlightWithdraw')
 		},
 		persist: (step) => h.commit(step),
 		countSettled: () => {
-			state.settledBatchCount = (state.settledBatchCount ?? 0) + 1
+			h.setScalar('settledBatchCount', (h.scalar('settledBatchCount') ?? 0) + 1)
 		},
-		stopBeforeSend: () => shouldStopAfterSettled(state.settledBatchCount ?? 0, resolveMaxSettledBatches()),
+		stopBeforeSend: () => shouldStopAfterSettled(h.scalar('settledBatchCount') ?? 0, resolveMaxSettledBatches()),
 		halt: (code, reason) => haltDaemon(h, code, reason),
 		send: async (rec) => {
 			// One send. No recovery and no retry here: the lifecycle holds an unknown outcome (B-2).
@@ -1092,7 +1091,6 @@ async function submitLabSkimBatch(
 	provider: ethers.JsonRpcProvider,
 	redeemAddr: string,
 	entries: SkimEntry[],
-	state: LabClPayoutState,
 	h: LabHandle,
 	gasPriceWei: bigint,
 	line: LabScanLine
@@ -1129,7 +1127,7 @@ async function submitLabSkimBatch(
 			LAB_MINING_POOL_ONCHAIN_LANE,
 			`lab withdrawNative n=${entries.length} line=${line}`,
 			() =>
-				submitWithdrawBatchDurably(makeLabLifecycleDeps(state, h, provider, gasPriceWei), {
+				submitWithdrawBatchDurably(makeLabLifecycleDeps(h, provider, gasPriceWei), {
 					redeem: redeemAddr,
 					pool: labMiningPool,
 					amount: total,
@@ -1138,7 +1136,7 @@ async function submitLabSkimBatch(
 				}),
 			'[labMiningPoolClPayout]'
 		)
-		if (outcome === 'settled') noteSettledBatch(state)
+		if (outcome === 'settled') noteSettledBatch(h)
 		return outcome === 'settled'
 	} catch (e: unknown) {
 		logger(Colors.red(`[labMiningPoolClPayout] withdrawNative failed: ${(e as Error)?.message ?? e}`))
@@ -1150,11 +1148,10 @@ async function flushPendingLabBatches(
 	provider: ethers.JsonRpcProvider,
 	readContract: ethers.Contract,
 	redeemAddr: string,
-	state: LabClPayoutState,
 	h: LabHandle
 ): Promise<void> {
-	if (!h.pendingSize && !state.inFlightWithdraw) {
-		if (clearGasWait(state)) await h.commit('scalars')
+	if (!h.pendingSize && !h.scalar('inFlightWithdraw')) {
+		if (clearGasWait(h)) await h.commit('scalars')
 		return
 	}
 	// One journal line per flush that inspected entries or settled a batch (integers only; see labScanSummary.ts).
@@ -1173,11 +1170,11 @@ async function flushPendingLabBatches(
 
 	if (gasPrice > maxGas + gasDustWei) {
 		const now = Date.now()
-		if (!state.gasWaitStartedAt) {
-			state.gasWaitStartedAt = new Date(now).toISOString()
+		if (!h.scalar('gasWaitStartedAt')) {
+			h.setScalar('gasWaitStartedAt', new Date(now).toISOString())
 			await h.commit('scalars')
 		}
-		const startedMs = Date.parse(state.gasWaitStartedAt)
+		const startedMs = Date.parse(h.scalar('gasWaitStartedAt') as string)
 		const elapsedMs = Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : forceMs
 		if (elapsedMs < forceMs) {
 			logger(
@@ -1195,39 +1192,39 @@ async function flushPendingLabBatches(
 					`ignoring max=${ethers.formatUnits(maxGas, 'gwei')} gwei, using live gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei (pending=${h.pendingSize})`
 			)
 		)
-	} else if (clearGasWait(state)) {
+	} else if (clearGasWait(h)) {
 		await h.commit('scalars')
 	}
 
 	// B-2: settle or resume an unresolved withdrawNative batch before composing anything new.
-	if (state.inFlightWithdraw) {
+	if (h.scalar('inFlightWithdraw')) {
 		const flight = await enqueueOnchainTxWork(
 			LAB_MINING_POOL_ONCHAIN_LANE,
 			'lab withdrawNative in-flight',
-			() => resumeLabWithdrawInFlight(makeLabLifecycleDeps(state, h, provider, gasPrice)),
+			() => resumeLabWithdrawInFlight(makeLabLifecycleDeps(h, provider, gasPrice)),
 			'[labMiningPoolClPayout]'
 		)
 		if (flight === 'pending') return
-		if (flight === 'settled') noteSettledBatch(state)
+		if (flight === 'settled') noteSettledBatch(h)
 	}
 
 	const flushMax = resolveFlushMaxEntries()
 	const batchEntries = resolveFlushBatchEntries()
 	const maxBatches = resolveFlushMaxBatches()
-	const freezeForSelect = state.freezeH?.height
+	const freezeForSelect = h.scalar('freezeH')?.height
 	// Invariant C (labInvariantC.ts): history candidates only up to the committed cursor. Off by default (single-wallet mode): nothing changes.
 	const invC = resolveHistoryPayBehindCursor() && freezeForSelect != null
 	const invPlan = planInvariantCFlush({
 		flagOn: invC,
 		freezeH: freezeForSelect,
 		committedHistoryCursor: labCommittedHistoryCursor,
-		maxPaidHistoryBlock: state.maxPaidHistoryBlock,
+		maxPaidHistoryBlock: h.scalar('maxPaidHistoryBlock'),
 		initDone: labInvariantCInitDone,
 		pending: h.pendingValues(),
 	})
 	labInvariantCInitDone = invPlan.initDone
 	if (invC) {
-		state.maxPaidHistoryBlock = invPlan.maxPaidHistoryBlock
+		h.setScalar('maxPaidHistoryBlock', invPlan.maxPaidHistoryBlock)
 		if (invPlan.stateChanged) await h.commit('scalars')
 		for (const line of invPlan.logs) {
 			const text = `[labMiningPoolClPayout] ${line}`
@@ -1255,13 +1252,13 @@ async function flushPendingLabBatches(
 			pendingHistoryAhead: selection.historyAheadPending,
 			histAheadHeld: selection.historyAheadPending,
 			histCursor: labCommittedHistoryCursor ?? null,
-			maxPaidHistoryBlock: state.maxPaidHistoryBlock ?? null,
-			frontLead: frontLead(state.maxPaidHistoryBlock, labCommittedHistoryCursor) ?? null,
+			maxPaidHistoryBlock: h.scalar('maxPaidHistoryBlock') ?? null,
+			frontLead: frontLead(h.scalar('maxPaidHistoryBlock'), labCommittedHistoryCursor) ?? null,
 		}
 		// Informational alert (not the back-pressure pause): nothing payable in history, entries ahead of the cursor, and the (single) wallet idle.
 		if (
 			labScanBottleneck.observe(
-				{ payableHistoryCandidates: selection.historyPayablePending, historyAhead: selection.historyAheadPending, idleHistoryWallet: !state.inFlightWithdraw },
+				{ payableHistoryCandidates: selection.historyPayablePending, historyAhead: selection.historyAheadPending, idleHistoryWallet: !h.scalar('inFlightWithdraw') },
 				Date.now()
 			)
 		) {
@@ -1329,12 +1326,12 @@ async function flushPendingLabBatches(
 		live = guardian.keep
 	}
 	if (!live.length) {
-		if (clearGasWait(state)) await h.commit('scalars')
+		if (clearGasWait(h)) await h.commit('scalars')
 		emitFlushSummary()
 		return
 	}
 
-	const freezeH = state.freezeH?.height
+	const freezeH = h.scalar('freezeH')?.height
 	if (freezeH == null) {
 		logger(Colors.yellow('[labMiningPoolClPayout] skip flush: freezeH not set yet'))
 		emitFlushSummary()
@@ -1397,7 +1394,7 @@ async function flushPendingLabBatches(
 		? Math.min(...realtimeLive.map((e) => e.blockNumber))
 		: null
 	const lat = formatRealtimeLatency({ tipBlock, oldestRealtimePendingBlock: oldestRt })
-	const histCursor = state.historyCursor ?? freezeH
+	const histCursor = h.scalar('historyCursor') ?? freezeH
 	const prog = formatHistoryProgress(histCursor, freezeH)
 	logger(
 		Colors.cyan(
@@ -1414,7 +1411,6 @@ async function flushPendingLabBatches(
 			provider,
 			redeemAddr,
 			batch.entries,
-			state,
 			h,
 			gasPrice,
 			batch.line
@@ -1434,7 +1430,7 @@ async function flushPendingLabBatches(
 		await h.commit('settle')
 	}
 
-	if (!h.pendingSize && clearGasWait(state)) await h.commit('scalars')
+	if (!h.pendingSize && clearGasWait(h)) await h.commit('scalars')
 	emitFlushSummary()
 }
 
@@ -1488,15 +1484,15 @@ async function processBlockRange(
 	return { okThrough, added, fetchFailed: false, unconfirmed: false }
 }
 
-function logSessionStartIfNeeded(state: LabClPayoutState, liveHead: number, freeze: LabFreezeH): void {
+function logSessionStartIfNeeded(h: LabHandle, liveHead: number, freeze: LabFreezeH): void {
 	if (labPhaseLogged) return
 	labPhaseLogged = true
-	const floor = sessionBackfillFloor ?? resolveSessionBackfillFloor(state)
+	const floor = sessionBackfillFloor ?? resolveSessionBackfillFloor(h.scalar('lastListeningEndBlock'))
 	logger(
 		Colors.cyan(
 			`[labMiningPoolClPayout] dual-cursor H=${freeze.height} frozenAt=${freeze.frozenAt} ` +
-				`historyCursor=${state.historyCursor} realtimeCursor=${state.realtimeCursor} ` +
-				`floor=${floor} liveHead=${liveHead} (legacy listen=${state.lastListeningEndBlock ?? 'none'} backfill=${state.lastBackfillProcessedBlock})`
+				`historyCursor=${h.scalar('historyCursor')} realtimeCursor=${h.scalar('realtimeCursor')} ` +
+				`floor=${floor} liveHead=${liveHead} (legacy listen=${h.scalar('lastListeningEndBlock') ?? 'none'} backfill=${h.scalar('lastBackfillProcessedBlock')})`
 		)
 	)
 }
@@ -1507,7 +1503,6 @@ async function scanWindowAndAdvance(
 	redeemAddr: string,
 	from: number,
 	to: number,
-	state: LabClPayoutState,
 	h: LabHandle,
 	line: LabScanLine,
 	counters: LabScanCounters
@@ -1528,14 +1523,14 @@ async function scanWindowAndAdvance(
 	if (okThrough != null) {
 		// Cursor + enqueue are persisted together (anti-power-loss).
 		if (line === 'history') {
-			state.historyCursor = okThrough
-			state.lastBackfillProcessedBlock = Math.max(state.lastBackfillProcessedBlock, okThrough)
+			h.setScalar('historyCursor', okThrough)
+			h.setScalar('lastBackfillProcessedBlock', Math.max(h.scalar('lastBackfillProcessedBlock'), okThrough))
 		} else {
-			state.realtimeCursor = okThrough
-			state.lastLiveHeadScanned = Math.max(state.lastLiveHeadScanned ?? 0, okThrough)
+			h.setScalar('realtimeCursor', okThrough)
+			h.setScalar('lastLiveHeadScanned', Math.max(h.scalar('lastLiveHeadScanned') ?? 0, okThrough))
 		}
 		await h.commit('scan')
-		if (line === 'history') labCommittedHistoryCursor = state.historyCursor ?? null
+		if (line === 'history') labCommittedHistoryCursor = h.scalar('historyCursor') ?? null
 		const label = line === 'history' ? 'history' : 'realtime'
 		if (added > 0) {
 			logger(
@@ -1586,10 +1581,10 @@ async function labPayoutTick(): Promise<void> {
 			logger(Colors.yellow(`[labMiningPoolClPayout] skip tick: tip hash missing at ${liveHead}`))
 			return
 		}
-		const freeze = ensureDualCursors(state, liveHead, tipHash)
+		const freeze = ensureDualCursors(h, liveHead, tipHash)
 		await h.commit('scalars')
-		labCommittedHistoryCursor = state.historyCursor ?? null
-		logSessionStartIfNeeded(state, liveHead, freeze)
+		labCommittedHistoryCursor = h.scalar('historyCursor') ?? null
+		logSessionStartIfNeeded(h, liveHead, freeze)
 
 		const chunk = resolveChunkBlocks()
 		const chunksPerTick = resolveChunksPerTick()
@@ -1611,7 +1606,7 @@ async function labPayoutTick(): Promise<void> {
 		if (!labRealtimePaused) {
 			let windows = 0
 			while (windows < chunksPerTick) {
-				const w = nextRealtimeWindow(state.realtimeCursor ?? freeze.height, freeze.height, liveHead, chunk)
+				const w = nextRealtimeWindow(h.scalar('realtimeCursor') ?? freeze.height, freeze.height, liveHead, chunk)
 				if (!w) break
 				await scanWindowAndAdvance(
 					provider,
@@ -1619,13 +1614,12 @@ async function labPayoutTick(): Promise<void> {
 					redeemAddr,
 					w.from,
 					w.to,
-					state,
 					h,
 					'realtime',
 					rtCounters
 				)
 				windows++
-				if ((state.realtimeCursor ?? 0) < w.to) break
+				if ((h.scalar('realtimeCursor') ?? 0) < w.to) break
 			}
 		}
 		logScanSummary('realtime', rtCounters)
@@ -1636,7 +1630,7 @@ async function labPayoutTick(): Promise<void> {
 		if (!labHistoryPaused) {
 			let windows = 0
 			while (windows < chunksPerTick) {
-				const w = nextHistoryWindow(state.historyCursor ?? floor - 1, freeze.height, chunk)
+				const w = nextHistoryWindow(h.scalar('historyCursor') ?? floor - 1, freeze.height, chunk)
 				if (!w) break
 				await scanWindowAndAdvance(
 					provider,
@@ -1644,18 +1638,17 @@ async function labPayoutTick(): Promise<void> {
 					redeemAddr,
 					w.from,
 					w.to,
-					state,
 					h,
 					'history',
 					hiCounters
 				)
 				windows++
-				if ((state.historyCursor ?? 0) < w.to) break
+				if ((h.scalar('historyCursor') ?? 0) < w.to) break
 			}
 		}
 		logScanSummary('history', hiCounters)
 
-		const prog = formatHistoryProgress(state.historyCursor ?? freeze.height, freeze.height)
+		const prog = formatHistoryProgress(h.scalar('historyCursor') ?? freeze.height, freeze.height)
 		const lat = formatRealtimeLatency({
 			tipBlock: liveHead,
 			oldestRealtimePendingBlock: [...h.pendingValues()]
@@ -1670,8 +1663,8 @@ async function labPayoutTick(): Promise<void> {
 			)
 		)
 
-		await flushPendingLabBatches(provider, readContract, redeemAddr, state, h)
-		tryPersistListeningCheckpoint(state, liveHead)
+		await flushPendingLabBatches(provider, readContract, redeemAddr, h)
+		tryPersistListeningCheckpoint(h, liveHead)
 		await h.commit('scalars')
 	} catch (e: unknown) {
 		logger(Colors.red(`[labMiningPoolClPayout] tick error: ${(e as Error)?.message ?? e}`))
@@ -1736,7 +1729,7 @@ export async function flushLabMiningPoolListeningCheckpoint(): Promise<void> {
 		const provider = createLabRpcProvider()
 		const liveHead = Number(await provider.getBlockNumber())
 		if (Number.isFinite(liveHead)) {
-			tryPersistListeningCheckpoint(state, liveHead)
+			tryPersistListeningCheckpoint(new LegacyStateHandle<SkimEntry, LabClPayoutState>({ state: state as never, pending: new Map(), persist: () => writeState(state) }), liveHead)
 		}
 		writeState(state)
 	} catch {
