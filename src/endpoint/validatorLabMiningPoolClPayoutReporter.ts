@@ -87,9 +87,9 @@ import { resolvePendingHighWater, decideLinePauses } from './labBackpressure'
 import {
 	resolveHistoryPayBehindCursor,
 	historyMaxBlockFor,
-	advanceMaxPaidHistoryBlock,
-	initialMaxPaidHistoryBlock,
-	checkInvariantC,
+	countHistoryAhead,
+	planInvariantCFlush,
+	settleKeysAndAdvance,
 	frontLead,
 	ScanBottleneckTracker,
 } from './labInvariantC'
@@ -291,6 +291,8 @@ let labHistoryPaused = false
 let labRealtimePaused = false
 /** History cursor as last persisted (invariant C uses this, never an uncommitted in-memory value). undefined until the first persist of this process. */
 let labCommittedHistoryCursor: number | null | undefined
+/** The maxPaidHistoryBlock merge ran for this process (review M1: once per start, covers an off -> on switch). */
+let labInvariantCInitDone = false
 /** "Scan is the bottleneck" streak for invariant C (informational alert, not the back-pressure pause). */
 const labScanBottleneck = new ScanBottleneckTracker()
 /** Entries marked consumed by settled batches since the process started (flush-summary settledEntries is a delta of this). */
@@ -1091,18 +1093,7 @@ function makeLabLifecycleDeps(
 		},
 		settle: (keys) => {
 			labSettledEntriesTotal += keys.length
-			if (resolveHistoryPayBehindCursor() && state.freezeH) {
-				const paid: { blockNumber: number }[] = []
-				for (const k of keys) {
-					const e = pending.get(k)
-					if (e) paid.push(e)
-				}
-				state.maxPaidHistoryBlock = advanceMaxPaidHistoryBlock(state.maxPaidHistoryBlock, paid, state.freezeH.height)
-			}
-			for (const k of keys) {
-				pending.delete(k)
-				state.consumedEventKeys[k] = true
-			}
+			settleKeysAndAdvance(state, pending, keys, resolveHistoryPayBehindCursor())
 		},
 		log: (line) => logger(Colors.cyan(`[labMiningPoolClPayout] ${line}`)),
 	}
@@ -1237,32 +1228,21 @@ async function flushPendingLabBatches(
 	const freezeForSelect = state.freezeH?.height
 	// Invariant C (labInvariantC.ts): history candidates only up to the committed cursor. Off by default (single-wallet mode): nothing changes.
 	const invC = resolveHistoryPayBehindCursor() && freezeForSelect != null
-	let historyMaxBlock = historyMaxBlockFor(invC, labCommittedHistoryCursor)
+	const invPlan = planInvariantCFlush({
+		flagOn: invC,
+		freezeH: freezeForSelect,
+		committedHistoryCursor: labCommittedHistoryCursor,
+		maxPaidHistoryBlock: state.maxPaidHistoryBlock,
+		initDone: labInvariantCInitDone,
+		pending: pending.values(),
+	})
+	labInvariantCInitDone = invPlan.initDone
 	if (invC) {
-		if (state.maxPaidHistoryBlock === undefined) {
-			const init = initialMaxPaidHistoryBlock(pending.values(), freezeForSelect!, labCommittedHistoryCursor)
-			if (init) {
-				state.maxPaidHistoryBlock = init.value
-				persistPending(state, pending)
-				logger(
-					Colors.cyan(
-						`[labMiningPoolClPayout] invariant C on: maxPaidHistoryBlock initialised to ${init.value} (source=${init.source}) committedHistoryCursor=${labCommittedHistoryCursor ?? 'unset'}`
-					)
-				)
-			} else {
-				logger(Colors.yellow('[labMiningPoolClPayout] invariant C on: maxPaidHistoryBlock cannot be initialised (no pending history and no cursor); self-check inactive'))
-			}
-		}
-		const chk = checkInvariantC(state.maxPaidHistoryBlock, labCommittedHistoryCursor)
-		if (!chk.ok) {
-			logger(
-				Colors.red(
-					`[labMiningPoolClPayout] ALERT invariant C violated: maxPaidHistoryBlock=${state.maxPaidHistoryBlock} > committedHistoryCursor=${labCommittedHistoryCursor ?? 'unset'} (frontLead=${chk.lead}); history claims stopped (fail-closed) until the cursor passes it`
-				)
-			)
-			historyMaxBlock = -1
-		}
+		state.maxPaidHistoryBlock = invPlan.maxPaidHistoryBlock
+		if (invPlan.stateChanged) persistPending(state, pending)
+		for (const line of invPlan.logs) logger(line.startsWith('ALERT') ? Colors.red(`[labMiningPoolClPayout] ${line}`) : Colors.cyan(`[labMiningPoolClPayout] ${line}`))
 	}
+	const historyMaxBlock = invPlan.historyMaxBlock
 	// Realtime reserved quota first, then history (see labFlushSelect.ts). Without a freeze height the line cannot be told: oldest-first as before.
 	const selection = selectFlushCandidates(pending.values(), {
 		freezeH: freezeForSelect ?? Number.MAX_SAFE_INTEGER,
@@ -1281,7 +1261,7 @@ async function flushPendingLabBatches(
 		fc.invariantC = {
 			pendingHistoryPayable: selection.historyPayablePending,
 			pendingHistoryAhead: selection.historyAheadPending,
-			histBehindCursorHeld: selection.historyAheadPending,
+			histAheadHeld: selection.historyAheadPending,
 			histCursor: labCommittedHistoryCursor ?? null,
 			maxPaidHistoryBlock: state.maxPaidHistoryBlock ?? null,
 			frontLead: frontLead(state.maxPaidHistoryBlock, labCommittedHistoryCursor) ?? null,
@@ -1630,14 +1610,7 @@ async function labPayoutTick(): Promise<void> {
 		const invC = resolveHistoryPayBehindCursor()
 		let histTotal = 0
 		let histAhead = 0
-		if (invC) {
-			const cursor = historyMaxBlockFor(true, labCommittedHistoryCursor) as number
-			for (const e of pending.values()) {
-				if (classifyPendingLine(e.blockNumber, freeze.height) !== 'history') continue
-				histTotal++
-				if (e.blockNumber > cursor) histAhead++
-			}
-		}
+		if (invC) ({ histTotal, histAhead } = countHistoryAhead(pending.values(), freeze.height, labCommittedHistoryCursor))
 		const pauses = decideLinePauses({ history: labHistoryPaused, realtime: labRealtimePaused }, pending.size, highWater, histAhead)
 		labHistoryPaused = pauses.history
 		labRealtimePaused = pauses.realtime

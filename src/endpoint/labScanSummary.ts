@@ -113,8 +113,8 @@ export type LabInvariantCFields = {
 	pendingHistoryPayable: number
 	/** History entries with blockNumber > committed cursor (not payable yet). */
 	pendingHistoryAhead: number
-	/** History candidates refused this flush because their block is beyond the cursor (a count only, not an alert). */
-	histBehindCursorHeld: number
+	/** History candidates refused this flush because their block is beyond the cursor. Under invariant C this equals pendingHistoryAhead (the whole stock ahead of the cursor), so it is a count only, not an alert (review M2: renamed from histBehindCursorHeld). */
+	histAheadHeld: number
 	/** Committed (persisted) history cursor, null when unset. */
 	histCursor: number | null
 	/** Monotonic high-water of the block of paid history entries, null when unset. */
@@ -140,7 +140,7 @@ export function formatFlushSummary(c: LabFlushCounters, settledEntries: number):
 		(c.invariantC === null
 			? ''
 			: ` pendingHistoryPayable=${c.invariantC.pendingHistoryPayable} pendingHistoryAhead=${c.invariantC.pendingHistoryAhead} ` +
-				`histBehindCursorHeld=${c.invariantC.histBehindCursorHeld} histCursor=${dash(c.invariantC.histCursor)} ` +
+				`histAheadHeld=${c.invariantC.histAheadHeld} histCursor=${dash(c.invariantC.histCursor)} ` +
 				`maxPaidHistoryBlock=${dash(c.invariantC.maxPaidHistoryBlock)} frontLead=${dash(c.invariantC.frontLead)}`)
 	)
 }

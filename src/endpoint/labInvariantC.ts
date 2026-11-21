@@ -102,3 +102,119 @@ export class ScanBottleneckTracker {
 		return false
 	}
 }
+
+/** Counts history entries in the pool and how many of them are beyond the cursor (not payable yet). One linear pass. */
+export function countHistoryAhead(pending: Iterable<{ blockNumber: number }>, freezeH: number, committedHistoryCursor: number | null | undefined): { histTotal: number; histAhead: number } {
+	const cursor = historyMaxBlockFor(true, committedHistoryCursor) as number
+	let histTotal = 0
+	let histAhead = 0
+	for (const e of pending) {
+		if (classifyPendingLine(e.blockNumber, freezeH) !== 'history') continue
+		histTotal++
+		if (e.blockNumber > cursor) histAhead++
+	}
+	return { histTotal, histAhead }
+}
+
+/**
+ * High-water merge on every start with the invariant on (review M1): value = max(current, initial), initial = oldest pending history block
+ * (K1), capped at the committed cursor (a pending block beyond the cursor is no evidence that anything beyond it was paid, and an uncapped value
+ * would raise a false violation). Covers the off -> on switch: while the invariant was off the high-water was not maintained, and payments may have
+ * moved on, so "only initialise when undefined" would leave the self-check blind. Returns the new value and a log line when it changed.
+ */
+export function mergeInitialMaxPaid(
+	current: number | undefined,
+	pending: Iterable<{ blockNumber: number }>,
+	freezeH: number,
+	committedHistoryCursor: number | null | undefined
+): { value: number | undefined; changed: boolean; log: string | null } {
+	const init = initialMaxPaidHistoryBlock(pending, freezeH, committedHistoryCursor)
+	if (!init) {
+		return { value: current, changed: false, log: current === undefined ? 'invariant C on: maxPaidHistoryBlock cannot be initialised (no pending history and no cursor); self-check inactive' : null }
+	}
+	let candidate = init.value
+	let capped = false
+	if (committedHistoryCursor != null && Number.isFinite(committedHistoryCursor) && candidate > committedHistoryCursor) {
+		candidate = committedHistoryCursor
+		capped = true
+	}
+	const value = current === undefined ? candidate : Math.max(current, candidate)
+	const changed = value !== current
+	const log = changed
+		? `invariant C on: maxPaidHistoryBlock ${current === undefined ? 'initialised' : `raised ${current} ->`} ${value} (initial=${init.value} source=${init.source}${capped ? ' capped-at-cursor' : ''}) committedHistoryCursor=${committedHistoryCursor ?? 'unset'}`
+		: null
+	return { value, changed, log }
+}
+
+export type InvariantCFlushPlan = {
+	/** Limit for selectFlushCandidates (null = invariant off). */
+	historyMaxBlock: number | null
+	/** State value after the plan (high-water merged on the first flush of the process). */
+	maxPaidHistoryBlock: number | undefined
+	/** True when the state changed and must be persisted by the caller. */
+	stateChanged: boolean
+	initDone: boolean
+	logs: string[]
+	/** Set when maxPaidHistoryBlock > committed cursor: history claims are stopped for this flush. */
+	violation: { lead: number } | null
+}
+
+/** The flush-start decisions of invariant C as one pure function (review M3). */
+export function planInvariantCFlush(input: {
+	flagOn: boolean
+	freezeH: number | undefined
+	committedHistoryCursor: number | null | undefined
+	maxPaidHistoryBlock: number | undefined
+	initDone: boolean
+	pending: Iterable<{ blockNumber: number }>
+}): InvariantCFlushPlan {
+	const on = input.flagOn && input.freezeH != null
+	if (!on) return { historyMaxBlock: null, maxPaidHistoryBlock: input.maxPaidHistoryBlock, stateChanged: false, initDone: input.initDone, logs: [], violation: null }
+	const logs: string[] = []
+	let maxPaid = input.maxPaidHistoryBlock
+	let stateChanged = false
+	let initDone = input.initDone
+	if (!initDone) {
+		const m = mergeInitialMaxPaid(maxPaid, input.pending, input.freezeH as number, input.committedHistoryCursor)
+		maxPaid = m.value
+		stateChanged = m.changed
+		if (m.log) logs.push(m.log)
+		initDone = true
+	}
+	let historyMaxBlock = historyMaxBlockFor(true, input.committedHistoryCursor)
+	let violation: { lead: number } | null = null
+	const chk = checkInvariantC(maxPaid, input.committedHistoryCursor)
+	if (!chk.ok) {
+		violation = { lead: chk.lead }
+		historyMaxBlock = -1
+		logs.push(
+			`ALERT invariant C violated: maxPaidHistoryBlock=${maxPaid} > committedHistoryCursor=${input.committedHistoryCursor ?? 'unset'} (frontLead=${chk.lead}); history claims stopped (fail-closed) until the cursor passes it`
+		)
+	}
+	return { historyMaxBlock, maxPaidHistoryBlock: maxPaid, stateChanged, initDone, logs, violation }
+}
+
+/**
+ * The settle step of the lifecycle, in memory only (the lifecycle persists right after): advance the high-water from the pending entries of the settled
+ * keys (history entries only, and only while the invariant is on), then mark the keys consumed and drop them from pending.
+ * It reads the block numbers from the pending pool, not from the in-flight record, so it must run before the pending entries are removed.
+ */
+export function settleKeysAndAdvance(
+	state: { freezeH?: { height: number } | null; maxPaidHistoryBlock?: number; consumedEventKeys: Record<string, true> },
+	pending: Map<string, { blockNumber: number }>,
+	keys: readonly string[],
+	flagOn: boolean
+): void {
+	if (flagOn && state.freezeH) {
+		const paid: { blockNumber: number }[] = []
+		for (const k of keys) {
+			const e = pending.get(k)
+			if (e) paid.push(e)
+		}
+		state.maxPaidHistoryBlock = advanceMaxPaidHistoryBlock(state.maxPaidHistoryBlock, paid, state.freezeH.height)
+	}
+	for (const k of keys) {
+		pending.delete(k)
+		state.consumedEventKeys[k] = true
+	}
+}
