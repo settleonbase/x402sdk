@@ -15,7 +15,8 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { ethers } from 'ethers'
 import { canonicalJson, readManifest, readSegmentedState, writeSegmentedState } from '../labClPayoutStateStore'
-import { FakeBeacon, FakeChain, FakeSigner, KEY_ARRAY, POOL, REDEEM, SIGNER_ADDRESS } from './fakeServers.test'
+import { recoverPayoutState } from '../labPayoutRecovery'
+import { FakeBeacon, FakeChain, FakeSigner, KEY_ARRAY, POOL, REDEEM, SIGNER_ADDRESS, type SentTx } from './fakeServers.test'
 
 export const DEFAULT_ROOT = path.resolve(__dirname, '../../..')
 
@@ -173,11 +174,10 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 		signer.eventKeysOf = (idem) => {
 			for (let attempt = 0; attempt < 5; attempt++) {
 				try {
-					const st = readSegmentedState(stateDir) as { inFlightWithdraw?: { idempotencyKey?: string; eventKeys?: string[] } }
-					const rec = st.inFlightWithdraw
+					const rec = readInFlightRecord(stateDir)
 					if (rec && rec.idempotencyKey === idem && Array.isArray(rec.eventKeys)) return [...rec.eventKeys].sort()
 				} catch {
-					/* a generation was being replaced: read again */
+					/* a generation was being replaced or a log frame was being written: read again */
 				}
 			}
 			return []
@@ -217,7 +217,11 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 				child.stderr.on('data', onData)
 				const prevHook = { before: signer.beforeRecord, after: signer.afterRecord }
 				void prevHook
-				const timer = setTimeout(kill, o.timeoutMs ?? 120_000)
+				let timedOut = false
+				const timer = setTimeout(() => {
+					timedOut = true
+					kill()
+				}, o.timeoutMs ?? 120_000)
 				const signerCount0 = signer.requests.length
 				const poll = setInterval(() => {
 					if (!o.killWhen) return
@@ -232,12 +236,17 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 				clearTimeout(timer)
 				clearInterval(poll)
 				runs.push(res)
+				// G3: a run that never finished (timer compression not recognised, or a hang) is an error, not a quiet result
+				if (timedOut) throw new Error(`the child did not finish within ${o.timeoutMs ?? 120_000} ms: the tick timer was probably not compressed (renamed scheduler?) or the reporter hung`)
+				const done = lines.some((l) => normalizeLine(l).startsWith('[e2e-child] E2E_DONE'))
+				const compressed = lines.map((l) => /\[e2e-child\] compressed=(\d+) requested=(\d+)/.exec(normalizeLine(l))).find((m) => m)
+				if (done && o.ticks > 1 && (!compressed || Number(compressed[1]) < 1)) throw new Error('the run finished but no tick timer was compressed: the scheduler detection no longer matches the reporter')
 				return res
 			},
 		}
 		await s.body(ctx)
-		const paymentsPerEventKey: Record<string, number> = {}
-		for (const t of chain.sent.values()) for (const k of t.eventKeys) paymentsPerEventKey[k] = (paymentsPerEventKey[k] ?? 0) + 1
+		const paymentsPerEventKey = paymentsPerEventKeyOf(chain.sent.values())
+		assertPaidAtMostOnce(chain.sent.values())
 		const strayOutput: string[] = []
 		for (const r of runs) for (const l of r.lines) {
 			const n = normalizeLine(l)
@@ -264,6 +273,45 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 		if (!process.env.E2E_KEEP) fs.rmSync(dir, { recursive: true, force: true })
 		else process.stderr.write(`E2E_KEEP ${dir}\n`)
 	}
+}
+
+/**
+ * The in-flight withdrawal record as the daemon has persisted it (review G2): from a version 2 state through the plain reader, and - when a WAL exists (wal/ not empty) or the manifest is
+ * version 3 - through the WAL-aware read-only recovery, because the plain reader refuses a version 3 manifest and the intent event is in the log, not in a snapshot.
+ */
+export function readInFlightRecord(stateDir: string): { idempotencyKey?: string; eventKeys?: string[] } | null {
+	const walDir = path.join(stateDir, 'wal')
+	let walPresent = false
+	try {
+		walPresent = fs.readdirSync(walDir).length > 0
+	} catch {
+		walPresent = false
+	}
+	let v3 = false
+	try {
+		v3 = (JSON.parse(fs.readFileSync(path.join(stateDir, 'manifest.json'), 'utf8')) as { version?: number }).version === 3
+	} catch {
+		v3 = false
+	}
+	if (walPresent || v3) return recoverPayoutState(stateDir, { readOnly: true }).core.getInFlight() as { idempotencyKey?: string; eventKeys?: string[] } | null
+	return (readSegmentedState(stateDir) as { inFlightWithdraw?: { idempotencyKey?: string; eventKeys?: string[] } }).inFlightWithdraw ?? null
+}
+
+/** Number of distinct transactions per EVENT key. */
+export function paymentsPerEventKeyOf(sent: Iterable<Pick<SentTx, 'eventKeys'>>): Record<string, number> {
+	const out: Record<string, number> = {}
+	for (const t of sent) for (const k of t.eventKeys) out[k] = (out[k] ?? 0) + 1
+	return out
+}
+
+/**
+ * The "paid at most once" check, and the guard against it being blind (review G1): every sent transaction must have a NON-EMPTY event-key list (an empty list would mean the state could not
+ * be read at send time, which would hide a double payment), and no event key may appear in two transactions. Throws on any violation.
+ */
+export function assertPaidAtMostOnce(sent: Iterable<Pick<SentTx, 'eventKeys' | 'idempotencyKey'>>): void {
+	const list = [...sent]
+	for (const t of list) if (t.eventKeys.length === 0) throw new Error(`transaction ${t.idempotencyKey} has no event keys: the persisted in-flight record could not be read at send time, so a double payment would go unnoticed`)
+	for (const [k, n] of Object.entries(paymentsPerEventKeyOf(list))) if (n > 1) throw new Error(`event key ${k} was paid by ${n} transactions (at most once is required)`)
 }
 
 export const FIXTURE_DIR = path.join(__dirname, 'fixtures')

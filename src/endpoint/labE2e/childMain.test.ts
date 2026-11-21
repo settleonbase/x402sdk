@@ -34,6 +34,7 @@ async function main(): Promise<void> {
 		if (shuttingDown) return
 		shuttingDown = true
 		console.log(`[e2e-child] ${signal}; draining`)
+		console.log(`[e2e-child] compressed=${scheduledTicks} requested=${ticks}`)
 		rep.stopValidatorLabMiningPoolClPayoutReporter()
 		await rep.waitForLabMiningPoolClPayoutIdle(90_000)
 		await rep.flushLabMiningPoolListeningCheckpoint()

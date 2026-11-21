@@ -33,7 +33,8 @@
       "[labMiningPoolClPayout] progress hist remaining=0 pct=100% rt tipGap=0 pending=0",
       "[labMiningPoolClPayout] listening checkpoint lastListeningEndBlock=120 (backfill≥119)",
       "[labMiningPoolClPayout] progress hist remaining=0 pct=100% rt tipGap=0 pending=0",
-      "[e2e-child] E2E_DONE; draining"
+      "[e2e-child] E2E_DONE; draining",
+      "[e2e-child] compressed=3 requested=3"
     ]
   ],
   "paymentsPerEventKey": {

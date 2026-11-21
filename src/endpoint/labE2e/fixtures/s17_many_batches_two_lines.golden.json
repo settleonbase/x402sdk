@@ -145,7 +145,8 @@
       "[labMiningPoolClPayout] progress hist remaining=0 pct=100% rt tipGap=0 pending=0",
       "[labMiningPoolClPayout] progress hist remaining=0 pct=100% rt tipGap=0 pending=0",
       "[labMiningPoolClPayout] progress hist remaining=0 pct=100% rt tipGap=0 pending=0",
-      "[e2e-child] E2E_DONE; draining"
+      "[e2e-child] E2E_DONE; draining",
+      "[e2e-child] compressed=8 requested=8"
     ]
   ],
   "paymentsPerEventKey": {

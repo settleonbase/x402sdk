@@ -31,7 +31,8 @@
       "[labMiningPoolClPayout] withdrawNative sent via signer tx=0x3afcccd10cfa65a9f24728173f360ffe63e0f9dc0193728ba95f1578f1e36178 line=history recovered=0 n=4 gasPrice=0.001gwei",
       "[labMiningPoolClPayout] withdrawNative ok hash=0x3afcccd10cfa65a9f24728173f360ffe63e0f9dc0193728ba95f1578f1e36178 n=4",
       "[labMiningPoolClPayout] flush-summary inspect=5/5 droppedChainConsumed=0 unconfirmed=0 guardianHeld=1 held=0 signable=4 batches=1 settledEntries=4 consumedDelta=4 failed=0 inspectRealtime=0 inspectHistory=5 pendingRealtime=0 pendingHistory=5",
-      "[e2e-child] E2E_DONE; draining"
+      "[e2e-child] E2E_DONE; draining",
+      "[e2e-child] compressed=1 requested=1"
     ]
   ],
   "paymentsPerEventKey": {

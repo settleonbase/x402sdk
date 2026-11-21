@@ -46,7 +46,8 @@
       "[labMiningPoolClPayout] flush-summary inspect=1/1 droppedChainConsumed=0 unconfirmed=0 guardianHeld=0 held=0 signable=1 batches=1 settledEntries=1 consumedDelta=1 failed=0 inspectRealtime=0 inspectHistory=1 pendingRealtime=0 pendingHistory=1 pendingHistoryPayable=1 pendingHistoryAhead=0 histAheadHeld=0 histCursor=120 maxPaidHistoryBlock=109 frontLead=-11",
       "[labMiningPoolClPayout] listening checkpoint lastListeningEndBlock=120 (backfill≥119)",
       "[labMiningPoolClPayout] progress hist remaining=0 pct=100% rt tipGap=0 pending=0 histPayable=0 histAhead=0",
-      "[e2e-child] E2E_DONE; draining"
+      "[e2e-child] E2E_DONE; draining",
+      "[e2e-child] compressed=3 requested=3"
     ]
   ],
   "paymentsPerEventKey": {
