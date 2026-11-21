@@ -10,29 +10,40 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
-import { chmodSync, statSync } from 'node:fs'
+import { appendFileSync, chmodSync, readdirSync, statSync, symlinkSync } from 'node:fs'
 import { acquireStateDirLock } from './labClPayoutStateLock'
 import { WAL_DIR, WAL_HEADER_BYTES, WalMidCorruptionError, WalWriter, decodeFrameAt, encodeFrame, formatWalMidCorruptionAlert, scanWal, segmentFileName, type WalEvent, type WalOp } from './labWal'
-import { RUN_ID_RE, repairMidCorruption } from './labWalRepair'
+import { RUN_ID_RE, parseCliArgs, readSnapshotWalSeq, realpathOrAncestor, repairMidCorruption } from './labWalRepair'
 
 const key = (i: number): string => `0x${i.toString(16).padStart(64, '0')}`
 const ev = (seq: number, ops: WalOp[], t: string): WalEvent => ({ v: 1, seq, ts: '2026-11-21T00:00:00.000Z', t, ops })
 
 /** A segment of 5 events: 1 scan, 2 intent, 3 hash, 4 settle, 5 scan; frame 3 is then damaged. Returns the file, the intact bytes, and the frame offsets. */
-function world(): { root: string; stateDir: string; auditDir: string; file: string; intact: Buffer; damaged: Buffer; starts: number[] } {
+type WorldOpts = { firstSeq?: number; manifest?: 'v3' | 'v2' | 'none' | 'badjson' | 'nowalseq' | 'v1' }
+function world(o: WorldOpts = {}): { root: string; stateDir: string; auditDir: string; file: string; intact: Buffer; damaged: Buffer; starts: number[] } {
+	const firstSeq = o.firstSeq ?? 1
+	const base = firstSeq - 1
 	const root = mkdtempSync(join(tmpdir(), 'labwalrepair-'))
 	const stateDir = join(root, 'state.v2')
 	const auditDir = join(root, 'audit')
 	mkdirSync(join(stateDir, WAL_DIR), { recursive: true })
+	// the committed manifest the repair reads its scan start from (review R1): the snapshot contains everything up to firstSeq - 1
+	const mf = o.manifest ?? 'v3'
+	const mpath = join(stateDir, 'manifest.json')
+	if (mf === 'v3') writeFileSync(mpath, JSON.stringify({ version: 3, walSeq: base, generation: 'gen-1' }))
+	else if (mf === 'v2') writeFileSync(mpath, JSON.stringify({ version: 2, generation: 'gen-1', scalars: { walSeq: base } }))
+	else if (mf === 'badjson') writeFileSync(mpath, '{not json')
+	else if (mf === 'nowalseq') writeFileSync(mpath, JSON.stringify({ version: 3, generation: 'gen-1' }))
+	else if (mf === 'v1') writeFileSync(mpath, JSON.stringify({ version: 1, walSeq: base }))
 	const rec = { batchId: 'b1', idempotencyKey: 'lab-withdrawNative:abc', line: 'history', amountWei: '1000', eventKeys: [key(1), key(2), key(3)] }
 	const events = [
-		ev(1, [{ op: 'pendingAdd', entry: { eventKey: key(1), blockNumber: 10 } }], 'scan'),
-		ev(2, [{ op: 'inFlightSet', record: rec }], 'intent'),
-		ev(3, [{ op: 'inFlightSet', record: { ...rec, hash: '0xdead' } }], 'hash'),
-		ev(4, [{ op: 'consumedAdd', key: key(1) }, { op: 'consumedAdd', key: key(2) }, { op: 'pendingDel', key: key(1) }, { op: 'inFlightSet', record: null }], 'settle'),
-		ev(5, [{ op: 'scalarsSet', patch: { historyCursor: 99 } }], 'scan'),
+		ev(base + 1, [{ op: 'pendingAdd', entry: { eventKey: key(1), blockNumber: 10 } }], 'scan'),
+		ev(base + 2, [{ op: 'inFlightSet', record: rec }], 'intent'),
+		ev(base + 3, [{ op: 'inFlightSet', record: { ...rec, hash: '0xdead' } }], 'hash'),
+		ev(base + 4, [{ op: 'consumedAdd', key: key(1) }, { op: 'consumedAdd', key: key(2) }, { op: 'pendingDel', key: key(1) }, { op: 'inFlightSet', record: null }], 'settle'),
+		ev(base + 5, [{ op: 'scalarsSet', patch: { historyCursor: 99 } }], 'scan'),
 	]
-	const file = join(stateDir, WAL_DIR, segmentFileName(1))
+	const file = join(stateDir, WAL_DIR, segmentFileName(firstSeq))
 	const intact = Buffer.concat(events.map((e) => encodeFrame(e)))
 	writeFileSync(file, intact)
 	const starts: number[] = []
@@ -350,6 +361,192 @@ test('repair gate 4: after a repair the log starts cleanly and equals the refere
 		assert.deepEqual(got.map((e) => [e.seq, e.t]), [[1, 'scan'], [2, 'intent']])
 		const reference = Buffer.concat([encodeFrame(ev(1, [{ op: 'pendingAdd', entry: { eventKey: key(1), blockNumber: 10 } }], 'scan')), encodeFrame(ev(2, [{ op: 'inFlightSet', record: { batchId: 'b1', idempotencyKey: 'lab-withdrawNative:abc', line: 'history', amountWei: '1000', eventKeys: [key(1), key(2), key(3)] } }], 'intent'))])
 		assert.deepEqual(readFileSync(w.file), reference, 'the file equals the encoding of the intact prefix, byte for byte')
+	} finally {
+		done(w.root)
+	}
+})
+
+// ------------------------------------------------------------ review R1-R5 (second review receipt c289bfc3)
+test('R1: the scan starts AFTER the snapshot. A log whose first segment starts at seq 101 (snapshot walSeq 100) is repaired; afterSeq 0 would have refused it', () => {
+	const w = world({ firstSeq: 101 })
+	try {
+		// the old behaviour, for the record: a scan from 0 refuses with a missing-events error, so the repair command could never work after the first snapshot
+		assert.throws(() => scanWal(w.stateDir, { afterSeq: 0, onEvent: () => undefined }), /first segment starts at seq 101 but the snapshot ends at seq 0/)
+		assert.throws(() => scanWal(w.stateDir, { afterSeq: 100, onEvent: () => undefined }), WalMidCorruptionError)
+		const r = repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' })
+		assert.equal(r.status, 'repaired')
+		if (r.status !== 'repaired') return
+		assert.equal(r.audit.snapshotWalSeq, 100)
+		assert.equal(r.audit.manifestVersion, 3)
+		assert.equal(r.audit.lastGoodSeq, 102, 'frames 101 and 102 are intact; 103 is the damaged one')
+		assert.deepEqual(r.audit.droppedSeqs, { first: 104, last: 105, count: 2 })
+		assert.equal(readFileSync(w.file).length, w.starts[2])
+		// the repaired log scans cleanly from the snapshot seq
+		const got: number[] = []
+		scanWal(w.stateDir, { afterSeq: 100, onEvent: (e) => got.push(e.seq) })
+		assert.deepEqual(got, [101, 102])
+	} finally {
+		done(w.root)
+	}
+})
+
+test('R1: the scan start comes from the manifest: a version 2 downgrade manifest (scalars.walSeq) works too', () => {
+	const w = world({ firstSeq: 101, manifest: 'v2' })
+	try {
+		assert.equal(readSnapshotWalSeq(w.stateDir).walSeq, 100)
+		assert.equal(readSnapshotWalSeq(w.stateDir).version, 2)
+		const r = repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01', dryRun: true })
+		assert.equal(r.status, 'dry-run')
+		if (r.status === 'dry-run') assert.equal(r.audit.snapshotWalSeq, 100)
+	} finally {
+		done(w.root)
+	}
+})
+
+test('R1: a manifest that is missing, unreadable, of another version or without a valid walSeq REFUSES the repair; nothing is audited or cut', () => {
+	for (const m of ['none', 'badjson', 'nowalseq', 'v1'] as const) {
+		const w = world({ manifest: m })
+		try {
+			assert.throws(() => repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' }), /labWalRepair: .*nothing is repaired/s, `manifest ${m}`)
+			assert.throws(() => repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01', dryRun: true }), /nothing is repaired/, `dry-run with manifest ${m}`)
+			assert.deepEqual(readFileSync(w.file), w.damaged, `manifest ${m}: the log was not touched`)
+			assert.equal(existsSync(w.auditDir), false, `manifest ${m}: no audit was written`)
+		} finally {
+			done(w.root)
+		}
+	}
+	const w = world()
+	try {
+		for (const bad of [-1, 1.5, '7', null, Number.MAX_SAFE_INTEGER + 2]) {
+			writeFileSync(join(w.stateDir, 'manifest.json'), JSON.stringify({ version: 3, walSeq: bad }))
+			assert.throws(() => readSnapshotWalSeq(w.stateDir), /no valid walSeq/, `walSeq ${String(bad)}`)
+		}
+	} finally {
+		done(w.root)
+	}
+})
+
+test('R2: the segment must still equal what was scanned at the moment of the cut; an append or a same-length change between audit and cut aborts without cutting', () => {
+	const w = world()
+	try {
+		assert.throws(
+			() =>
+				repairMidCorruption({
+					stateDir: w.stateDir,
+					auditDir: w.auditDir,
+					runId: RUN,
+					approval: 'PM-2026-11-21-01',
+					hooks: { beforeTruncate: () => appendFileSync(w.file, Buffer.from([0x57, 0x4c, 0, 0])) },
+				}),
+			/segment changed after it was scanned.*nothing was cut/s
+		)
+		assert.equal(readFileSync(w.file).length, w.damaged.length + 4, 'the log was not cut')
+		assert.ok(existsSync(join(w.auditDir, `wal-midcorruption-${RUN}.json`)), 'the audit stays as evidence of the attempt')
+		writeFileSync(w.file, w.damaged)
+		const other = 'run-20261121-02'
+		assert.throws(
+			() =>
+				repairMidCorruption({
+					stateDir: w.stateDir,
+					auditDir: w.auditDir,
+					runId: other,
+					approval: 'PM-2026-11-21-01',
+					hooks: {
+						beforeTruncate: () => {
+							const b = Buffer.from(readFileSync(w.file))
+							b[b.length - 1] = b[b.length - 1]! ^ 0xff
+							writeFileSync(w.file, b)
+						},
+					},
+				}),
+			/segment changed after it was scanned/
+		)
+		assert.equal(readFileSync(w.file).length, w.damaged.length)
+		const a = JSON.parse(readFileSync(join(w.auditDir, `wal-midcorruption-${other}.json`), 'utf8'))
+		assert.equal(a.segmentBytesBefore, w.damaged.length)
+		assert.equal(a.segmentSha256Before, createHash('sha256').update(w.damaged).digest('hex'))
+	} finally {
+		done(w.root)
+	}
+})
+
+test('R3: the audit records the sha256 of the whole segment before the cut and of the cut part; the cut part is stored byte for byte', () => {
+	const w = world()
+	try {
+		const r = repairMidCorruption({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' })
+		assert.equal(r.status, 'repaired')
+		if (r.status !== 'repaired') return
+		assert.equal(r.audit.segmentBytesBefore, w.damaged.length)
+		assert.equal(r.audit.segmentSha256Before, createHash('sha256').update(w.damaged).digest('hex'))
+		const tail = readFileSync(join(w.auditDir, r.audit.tailFile!))
+		assert.deepEqual(tail, w.damaged.subarray(w.starts[2]!))
+		assert.equal(r.audit.tailSha256, createHash('sha256').update(tail).digest('hex'))
+		assert.equal(r.audit.manifestSha256, createHash('sha256').update(readFileSync(join(w.stateDir, 'manifest.json'))).digest('hex'))
+		assert.deepEqual(Buffer.concat([readFileSync(w.file), tail]), w.damaged, 'intact prefix + stored cut part = the original segment')
+	} finally {
+		done(w.root)
+	}
+})
+
+test('R4: the audit directory is compared after realpath: a symlink into the state directory is refused (also when it does not exist yet); a symlink as the audit directory itself is refused', () => {
+	const w = world()
+	try {
+		const link = join(w.root, 'linkToState')
+		symlinkSync(w.stateDir, link)
+		for (const bad of [join(link, 'audit'), join(link, WAL_DIR, 'x'), link]) {
+			assert.throws(() => repairMidCorruption({ stateDir: w.stateDir, auditDir: bad, runId: RUN, approval: 'PM-2026-11-21-01' }), /OUTSIDE the state directory|symbolic link/, bad)
+			assert.throws(() => repairMidCorruption({ stateDir: w.stateDir, auditDir: bad, runId: RUN, approval: 'PM-2026-11-21-01', dryRun: true }), /OUTSIDE the state directory|symbolic link/, `dry-run ${bad}`)
+		}
+		assert.equal(readdirSync(join(w.stateDir, WAL_DIR)).length, 1, 'no audit file was written into the WAL directory')
+		assert.equal(existsSync(join(w.stateDir, 'audit')), false, 'nothing was created inside the state directory')
+		const stateViaLink = join(w.root, 'stateAlias')
+		symlinkSync(w.stateDir, stateViaLink)
+		const elsewhere = join(w.root, 'elsewhere')
+		mkdirSync(elsewhere)
+		const auditLink = join(w.root, 'auditLink')
+		symlinkSync(elsewhere, auditLink)
+		assert.throws(() => repairMidCorruption({ stateDir: stateViaLink, auditDir: auditLink, runId: RUN, approval: 'PM-2026-11-21-01' }), /symbolic link/)
+		assert.throws(() => repairMidCorruption({ stateDir: stateViaLink, auditDir: join(w.stateDir, 'audit2'), runId: RUN, approval: 'PM-2026-11-21-01' }), /OUTSIDE the state directory/)
+		assert.throws(() => repairMidCorruption({ stateDir: w.stateDir, auditDir: w.root, runId: RUN, approval: 'PM-2026-11-21-01' }), /OUTSIDE the state directory/, 'an audit directory that contains the state directory is refused too')
+		assert.deepEqual(readFileSync(w.file), w.damaged)
+		assert.equal(repairMidCorruption({ stateDir: stateViaLink, auditDir: w.auditDir, runId: RUN, approval: 'PM-2026-11-21-01' }).status, 'repaired', 'a plain sibling works, also when the state dir is given through an alias')
+	} finally {
+		done(w.root)
+	}
+})
+
+test('R4: realpathOrAncestor resolves symlinks in the existing part and appends the missing tail', () => {
+	const w = world()
+	try {
+		const link = join(w.root, 'lnk')
+		symlinkSync(w.stateDir, link)
+		assert.equal(realpathOrAncestor(join(link, 'not', 'there')), join(realpathOrAncestor(w.stateDir), 'not', 'there'))
+	} finally {
+		done(w.root)
+	}
+})
+
+test('R5: CLI arguments are strict - a value that starts with -- is refused (--run-id --approval x), repeated and unknown flags are refused; the CLI exits 2 and touches nothing', () => {
+	assert.throws(() => parseCliArgs(['--run-id', '--approval', 'x']), /--run-id needs a value/)
+	assert.throws(() => parseCliArgs(['--state-dir']), /needs a value \(got nothing\)/)
+	assert.throws(() => parseCliArgs(['--run-id', 'a', '--run-id', 'b']), /given twice/)
+	assert.throws(() => parseCliArgs(['--force']), /unknown argument/)
+	assert.throws(() => parseCliArgs(['stray']), /unknown argument/)
+	assert.deepEqual(parseCliArgs(['--state-dir', '/s', '--audit-dir', '/a', '--run-id', 'run-12345678', '--approval', 'PM-1', '--dry-run']), {
+		values: { '--state-dir': '/s', '--audit-dir': '/a', '--run-id': 'run-12345678', '--approval': 'PM-1' },
+		dryRun: true,
+	})
+	const w = world()
+	try {
+		const script = join(__dirname, 'labWalRepair.ts')
+		const loader = process.execArgv.some((a) => a.includes('tsx'))
+			? [...process.execArgv]
+			: ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href]
+		const r = spawnSync(process.execPath, [...loader, script, '--state-dir', w.stateDir, '--audit-dir', w.auditDir, '--run-id', '--approval', 'PM-2026-11-21-01'], { encoding: 'utf8' })
+		assert.equal(r.status, 2)
+		assert.match(r.stderr, /--run-id needs a value/)
+		assert.deepEqual(readFileSync(w.file), w.damaged)
+		assert.equal(existsSync(w.auditDir), false)
 	} finally {
 		done(w.root)
 	}

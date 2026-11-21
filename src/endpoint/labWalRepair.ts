@@ -11,6 +11,10 @@
  *  - it takes the state-directory lock (the same lock the daemon holds) before it reads or cuts anything and refuses when the lock is held (no TOCTOU against a running daemon);
  *  - the cut bytes are stored WHOLE in the audit directory (exclusive create, fsync, sha256 in the audit), not only the decoded summary;
  *  - the sequence numbers of the dropped frames are REUSED: after the cut the next event gets lastGoodSeq + 1. The audit says so;
+ *  - the scan starts AFTER the snapshot: afterSeq is read from the committed manifest (v3 top-level walSeq, or the informational scalars.walSeq of a v2 downgrade
+ *    manifest), never assumed to be 0. A manifest that is missing, unreadable, of another version or without a valid walSeq REFUSES the repair (R1);
+ *  - the audit directory is compared with the state directory after realpath (nearest existing ancestor when it does not exist yet), and a symlink as the audit
+ *    directory itself is refused (R4); the cut is made only if the segment still equals, byte for byte, what was scanned and audited (R2);
  *  - the approval reference is only a string. Nothing here can verify it technically. The audit records approvalVerified=false and the receipt must say so.
  * Before using it the operator must compare every intent in the audit with the signer record (signer_getTransaction) and the chain, and book any transaction already
  * sent as consumed (runbook). `--dry-run` prints the audit and changes nothing.
@@ -24,6 +28,36 @@ import { acquireStateDirLock } from './labClPayoutStateLock'
 import { WAL_DIR, WalMidCorruptionError, decodeFrameAt, scanWal, type WalEvent } from './labWal'
 
 export const RUN_ID_RE = /^[A-Za-z0-9._-]{8,64}$/
+const MANIFEST_FILE = 'manifest.json'
+
+/**
+ * The seq the committed snapshot already contains (R1). Reads manifest.json as plain JSON (the strict state reader only knows version 2): version 3 carries `walSeq`
+ * at the top level, a version 2 downgrade manifest carries it as the informational scalar `scalars.walSeq`. Anything else refuses; there is no default.
+ */
+export function readSnapshotWalSeq(stateDir: string): { walSeq: number; manifestSha256: string; version: number } {
+	const file = path.join(stateDir, MANIFEST_FILE)
+	let raw: Buffer
+	try {
+		raw = fs.readFileSync(file)
+	} catch (e) {
+		throw new Error(`labWalRepair: cannot read the committed manifest ${file} (${e instanceof Error ? e.message : String(e)}); the scan start seq is unknown, so nothing is repaired`)
+	}
+	let m: unknown
+	try {
+		m = JSON.parse(raw.toString('utf8'))
+	} catch {
+		throw new Error(`labWalRepair: ${file} is not valid JSON; nothing is repaired`)
+	}
+	const o = m as { version?: unknown; walSeq?: unknown; scalars?: { walSeq?: unknown } } | null
+	if (o === null || typeof o !== 'object') throw new Error(`labWalRepair: ${file} is not an object; nothing is repaired`)
+	const version = o.version
+	if (version !== 2 && version !== 3) throw new Error(`labWalRepair: manifest version ${String(version)} is not 2 or 3; nothing is repaired`)
+	const w = version === 3 ? o.walSeq : o.scalars && typeof o.scalars === 'object' ? o.scalars.walSeq : undefined
+	if (typeof w !== 'number' || !Number.isSafeInteger(w) || w < 0) {
+		throw new Error(`labWalRepair: the manifest (version ${version}) has no valid walSeq; the snapshot's last applied seq is unknown, so nothing is repaired`)
+	}
+	return { walSeq: w, manifestSha256: createHash('sha256').update(raw).digest('hex'), version }
+}
 
 export type DroppedFrame = {
 	offset: number
@@ -44,6 +78,13 @@ export type RepairAudit = {
 	segmentFile: string
 	badOffset: number
 	reason: string
+	/** The seq the committed snapshot contains: the scan started after it (R1). */
+	snapshotWalSeq: number
+	manifestVersion: number
+	manifestSha256: string
+	/** The whole segment as scanned: length and sha256 before the cut (R3). The cut part is stored separately, sha256 in tailSha256. */
+	segmentBytesBefore: number
+	segmentSha256Before: string
 	bytesCut: number
 	validFramesDropped: number
 	frames: DroppedFrame[]
@@ -69,6 +110,41 @@ export type RepairResult =
 function insideDir(child: string, parent: string): boolean {
 	const rel = path.relative(path.resolve(parent), path.resolve(child))
 	return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+/** realpath of the path itself, or, when it does not exist yet, of its nearest existing ancestor with the missing tail appended. Symlinks anywhere are resolved. */
+export function realpathOrAncestor(p: string): string {
+	let cur = path.resolve(p)
+	const tail: string[] = []
+	for (;;) {
+		try {
+			return path.join(fs.realpathSync(cur), ...tail.reverse())
+		} catch (e) {
+			const code = (e as NodeJS.ErrnoException).code
+			if (code !== 'ENOENT' && code !== 'ENOTDIR') throw e
+			const parent = path.dirname(cur)
+			if (parent === cur) throw e
+			tail.push(path.basename(cur))
+			cur = parent
+		}
+	}
+}
+
+/** The audit directory must not be (or be reached through a symlink into) the state directory, and must not itself be a symlink. */
+function assertAuditDirOutside(stateDir: string, auditDir: string): void {
+	let st: fs.Stats | null = null
+	try {
+		st = fs.lstatSync(auditDir)
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+	}
+	if (st && st.isSymbolicLink()) throw new Error('labWalRepair: the audit directory is a symbolic link; use a real directory')
+	if (st && !st.isDirectory()) throw new Error('labWalRepair: the audit path exists and is not a directory')
+	const realState = fs.realpathSync(stateDir)
+	const realAudit = realpathOrAncestor(auditDir)
+	if (insideDir(realAudit, realState) || insideDir(realState, realAudit)) {
+		throw new Error('labWalRepair: the audit directory must be OUTSIDE the state directory (compared after resolving symbolic links)')
+	}
 }
 
 function summarize(ev: WalEvent, offset: number): DroppedFrame {
@@ -101,7 +177,9 @@ export function repairMidCorruption(opts: { stateDir: string; auditDir: string; 
 	if (!opts.runId || !RUN_ID_RE.test(opts.runId)) throw new Error('labWalRepair: a run id is required (letters, digits, . _ -, 8 to 64 characters)')
 	if (!opts.approval || opts.approval.trim().length < 3) throw new Error('labWalRepair: the approval reference (the written release) is required')
 	if (!opts.auditDir) throw new Error('labWalRepair: an audit directory is required')
+	if (!opts.stateDir) throw new Error('labWalRepair: a state directory is required')
 	if (insideDir(opts.auditDir, opts.stateDir)) throw new Error('labWalRepair: the audit directory must be OUTSIDE the state directory')
+	assertAuditDirOutside(opts.stateDir, opts.auditDir)
 	const now = opts.now ?? (() => new Date())
 
 	// the daemon's own lock: refuse while anything holds it (a running daemon, another repair), keep it until the log is cut
@@ -122,8 +200,10 @@ export function repairMidCorruption(opts: { stateDir: string; auditDir: string; 
 
 function repairLocked(opts: { stateDir: string; auditDir: string; runId: string; approval: string; dryRun?: boolean; hooks?: RepairHooks }, now: () => Date): RepairResult {
 	let mid: WalMidCorruptionError
+	// R1: start the scan where the snapshot ends; a manifest that cannot be read refuses before any log byte is looked at
+	const snap = readSnapshotWalSeq(opts.stateDir)
 	try {
-		scanWal(opts.stateDir, { afterSeq: 0, onEvent: () => undefined, repair: false })
+		scanWal(opts.stateDir, { afterSeq: snap.walSeq, onEvent: () => undefined, repair: false })
 		return { status: 'nothing-to-repair', detail: 'the log scans cleanly or ends in an ordinary torn tail (scanWal repairs that itself)' }
 	} catch (e) {
 		if (!(e instanceof WalMidCorruptionError)) throw e
@@ -138,6 +218,7 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 	}
 	const seqs = frames.map((f) => f.seq)
 	const tailSha = createHash('sha256').update(tail).digest('hex')
+	const segmentSha = createHash('sha256').update(buf).digest('hex')
 	const tailName = `wal-midcorruption-${opts.runId}.tail.bin`
 	const audit: RepairAudit = {
 		runId: opts.runId,
@@ -147,6 +228,11 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 		segmentFile: path.basename(mid.file),
 		badOffset: mid.badOffset,
 		reason: mid.reason,
+		snapshotWalSeq: snap.walSeq,
+		manifestVersion: snap.version,
+		manifestSha256: snap.manifestSha256,
+		segmentBytesBefore: buf.length,
+		segmentSha256Before: segmentSha,
 		bytesCut: tail.length,
 		validFramesDropped: frames.length,
 		frames,
@@ -188,6 +274,12 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 		fs.closeSync(dfd)
 	}
 	opts.hooks?.beforeTruncate?.()
+	// R4: the audit directory is checked again now that it exists; R2: the segment must still be exactly what was scanned and audited
+	assertAuditDirOutside(opts.stateDir, opts.auditDir)
+	const now2 = fs.readFileSync(mid.file)
+	if (now2.length !== buf.length || !now2.equals(buf)) {
+		throw new Error('labWalRepair: the segment changed after it was scanned (another writer?); nothing was cut. The audit files remain; run again with a new run id')
+	}
 	const sfd = fs.openSync(mid.file, 'r+')
 	try {
 		fs.ftruncateSync(sfd, mid.badOffset)
@@ -198,20 +290,40 @@ function repairLocked(opts: { stateDir: string; auditDir: string; runId: string;
 	return { status: 'repaired', audit, auditFile }
 }
 
-function arg(name: string): string | undefined {
-	const i = process.argv.indexOf(name)
-	return i >= 0 ? process.argv[i + 1] : undefined
+const CLI_VALUE_FLAGS = ['--state-dir', '--audit-dir', '--run-id', '--approval']
+const CLI_BOOL_FLAGS = ['--dry-run']
+
+/** Strict argument parsing (R5): a value flag needs a value that does not start with `--`, no repeats, no unknown flags. */
+export function parseCliArgs(argv: string[]): { values: Record<string, string>; dryRun: boolean } {
+	const values: Record<string, string> = {}
+	let dryRun = false
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i]!
+		if (CLI_BOOL_FLAGS.includes(a)) {
+			dryRun = true
+		} else if (CLI_VALUE_FLAGS.includes(a)) {
+			const v = argv[i + 1]
+			if (v === undefined || v.startsWith('--')) throw new Error(`labWalRepair: ${a} needs a value (got ${v === undefined ? 'nothing' : `"${v}"`})`)
+			if (a in values) throw new Error(`labWalRepair: ${a} given twice`)
+			values[a] = v
+			i++
+		} else {
+			throw new Error(`labWalRepair: unknown argument "${a}"`)
+		}
+	}
+	return { values, dryRun }
 }
 
 if (require.main === module) {
 	// Arguments only: no environment variable is read, so no standing setting can enable this.
 	try {
+		const { values, dryRun } = parseCliArgs(process.argv.slice(2))
 		const r = repairMidCorruption({
-			stateDir: arg('--state-dir') ?? '',
-			auditDir: arg('--audit-dir') ?? '',
-			runId: arg('--run-id') ?? '',
-			approval: arg('--approval') ?? '',
-			dryRun: process.argv.includes('--dry-run'),
+			stateDir: values['--state-dir'] ?? '',
+			auditDir: values['--audit-dir'] ?? '',
+			runId: values['--run-id'] ?? '',
+			approval: values['--approval'] ?? '',
+			dryRun,
 		})
 		process.stdout.write(JSON.stringify(r, null, 2) + '\n')
 		process.exit(0)

@@ -11,11 +11,30 @@
  * Iteration order is the insertion order of an ordinary Map in every state: frozen order (minus tombstones and keys that were deleted and re-added), then delta order.
  * That matters for the consumed set: prune takes the OLDEST keys first (labConsumedPrune.ts), so the order must survive freeze, merge and recovery (errata W4).
  *
+ * Rules the daemon wiring must keep (independent review L1-L4):
+ *  - VALUES ARE IMMUTABLE. The freeze is shallow: a value changed in place after freeze() would leak into the snapshot being written. Update by replacing the value
+ *    (delete, then set), never by mutating it. set() on an existing frozen key with a different value throws; the wiring tests run pending and exited values through
+ *    Object.freeze. Scalars and the in-flight record are NOT kept in a LayeredMap: they are small, copied at freeze time and carried by the log.
+ *  - freeze() returns a handle with a generation token. merge(token) and abort(token) check it; the writer checks handle.isValid() on every slice and stops when the
+ *    snapshot was merged or aborted under it, so it can never read a half-merged map.
+ *  - HistoryBlockCounts.ahead() sums ~125k blocks (about 0.7 ms): once per tick, never per key.
+ *
  * Node built-ins only.
  */
 
+/** What freeze() returns: the read-only map for the writer plus a token that merge/abort must present. */
+export type FreezeHandle<K, V> = {
+	token: number
+	view: ReadonlyMap<K, V>
+	/** True until the snapshot is merged or aborted (or another freeze replaced it). The writer checks this on every slice. */
+	isValid(): boolean
+	/** Iterate the frozen entries; throws if the snapshot was merged/aborted while iterating. */
+	entries(): IterableIterator<[K, V]>
+}
+
 /** A Map-like store with an optional snapshot overlay. */
 export class LayeredMap<K, V> {
+	private gen = 0
 	private base: Map<K, V>
 	private frozen: Map<K, V> | null = null
 	private delta = new Map<K, V>()
@@ -51,7 +70,9 @@ export class LayeredMap<K, V> {
 
 	/**
 	 * Set a key. Without a snapshot this is Map.set (an existing key keeps its position). With a snapshot in flight a new key goes to delta; an existing
-	 * frozen key with the same value is a no-op; with a different value it is moved to the end (tombstone + delta), because frozen is never mutated.
+	 * frozen key with the SAME value (===) is a no-op; with a DIFFERENT value (any other object counts as different) it THROWS (review L1): a plain Map would keep the
+	 * key's position while the overlay would move it, so the layered map refuses the operation instead of silently ordering differently. Callers check has() first
+	 * and replace a value with delete + set.
 	 */
 	set(k: K, v: V): this {
 		if (this.frozen === null) {
@@ -64,7 +85,7 @@ export class LayeredMap<K, V> {
 		}
 		if (this.frozen.has(k) && !this.tombs.has(k)) {
 			if (this.frozen.get(k) === v) return this
-			this.tombs.add(k)
+			throw new Error('LayeredMap: set() of an existing key with a different value while a snapshot is in flight; values are immutable, delete the key first')
 		}
 		this.delta.set(k, v)
 		return this
@@ -116,12 +137,28 @@ export class LayeredMap<K, V> {
 	 * Start a snapshot: the live base becomes read-only `frozen` and is returned for the writer; a fresh overlay takes the writes.
 	 * Only one snapshot may be in flight (the caller skips and alerts otherwise); freezing twice throws.
 	 */
-	freeze(): ReadonlyMap<K, V> {
+	freeze(): FreezeHandle<K, V> {
 		if (this.frozen !== null) throw new Error('LayeredMap: a snapshot is already in flight')
 		this.frozen = this.base
 		this.delta = new Map()
 		this.tombs = new Set()
-		return this.frozen
+		const token = ++this.gen
+		const view = this.frozen
+		const self = this
+		return {
+			token,
+			view,
+			isValid: () => self.frozen === view && self.gen === token,
+			*entries() {
+				const it = view.entries()
+				for (;;) {
+					if (!(self.frozen === view && self.gen === token)) throw new Error('LayeredMap: the snapshot was merged or aborted while the writer was still reading it')
+					const n = it.next()
+					if (n.done) return
+					yield n.value
+				}
+			},
+		}
 	}
 
 	/** The frozen map while a snapshot is in flight (what the writer reads), else null. */
@@ -139,8 +176,9 @@ export class LayeredMap<K, V> {
 	 * `extraDeletes` are keys decided at snapshot time (the planned prune of the consumed set); they are applied with the tombstones.
 	 * Synchronous and O(overlay + extraDeletes).
 	 */
-	merge(extraDeletes: Iterable<K> = []): void {
+	merge(token: number, extraDeletes: Iterable<K> = []): void {
 		if (this.frozen === null) throw new Error('LayeredMap: no snapshot in flight')
+		if (token !== this.gen) throw new Error('LayeredMap: stale snapshot token')
 		const f = this.frozen
 		for (const k of this.tombs) f.delete(k)
 		for (const k of extraDeletes) {
@@ -158,8 +196,8 @@ export class LayeredMap<K, V> {
 	}
 
 	/** Abandon the snapshot without writing it (the writer failed): same result as merge with no extra deletes. */
-	abort(): void {
-		this.merge([])
+	abort(token: number): void {
+		this.merge(token, [])
 	}
 }
 
@@ -191,7 +229,7 @@ export class LayeredSet<K> {
 	[Symbol.iterator](): IterableIterator<K> {
 		return this.m.keys()
 	}
-	freeze(): ReadonlyMap<K, true> {
+	freeze(): FreezeHandle<K, true> {
 		return this.m.freeze()
 	}
 	frozenView(): ReadonlyMap<K, true> | null {
@@ -200,11 +238,11 @@ export class LayeredSet<K> {
 	overlaySize(): { delta: number; tombstones: number } {
 		return this.m.overlaySize()
 	}
-	merge(extraDeletes: Iterable<K> = []): void {
-		this.m.merge(extraDeletes)
+	merge(token: number, extraDeletes: Iterable<K> = []): void {
+		this.m.merge(token, extraDeletes)
 	}
-	abort(): void {
-		this.m.abort()
+	abort(token: number): void {
+		this.m.abort(token)
 	}
 }
 
@@ -216,32 +254,42 @@ export class LayeredSet<K> {
 export class HistoryBlockCounts {
 	private readonly counts = new Map<number, number>()
 	private total = 0
+	/** Removals of a block that had no count, plus reconcile mismatches: any non-zero value means the incremental state had drifted (review L4). */
+	driftEvents = 0
+
+	constructor(private readonly onDrift?: (what: string) => void) {}
 
 	add(blockNumber: number): void {
 		this.counts.set(blockNumber, (this.counts.get(blockNumber) ?? 0) + 1)
 		this.total++
 	}
 
-	remove(blockNumber: number): void {
+	remove(blockNumber: number): boolean {
 		const n = this.counts.get(blockNumber)
-		if (n === undefined) return
+		if (n === undefined) {
+			// the pool lost an entry the counts never saw: drift, reported at once, never silent
+			this.driftEvents++
+			this.onDrift?.(`remove of block ${blockNumber} with no count`)
+			return false
+		}
 		if (n <= 1) this.counts.delete(blockNumber)
 		else this.counts.set(blockNumber, n - 1)
 		this.total--
+		return true
 	}
 
 	get histTotal(): number {
 		return this.total
 	}
 
-	/** Entries in blocks strictly above the cursor. */
+	/** Entries in blocks strictly above the cursor. About 0.7 ms for 125k blocks: call it once per tick, never per key. */
 	ahead(cursor: number): number {
 		let a = 0
 		for (const [b, n] of this.counts) if (b > cursor) a += n
 		return a
 	}
 
-	/** Rebuild from the pool (full pass) and report whether the incremental state had drifted. */
+	/** Rebuild from the pool (full pass) and report whether the incremental state had drifted. The input must iterate the LIVE view (frozen + delta - tombstones). */
 	reconcile(poolHistoryBlocks: Iterable<number>): { drifted: boolean; histTotal: number } {
 		const fresh = new Map<number, number>()
 		let total = 0
@@ -251,6 +299,10 @@ export class HistoryBlockCounts {
 		}
 		let drifted = total !== this.total || fresh.size !== this.counts.size
 		if (!drifted) for (const [b, n] of fresh) if (this.counts.get(b) !== n) { drifted = true; break }
+		if (drifted) {
+			this.driftEvents++
+			this.onDrift?.('reconcile mismatch')
+		}
 		this.counts.clear()
 		for (const [b, n] of fresh) this.counts.set(b, n)
 		this.total = total
