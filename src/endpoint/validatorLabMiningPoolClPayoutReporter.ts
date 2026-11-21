@@ -85,6 +85,7 @@ import {
 import { planPrune, consumedArchiveDir, appendConsumedArchive } from './labConsumedPrune'
 import { resolvePendingHighWater, decideLinePauses } from './labBackpressure'
 import { partitionByGuardianBeneficiary } from './labFlushGuardian'
+import { mapWithConcurrency, resolveReadConcurrency, settle } from './labParallel'
 import {
 	inspectSegmentedDir,
 	legacyStateFileExists,
@@ -898,11 +899,16 @@ export async function collectLabSkimEntriesForBlock(
 	state: LabClPayoutState,
 	pending: Map<string, SkimEntry>,
 	counters: LabScanCounters = newLabScanCounters(),
-	depsOverride?: Partial<LabScanDeps>
+	depsOverride?: Partial<LabScanDeps>,
+	concurrency: number = resolveReadConcurrency()
 ): Promise<SkimEntry[]> {
 	const deps: LabScanDeps = { ...defaultLabScanDeps(readContract), ...depsOverride }
 	const floorWei = deps.exitFloorWei()
-	const entries: SkimEntry[] = []
+
+	// Phase A (no reads): classify what needs no read, in block order.
+	type Candidate = { eventKey: string; amountWei: bigint; validatorIndex: number; withdrawalIndex: number }
+	type Item = { kind: 'invalid' } | { kind: 'local' } | { kind: 'candidate'; c: Candidate }
+	const items: Item[] = []
 	for (const w of block.withdrawals ?? []) {
 		const addr = String(w.address ?? '').toLowerCase()
 		if (addr !== proxyLower) continue
@@ -911,71 +917,82 @@ export async function collectLabSkimEntriesForBlock(
 		const amountWei = amountGwei * 1_000_000_000n
 		const validatorIndex = Number(w.validatorIndex)
 		const withdrawalIndex = Number(w.index)
-		counters.proxyWithdrawals++
-		if (!Number.isFinite(validatorIndex) || validatorIndex < 0) {
-			counters.invalid++
+		if (!Number.isFinite(validatorIndex) || validatorIndex < 0 || !Number.isFinite(withdrawalIndex) || withdrawalIndex < 0) {
+			items.push({ kind: 'invalid' })
 			continue
 		}
-		if (!Number.isFinite(withdrawalIndex) || withdrawalIndex < 0) {
-			counters.invalid++
-			continue
-		}
-
 		const eventKey = withdrawalEventKey(blockNumber, withdrawalIndex)
-		if (state.consumedEventKeys[eventKey]) {
-			counters.localHit++
+		if (state.consumedEventKeys[eventKey] || pending.has(eventKey.toLowerCase())) {
+			items.push({ kind: 'local' })
 			continue
 		}
-		if (pending.has(eventKey.toLowerCase())) {
-			counters.localHit++
-			continue
-		}
+		items.push({ kind: 'candidate', c: { eventKey, amountWei, validatorIndex, withdrawalIndex } })
+	}
+	const cands = items.flatMap((it) => (it.kind === 'candidate' ? [it.c] : []))
 
-		// P1: whose withdrawal is this? Only a Lab pubkey is ever read against the chain or recorded.
-		let pubkey: string | null
-		let status: string | null
-		try {
-			const fetched = await deps.fetchValidator(validatorIndex)
-			pubkey = fetched.pubkey
-			status = fetched.status
-		} catch (err: unknown) {
-			throw new PaidKeyViewUnconfirmed(
-				eventKey,
-				err instanceof Error ? err.message : String(err)
-			)
+	// Phase B (reads, bounded parallel, results kept per candidate; a failed read is decided at its own turn in phase C).
+	const fetched = await mapWithConcurrency(cands, concurrency, (c) => settle(deps.fetchValidator(c.validatorIndex)))
+	const isLab = (i: number): string | null => {
+		const f = fetched[i]!
+		return f.ok && f.value.pubkey && deps.isLabPubkey(f.value.pubkey) ? f.value.pubkey : null
+	}
+	const chain = await mapWithConcurrency(cands, concurrency, (c, i) => (isLab(i) ? settle(deps.chainConsumed(c.eventKey)) : Promise.resolve(null)))
+	const needsGuardian = (i: number): string | null => {
+		const pubkey = isLab(i)
+		const ch = chain[i]
+		const f = fetched[i]
+		if (!pubkey || !ch || !ch.ok || ch.value || !f || !f.ok) return null
+		if (isNonSkimWithdrawal(cands[i]!.amountWei, floorWei)) return null
+		if (f.value.status !== LAB_SKIM_ELIGIBLE_STATUS) return null
+		return pubkey
+	}
+	const guardian = await mapWithConcurrency(cands, concurrency, (_c, i) => {
+		const pubkey = needsGuardian(i)
+		return pubkey ? settle(deps.guardianBeneficiary(ethers.keccak256(pubkey))) : Promise.resolve(null)
+	})
+	const unconfirmed = (eventKey: string, error: unknown): PaidKeyViewUnconfirmed =>
+		new PaidKeyViewUnconfirmed(eventKey, error instanceof Error ? error.message : String(error))
+
+	// Phase C: decide in block order with the exact rules and side effects of the sequential code.
+	const entries: SkimEntry[] = []
+	let ci = 0
+	for (const it of items) {
+		counters.proxyWithdrawals++
+		if (it.kind === 'invalid') {
+			counters.invalid++
+			continue
 		}
+		if (it.kind === 'local') {
+			counters.localHit++
+			continue
+		}
+		const i = ci++
+		const c = it.c
+		const f = fetched[i]!
+		if (!f.ok) throw unconfirmed(c.eventKey, f.error)
+		const { pubkey, status } = f.value
 		if (!pubkey || !deps.isLabPubkey(pubkey)) {
 			counters.nonLab++
 			continue
 		}
-
-		// Still before anything can reach the pending pool: a key another path already settled on chain is never paid here.
-		try {
-			const consumedOnChain = await deps.chainConsumed(eventKey)
-			if (consumedOnChain) {
-				state.consumedEventKeys[eventKey] = true
-				counters.labChainConsumed++
-				continue
-			}
-		} catch (err: unknown) {
-			throw new PaidKeyViewUnconfirmed(
-				eventKey,
-				err instanceof Error ? err.message : String(err)
-			)
+		const ch = chain[i]!
+		if (!ch.ok) throw unconfirmed(c.eventKey, ch.error)
+		if (ch.value) {
+			state.consumedEventKeys[c.eventKey] = true
+			counters.labChainConsumed++
+			continue
 		}
-
-		if (isNonSkimWithdrawal(amountWei, floorWei)) {
+		if (isNonSkimWithdrawal(c.amountWei, floorWei)) {
 			markLabValidatorExited(state, pubkey)
-			state.consumedEventKeys[eventKey] = true
+			state.consumedEventKeys[c.eventKey] = true
 			counters.nonSkim++
 			logger(
 				Colors.yellow(
-					`[labMiningPoolClPayout] non-skim inflow (≥exit floor) block=${blockNumber} validator=${pubkey.slice(0, 14)}… amount=${ethers.formatEther(amountWei)} CNET status=${status ?? '?'}`
+					`[labMiningPoolClPayout] non-skim inflow (≥exit floor) block=${blockNumber} validator=${pubkey.slice(0, 14)}… amount=${ethers.formatEther(c.amountWei)} CNET status=${status ?? '?'}`
 				)
 			)
 			continue
 		}
-
 		if (status !== LAB_SKIM_ELIGIBLE_STATUS) {
 			markLabValidatorExited(state, pubkey)
 			counters.nonActive++
@@ -986,23 +1003,14 @@ export async function collectLabSkimEntriesForBlock(
 			)
 			continue
 		}
-
-		try {
-			const pkHash = ethers.keccak256(pubkey)
-			const beneficiary = await deps.guardianBeneficiary(pkHash)
-			// Active redeem guardian (beneficiary set) → validatorClRewardPayoutReporter on redeem listener host.
-			if (beneficiary !== ethers.ZeroAddress) {
-				counters.guardianBeneficiary++
-				continue
-			}
-		} catch (err: unknown) {
-			throw new PaidKeyViewUnconfirmed(
-				eventKey,
-				err instanceof Error ? err.message : String(err)
-			)
+		const g = guardian[i]!
+		if (!g.ok) throw unconfirmed(c.eventKey, g.error)
+		// Active redeem guardian (beneficiary set) → validatorClRewardPayoutReporter on redeem listener host.
+		if (g.value !== ethers.ZeroAddress) {
+			counters.guardianBeneficiary++
+			continue
 		}
-
-		entries.push({ eventKey, amount: amountWei, blockNumber, withdrawalIndex, pubkey })
+		entries.push({ eventKey: c.eventKey, amount: c.amountWei, blockNumber, withdrawalIndex: c.withdrawalIndex, pubkey })
 	}
 	return entries
 }
@@ -1205,24 +1213,28 @@ async function flushPendingLabBatches(
 	let live: SkimEntry[] = []
 	let droppedConsumed = 0
 	let unconfirmed = 0
-	for (const e of ordered) {
-		try {
-			const consumed = Boolean(await readContract.consumedRewardEventKey!(e.eventKey))
-			if (consumed) {
-				state.consumedEventKeys[e.eventKey] = true
-				pending.delete(e.eventKey)
-				droppedConsumed++
-				continue
-			}
-		} catch (err: unknown) {
+	// The paid-key reads are independent; they run with bounded parallelism and are applied in the original order.
+	const paidKeyReads = await mapWithConcurrency(ordered, resolveReadConcurrency(), (e) =>
+		settle((async () => Boolean(await readContract.consumedRewardEventKey!(e.eventKey)))())
+	)
+	for (let i = 0; i < ordered.length; i++) {
+		const e = ordered[i]!
+		const r = paidKeyReads[i]!
+		if (!r.ok) {
 			unconfirmed++
 			logger(
 				Colors.yellow(
 					`[labMiningPoolClPayout] flush paid-key view unconfirmed eventKey=${e.eventKey} ${
-						err instanceof Error ? err.message : String(err)
+						r.error instanceof Error ? r.error.message : String(r.error)
 					}; left pending, not signed`
 				)
 			)
+			continue
+		}
+		if (r.value) {
+			state.consumedEventKeys[e.eventKey] = true
+			pending.delete(e.eventKey)
+			droppedConsumed++
 			continue
 		}
 		live.push(e)
@@ -1377,8 +1389,11 @@ async function processBlockRange(
 	const proxyLower = redeemAddr.toLowerCase()
 	let okThrough: number | null = null
 	let added = 0
+	// The next block is requested while the current one is classified (fetchBlockWithWithdrawals never rejects).
+	let nextBlock: Promise<RpcBlock | null> | null = fromBlock <= toBlock ? fetchBlockWithWithdrawals(provider, fromBlock) : null
 	for (let bn = fromBlock; bn <= toBlock; bn++) {
-		const block = await fetchBlockWithWithdrawals(provider, bn)
+		const block = await nextBlock
+		nextBlock = bn + 1 <= toBlock ? fetchBlockWithWithdrawals(provider, bn + 1) : null
 		if (!block) {
 			return { okThrough, added, fetchFailed: true, unconfirmed: false }
 		}
