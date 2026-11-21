@@ -160,7 +160,7 @@ export function realpathOrAncestor(p: string): string {
 }
 
 /** The audit directory must not be (or be reached through a symlink into) the state directory, and must not itself be a symlink. */
-function assertAuditDirOutside(stateDir: string, auditDir: string): void {
+export function assertAuditDirOutside(stateDir: string, auditDir: string): void {
 	let st: fs.Stats | null = null
 	try {
 		st = fs.lstatSync(auditDir)
@@ -371,14 +371,14 @@ const CLI_VALUE_FLAGS = ['--state-dir', '--audit-dir', '--run-id', '--approval']
 const CLI_BOOL_FLAGS = ['--dry-run']
 
 /** Strict argument parsing (R5): a value flag needs a value that does not start with `--`, no repeats, no unknown flags. */
-export function parseCliArgs(argv: string[]): { values: Record<string, string>; dryRun: boolean } {
+export function parseCliArgs(argv: string[], extraValueFlags: readonly string[] = []): { values: Record<string, string>; dryRun: boolean } {
 	const values: Record<string, string> = {}
 	let dryRun = false
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i]!
 		if (CLI_BOOL_FLAGS.includes(a)) {
 			dryRun = true
-		} else if (CLI_VALUE_FLAGS.includes(a)) {
+		} else if (CLI_VALUE_FLAGS.includes(a) || extraValueFlags.includes(a)) {
 			const v = argv[i + 1]
 			if (v === undefined || v.startsWith('--')) throw new Error(`labWalRepair: ${a} needs a value (got ${v === undefined ? 'nothing' : `"${v}"`})`)
 			if (a in values) throw new Error(`labWalRepair: ${a} given twice`)

@@ -1,0 +1,401 @@
+/**
+ * The offline, audited "book these keys as paid" command (runbook G-1). Local temp dirs only.
+ */
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { test } from 'node:test'
+import { acquireStateDirLock } from './labClPayoutStateLock'
+import { LabPayoutStateCore } from './labPayoutStateCore'
+import { recoverPayoutState } from './labPayoutRecovery'
+import { view } from './labPayoutTestSupport'
+import { writeSnapshotCooperative } from './labSnapshotWriter'
+import { WAL_DIR, WalWriter, applyOps, listSegments, segmentFileName, type WalOp } from './labWal'
+import { MAX_RECONCILE_KEYS, parseKeysFile, reconcileKeys } from './labWalReconcile'
+import { repairMidCorruption } from './labWalRepair'
+
+const hex = (n: number): string => `0x${n.toString(16).padStart(64, '0')}`
+const K = [hex(0xa1), hex(0xa2), hex(0xa3)]
+const tx = (n: number): string => hex(0xf00 + n)
+const RUN = 'run-20261121-rec1'
+const APPROVAL = 'PM-2026-11-21-02'
+const fatal = (e: Error): void => {
+	throw e
+}
+
+type World = { root: string; stateDir: string; auditDir: string; keysFile: string }
+
+/** A WAL-mode state dir: snapshot at seq 0 (freezeH 500), then the given events through the core and the log. Returns after the writer is closed. */
+async function world(events: { t: string; ops: WalOp[] }[], scalars: Record<string, unknown> = {}): Promise<World> {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'labreconcile-'))
+	const stateDir = path.join(root, 'state.v2')
+	const core = new LabPayoutStateCore({ scalars: { freezeH: { height: 500 }, ...scalars } })
+	const src = core.freezeForSnapshot()
+	const res = await writeSnapshotCooperative(src, { dir: stateDir, mode: 'wal' })
+	core.finishSnapshot(src, { committed: true, prunedKeys: [], frozenHistCounts: res.frozenHistCounts })
+	const wal = new WalWriter({ stateDir, lastSeq: 0, segmentBytes: 100000, onFatal: fatal })
+	const ps: Promise<void>[] = []
+	for (const e of events) ps.push(core.record(wal, e.t, e.ops).durable)
+	await Promise.all(ps)
+	await wal.close()
+	const keysFile = path.join(root, 'keys.json')
+	return { root, stateDir, auditDir: path.join(root, 'audit'), keysFile }
+}
+const done = (w: World): void => fs.rmSync(w.root, { recursive: true, force: true })
+
+const ADD3: { t: string; ops: WalOp[] } = {
+	t: 'scan',
+	ops: [
+		{ op: 'pendingAdd', entry: { eventKey: K[0]!, blockNumber: 100, withdrawalIndex: 0, amountWei: '1000' } },
+		{ op: 'pendingAdd', entry: { eventKey: K[1]!, blockNumber: 120, withdrawalIndex: 1, amountWei: '2000' } },
+		{ op: 'pendingAdd', entry: { eventKey: K[2]!, blockNumber: 700, withdrawalIndex: 0, amountWei: '3000' } },
+		{ op: 'scalarsSet', patch: { historyCursor: 200 } },
+	],
+}
+const writeKeys = (w: World, list: object[]): void => fs.writeFileSync(w.keysFile, JSON.stringify(list, null, 2))
+const entryFor = (k: string, i: number): object => ({ eventKey: k, txHash: tx(i), blockNumber: 9000 + i, amountWei: String(1000 * (i + 1)) })
+const args = (w: World, over: Partial<Parameters<typeof reconcileKeys>[0]> = {}): Parameters<typeof reconcileKeys>[0] => ({ stateDir: w.stateDir, auditDir: w.auditDir, runId: RUN, approval: APPROVAL, keysFile: w.keysFile, ...over })
+const walFiles = (w: World): string[] => listSegments(path.join(w.stateDir, WAL_DIR)).map((s) => s.file)
+
+test('dry-run prints the audit (classification, the single event, the derived maxPaidHistoryBlock) and changes nothing: no lock, no files, no event', async () => {
+	const w = await world([ADD3])
+	try {
+		writeKeys(w, [entryFor(K[0]!, 0), entryFor(K[1]!, 1)])
+		const before = walFiles(w)
+		const held = acquireStateDirLock(w.stateDir) // a dry run does not need the lock
+		try {
+			const r = await reconcileKeys(args(w, { dryRun: true }))
+			assert.equal(r.status, 'dry-run')
+			if (r.status !== 'dry-run') return
+			assert.equal(r.audit.eventSeq, 2)
+			assert.equal(r.audit.lastSeqBefore, 1)
+			assert.deepEqual(r.audit.counts, { wasPending: 2, alreadyConsumed: 0, neither: 0 })
+			assert.equal(r.audit.maxPaidHistoryBlock, 120)
+			assert.equal(r.audit.historyCursor, 200)
+			assert.equal(r.audit.maxPaidAboveCursor, false)
+			assert.equal(r.audit.ops, 5)
+			assert.equal(r.audit.approvalVerified, false)
+			assert.equal(r.audit.copyFile, null)
+		} finally {
+			held.release()
+		}
+		assert.deepEqual(walFiles(w), before)
+		assert.equal(fs.existsSync(w.auditDir), false)
+	} finally {
+		done(w)
+	}
+})
+
+test('append: one manual-reconcile event; after recovery the keys are consumed and no longer pending (so they cannot be claimed again), the others are untouched, the audit and the verbatim keys copy exist, the .done record names the event', async () => {
+	const w = await world([ADD3])
+	try {
+		writeKeys(w, [entryFor(K[0]!, 0), entryFor(K[1]!, 1)])
+		const before = recoverPayoutState(w.stateDir, { readOnly: true }).core
+		assert.equal(before.pendingHas(K[0]!), true)
+		const r = await reconcileKeys(args(w))
+		assert.equal(r.status, 'appended')
+		if (r.status !== 'appended') return
+		assert.equal(r.eventSeq, 2)
+		const rec = recoverPayoutState(w.stateDir)
+		assert.equal(rec.core.lastAppliedSeq, 2)
+		assert.equal(rec.replayed, 2)
+		for (const k of [K[0]!, K[1]!]) {
+			assert.equal(rec.core.consumedHas(k), true, 'consumed after the restart')
+			assert.equal(rec.core.pendingHas(k), false, 'no longer pending: it cannot be selected for payment')
+		}
+		assert.equal(rec.core.pendingHas(K[2]!), true)
+		assert.equal(rec.core.consumedHas(K[2]!), false)
+		assert.equal(rec.core.getScalar('maxPaidHistoryBlock'), 120)
+		assert.equal(rec.core.getScalar('historyCursor'), 200)
+		assert.equal(rec.core.histTotal, 0, 'the history count follows: k1/k2 gone; k3 (block 700) is realtime')
+		assert.deepEqual(rec.warnings, [])
+		// audit files
+		const a = JSON.parse(fs.readFileSync(r.auditFile, 'utf8'))
+		assert.equal(a.runId, RUN)
+		assert.equal(a.keyCount, 2)
+		assert.equal(a.keys[0].txHash, tx(0))
+		assert.deepEqual(fs.readFileSync(path.join(w.auditDir, `wal-reconcile-${RUN}.keys.json`)), fs.readFileSync(w.keysFile), 'verbatim copy of the input')
+		assert.equal(a.keysFileSha256, createHash('sha256').update(fs.readFileSync(w.keysFile)).digest('hex'))
+		const d = JSON.parse(fs.readFileSync(r.doneFile, 'utf8'))
+		assert.equal(d.eventSeq, 2)
+		assert.equal(d.segmentFile, segmentFileName(2))
+		assert.equal(d.segmentSha256, createHash('sha256').update(fs.readFileSync(path.join(w.stateDir, WAL_DIR, d.segmentFile))).digest('hex'))
+		// the original segment was not touched: events 1 is still in wal-1
+		assert.deepEqual(walFiles(w), [segmentFileName(1), segmentFileName(2)])
+	} finally {
+		done(w)
+	}
+})
+
+test('replay is idempotent: recovering twice, applying the event again, and applying its ops again leave the state unchanged', async () => {
+	const w = await world([ADD3])
+	try {
+		writeKeys(w, [entryFor(K[0]!, 0), entryFor(K[1]!, 1)])
+		await reconcileKeys(args(w))
+		const a = recoverPayoutState(w.stateDir, { readOnly: true })
+		const b = recoverPayoutState(w.stateDir, { readOnly: true })
+		assert.equal(view(a.core), view(b.core))
+		const snap = view(a.core)
+		a.core.applyEvent({ v: 1, seq: 2, ts: 't', t: 'manual-reconcile', ops: [{ op: 'consumedAdd', key: K[0]! }, { op: 'pendingDel', key: K[0]! }] }) // seq <= applied: skipped
+		assert.equal(view(a.core), snap)
+		applyOps(a.core, [{ op: 'consumedAdd', key: K[0]! }, { op: 'pendingDel', key: K[0]! }, { op: 'consumedAdd', key: K[1]! }, { op: 'pendingDel', key: K[1]! }, { op: 'scalarsSet', patch: { maxPaidHistoryBlock: 120 } }])
+		assert.equal(view(a.core), snap)
+	} finally {
+		done(w)
+	}
+})
+
+test('the state-directory lock: refused while held (nothing appended, no audit written); released afterwards', async () => {
+	const w = await world([ADD3])
+	try {
+		writeKeys(w, [entryFor(K[0]!, 0)])
+		const before = walFiles(w)
+		const held = acquireStateDirLock(w.stateDir)
+		try {
+			await assert.rejects(reconcileKeys(args(w)), /cannot take the state directory lock.*stop the daemon first.*Nothing was changed/s)
+		} finally {
+			held.release()
+		}
+		assert.deepEqual(walFiles(w), before)
+		assert.equal(fs.existsSync(w.auditDir), false)
+		const r = await reconcileKeys(args(w))
+		assert.equal(r.status, 'appended')
+		acquireStateDirLock(w.stateDir).release() // the command released its own lock
+	} finally {
+		done(w)
+	}
+})
+
+test('an audit write failure appends nothing; a crash between the audit and the append leaves the log unchanged and burns the run id; a repeated run id is refused before anything is appended', async () => {
+	const w = await world([ADD3])
+	try {
+		writeKeys(w, [entryFor(K[0]!, 0)])
+		const before = walFiles(w)
+		// 1. the audit directory cannot be written
+		fs.mkdirSync(w.auditDir, { mode: 0o500 })
+		await assert.rejects(reconcileKeys(args(w)), /EACCES|EPERM/)
+		fs.chmodSync(w.auditDir, 0o700)
+		assert.deepEqual(walFiles(w), before, 'no event appended after a failed audit write')
+		assert.deepEqual(fs.readdirSync(w.auditDir), [])
+		// 2. a crash after the audit files are durable and before the append
+		await assert.rejects(
+			reconcileKeys(args(w, { hooks: { beforeAppend: () => { throw new Error('crash before the append') } } })),
+			/crash before the append/
+		)
+		assert.deepEqual(walFiles(w), before)
+		assert.ok(fs.existsSync(path.join(w.auditDir, `wal-reconcile-${RUN}.json`)), 'the audit stays as evidence of the attempt')
+		// 3. the same run id again: refused, still nothing appended
+		await assert.rejects(reconcileKeys(args(w)), /already used|EEXIST/)
+		assert.deepEqual(walFiles(w), before)
+		// a new run id works
+		const ok = await reconcileKeys(args(w, { runId: 'run-20261121-rec2' }))
+		assert.equal(ok.status, 'appended')
+		// and the first run id is still burned after a success elsewhere
+		await assert.rejects(reconcileKeys(args(w)), /already used|EEXIST/)
+		assert.equal(walFiles(w).length, 2)
+	} finally {
+		fs.chmodSync(w.auditDir, 0o700)
+		done(w)
+	}
+})
+
+test('a successful run id cannot be used twice: the second run appends no second event', async () => {
+	const w = await world([ADD3])
+	try {
+		writeKeys(w, [entryFor(K[0]!, 0)])
+		await reconcileKeys(args(w))
+		await assert.rejects(reconcileKeys(args(w)), /already used/)
+		assert.equal(recoverPayoutState(w.stateDir, { readOnly: true }).core.lastAppliedSeq, 2)
+	} finally {
+		done(w)
+	}
+})
+
+test('the keys file is validated before anything is touched: format, lower-case hex, evidence fields, no duplicates, unknown fields, size', async () => {
+	const w = await world([ADD3])
+	try {
+		const good = entryFor(K[0]!, 0) as Record<string, unknown>
+		const bad: [string, unknown, RegExp][] = [
+			['not an array', { a: 1 }, /non-empty JSON array/],
+			['empty', [], /non-empty JSON array/],
+			['upper-case key', [{ ...good, eventKey: K[0]!.toUpperCase().replace('0X', '0x') }], /LOWER-case/],
+			['short key', [{ ...good, eventKey: '0x12' }], /eventKey must be/],
+			['no tx hash', [{ ...good, txHash: undefined }], /txHash/],
+			['bad tx hash', [{ ...good, txHash: '0xabc' }], /txHash/],
+			['block 0', [{ ...good, blockNumber: 0 }], /blockNumber/],
+			['fractional block', [{ ...good, blockNumber: 1.5 }], /blockNumber/],
+			['amount 0', [{ ...good, amountWei: '0' }], /amountWei/],
+			['amount with a leading zero', [{ ...good, amountWei: '01' }], /amountWei/],
+			['negative amount', [{ ...good, amountWei: '-5' }], /amountWei/],
+			['numeric amount', [{ ...good, amountWei: 5 }], /amountWei/],
+			['unknown field', [{ ...good, extra: 1 }], /unknown field "extra"/],
+			['long note', [{ ...good, note: 'x'.repeat(501) }], /note/],
+			['duplicate key', [good, { ...good, txHash: tx(9) }], /duplicate eventKey/],
+			['not an object', [5], /not an object/],
+		]
+		for (const [name, list, re] of bad) {
+			fs.writeFileSync(w.keysFile, JSON.stringify(list))
+			await assert.rejects(reconcileKeys(args(w)), re, name)
+			assert.equal(fs.existsSync(w.auditDir), false, `${name}: nothing written`)
+		}
+		fs.writeFileSync(w.keysFile, '{not json')
+		await assert.rejects(reconcileKeys(args(w)), /not valid JSON/)
+		assert.throws(() => parseKeysFile(JSON.stringify(Array.from({ length: MAX_RECONCILE_KEYS + 1 }, (_, i) => entryFor(hex(0x10000 + i), i)))), /more than 20000 keys/)
+		assert.equal(parseKeysFile(JSON.stringify([good, { ...(entryFor(K[1]!, 1) as object), note: 'matched in tx ' + tx(1) }])).length, 2)
+		assert.equal(walFiles(w).length, 1)
+		// arguments
+		for (const [name, over, re] of [
+			['run id', { runId: 'short' }, /run id is required/],
+			['approval', { approval: '' }, /approval reference/],
+			['audit dir', { auditDir: '' }, /audit directory is required/],
+			['keys file', { keysFile: '' }, /keys file is required/],
+			['audit dir inside the state dir', { auditDir: join(w.stateDir, 'audit') }, /OUTSIDE the state directory/],
+		] as const) await assert.rejects(reconcileKeys(args(w, over)), re, name)
+	} finally {
+		done(w)
+	}
+})
+
+test('it refuses to append behind a torn tail or past mid-log damage (repair first) and changes nothing', async () => {
+	const w = await world([ADD3, { t: 'x', ops: [{ op: 'consumedAdd', key: 'later' }] }, { t: 'y', ops: [{ op: 'consumedAdd', key: 'later2' }] }])
+	try {
+		writeKeys(w, [entryFor(K[0]!, 0)])
+		const file = path.join(w.stateDir, WAL_DIR, segmentFileName(1))
+		const intact = fs.readFileSync(file)
+		// torn tail: half a frame appended
+		fs.writeFileSync(file, Buffer.concat([intact, Buffer.from([0x57, 0x4c, 0x20, 0, 0, 0, 1, 2])]))
+		const torn = fs.readFileSync(file)
+		await assert.rejects(reconcileKeys(args(w)), /torn tail/)
+		assert.deepEqual(fs.readFileSync(file), torn)
+		// mid-log damage
+		const dmg = Buffer.from(intact)
+		dmg[40] = dmg[40]! ^ 0x55
+		fs.writeFileSync(file, dmg)
+		await assert.rejects(reconcileKeys(args(w)), /damage in the middle/)
+		assert.deepEqual(fs.readFileSync(file), dmg)
+		assert.equal(fs.existsSync(w.auditDir), false)
+	} finally {
+		done(w)
+	}
+})
+
+test('G-1 end to end: the settle was lost in a damaged log - after the audited repair the paid keys are pending again (the re-pay hazard); after the reconcile they are consumed and not pending, and the rest of the pool is untouched', async () => {
+	const rec1 = { batchId: 'b1', idempotencyKey: 'lab-withdrawNative:abc', line: 'history', amountWei: '3000', eventKeys: [K[0], K[1]] }
+	const w = await world([
+		ADD3,
+		{ t: 'intent', ops: [{ op: 'inFlightSet', record: rec1 }] },
+		{ t: 'settle', ops: [{ op: 'consumedAdd', key: K[0]! }, { op: 'consumedAdd', key: K[1]! }, { op: 'pendingDel', key: K[0]! }, { op: 'pendingDel', key: K[1]! }, { op: 'inFlightSet', record: null }, { op: 'scalarsSet', patch: { maxPaidHistoryBlock: 120, settledBatchCount: 1 } }] },
+	])
+	try {
+		// damage frame 2 (the intent): frame 3 (the settle) is a valid frame behind it
+		const file = path.join(w.stateDir, WAL_DIR, segmentFileName(1))
+		const buf = fs.readFileSync(file)
+		let off = 0
+		const starts: number[] = []
+		for (let i = 0; i < 3; i++) {
+			starts.push(off)
+			off += 10 + buf.readUInt32LE(off + 2)
+		}
+		buf[starts[1]! + 12] = buf[starts[1]! + 12]! ^ 0x40
+		fs.writeFileSync(file, buf)
+		const rep = repairMidCorruption({ stateDir: w.stateDir, auditDir: path.join(w.root, 'repair-audit'), runId: 'run-20261121-rep1', approval: APPROVAL })
+		assert.equal(rep.status, 'repaired')
+		if (rep.status !== 'repaired') return
+		assert.equal(rep.audit.lostEventsAtLeast, 2, 'the undecodable intent and the settle are lost')
+		const hazard = recoverPayoutState(w.stateDir, { readOnly: true })
+		assert.equal(hazard.core.pendingHas(K[0]!), true, 'HAZARD: the paid key is pending again')
+		assert.equal(hazard.core.consumedHas(K[0]!), false)
+		// the human reconciled both keys against the signer record and the chain, and lists them with the evidence
+		writeKeys(w, [entryFor(K[0]!, 0), entryFor(K[1]!, 1)])
+		const r = await reconcileKeys(args(w))
+		assert.equal(r.status, 'appended')
+		if (r.status !== 'appended') return
+		assert.equal(r.eventSeq, 2, 'the event continues right after the last intact event (seq 1)')
+		const after = recoverPayoutState(w.stateDir)
+		assert.deepEqual(after.warnings, [])
+		for (const k of [K[0]!, K[1]!]) {
+			assert.equal(after.core.consumedHas(k), true)
+			assert.equal(after.core.pendingHas(k), false)
+		}
+		assert.equal(after.core.pendingHas(K[2]!), true)
+		assert.equal(after.core.getScalar('maxPaidHistoryBlock'), 120)
+		assert.equal(after.core.getInFlight(), null)
+	} finally {
+		done(w)
+	}
+})
+
+test('keys that belong to the current in-flight record are listed in the audit and the record is NOT touched; a derived maxPaidHistoryBlock above the cursor is flagged', async () => {
+	const rec1 = { batchId: 'b1', idempotencyKey: 'lab-withdrawNative:abc', line: 'history', amountWei: '3000', eventKeys: [K[0], K[1]] }
+	const w = await world([{ t: 'scan', ops: ADD3.ops.slice(0, 3).concat([{ op: 'scalarsSet', patch: { historyCursor: 110 } }]) }, { t: 'intent', ops: [{ op: 'inFlightSet', record: rec1 }] }])
+	try {
+		writeKeys(w, [entryFor(K[0]!, 0), entryFor(K[1]!, 1)])
+		const dry = await reconcileKeys(args(w, { dryRun: true }))
+		if (dry.status !== 'dry-run') throw new Error('expected a dry run')
+		assert.deepEqual(dry.audit.inFlightOverlap, [K[0], K[1]])
+		assert.equal(dry.audit.maxPaidHistoryBlock, 120)
+		assert.equal(dry.audit.historyCursor, 110)
+		assert.equal(dry.audit.maxPaidAboveCursor, true)
+		assert.match(dry.audit.note, /WARNING: the derived maxPaidHistoryBlock is above historyCursor/)
+		assert.match(dry.audit.note, /2 key\(s\) belong to the current in-flight record: the record is NOT touched/)
+		await reconcileKeys(args(w))
+		const rec = recoverPayoutState(w.stateDir, { readOnly: true })
+		assert.deepEqual(rec.core.getInFlight(), JSON.parse(JSON.stringify(rec1)), 'the in-flight record is exactly as before')
+		assert.ok(rec.warnings.some((x) => /maxPaidHistoryBlock 120 is above historyCursor 110/.test(x)), 'recovery reports the invariant warning, nothing hides it')
+	} finally {
+		done(w)
+	}
+})
+
+test('keys that are already consumed or unknown are still booked (classified in the audit); a key list may not exceed the cap; the daemon and the other recovery modules never reference this command', async () => {
+	const w = await world([ADD3, { t: 'x', ops: [{ op: 'consumedAdd', key: hex(0xb1) }] }])
+	try {
+		writeKeys(w, [entryFor(hex(0xb1), 0), entryFor(hex(0xb2), 1), entryFor(K[0]!, 2)])
+		const dry = await reconcileKeys(args(w, { dryRun: true }))
+		if (dry.status !== 'dry-run') throw new Error('expected a dry run')
+		assert.deepEqual(dry.audit.counts, { wasPending: 1, alreadyConsumed: 1, neither: 1 })
+		await reconcileKeys(args(w))
+		const rec = recoverPayoutState(w.stateDir, { readOnly: true })
+		assert.equal(rec.core.consumedHas(hex(0xb2)), true, 'an unknown key is booked as consumed so the scan cannot re-queue it')
+	} finally {
+		done(w)
+	}
+	for (const f of ['validatorLabMiningPoolClPayoutReporter.ts', 'labPayoutRecovery.ts', 'labPayoutStateCore.ts', 'labSnapshotWriter.ts', 'labWal.ts', 'labMiningPoolClPayoutDaemon.ts']) {
+		const src = fs.readFileSync(path.join(__dirname, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+		assert.doesNotMatch(src, /labWalReconcile|reconcileKeys/, f)
+	}
+	const own = fs.readFileSync(path.join(__dirname, 'labWalReconcile.ts'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+	assert.doesNotMatch(own, /process\.env/, 'no environment variable is read')
+})
+
+test('CLI: missing --keys-file or run id exits 2 and touches nothing; --dry-run works and prints the audit; the environment is irrelevant', async () => {
+	const w = await world([ADD3])
+	try {
+		writeKeys(w, [entryFor(K[0]!, 0)])
+		const script = join(__dirname, 'labWalReconcile.ts')
+		const loader = process.execArgv.some((a) => a.includes('tsx')) ? [...process.execArgv] : ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href]
+		const run = (a: string[], env: NodeJS.ProcessEnv = process.env) => spawnSync(process.execPath, [...loader, script, ...a], { encoding: 'utf8', env })
+		const before = walFiles(w)
+		const noKeys = run(['--state-dir', w.stateDir, '--audit-dir', w.auditDir, '--run-id', RUN, '--approval', APPROVAL])
+		assert.equal(noKeys.status, 2)
+		assert.match(noKeys.stderr, /keys file is required/)
+		const swallowed = run(['--state-dir', w.stateDir, '--audit-dir', w.auditDir, '--run-id', '--approval', APPROVAL, '--keys-file', w.keysFile])
+		assert.equal(swallowed.status, 2)
+		assert.match(swallowed.stderr, /--run-id needs a value/)
+		const dry = run(['--state-dir', w.stateDir, '--audit-dir', w.auditDir, '--run-id', RUN, '--approval', APPROVAL, '--keys-file', w.keysFile, '--dry-run'], { ...process.env, CONET_LAB_WAL_RECONCILE: '1' })
+		assert.equal(dry.status, 0, dry.stderr)
+		assert.equal(JSON.parse(dry.stdout).status, 'dry-run')
+		assert.deepEqual(walFiles(w), before)
+		const real = run(['--state-dir', w.stateDir, '--audit-dir', w.auditDir, '--run-id', RUN, '--approval', APPROVAL, '--keys-file', w.keysFile])
+		assert.equal(real.status, 0, real.stderr)
+		assert.equal(JSON.parse(real.stdout).status, 'appended')
+		assert.equal(walFiles(w).length, 2)
+	} finally {
+		done(w)
+	}
+})

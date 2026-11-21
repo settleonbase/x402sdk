@@ -37,7 +37,16 @@ export type RecoveryResult = {
 
 const NOT_SCALARS: ReadonlySet<string> = new Set(['pending', 'consumedEventKeys', 'exitedPubkeys', 'inFlightWithdraw'])
 
-export function recoverPayoutState(stateDir: string, opts: { onDrift?: (what: string) => void; maxFrameBytes?: number; fs?: WalFs } = {}): RecoveryResult {
+export function recoverPayoutState(
+	stateDir: string,
+	opts: {
+		onDrift?: (what: string) => void
+		maxFrameBytes?: number
+		fs?: WalFs
+		/** Offline tools: change nothing on disk - no torn-tail truncation, no removal of covered segments. A torn tail is reported through scan.truncatedBytes > 0. */
+		readOnly?: boolean
+	} = {}
+): RecoveryResult {
 	const t0 = process.hrtime.bigint()
 	const status = inspectSegmentedDir(stateDir)
 	if (status !== 'committed') throw new Error(`labPayoutRecovery: ${stateDir} has no committed snapshot (${status}); refusing to start from an empty state`)
@@ -61,12 +70,13 @@ export function recoverPayoutState(stateDir: string, opts: { onDrift?: (what: st
 	const scan = scanWal(stateDir, {
 		afterSeq: snapshotSeq,
 		maxFrameBytes: opts.maxFrameBytes,
+		repair: opts.readOnly ? false : undefined,
 		onEvent: (ev) => {
 			core.applyEvent(ev)
 			replayed++
 		},
 	})
-	const cleaned = removeWalSegmentsThrough(stateDir, snapshotSeq, scan.lastSeq, opts.fs ?? nodeWalFs)
+	const cleaned = opts.readOnly ? [] : removeWalSegmentsThrough(stateDir, snapshotSeq, scan.lastSeq, opts.fs ?? nodeWalFs)
 	const warnings = postReplayChecks(core)
 	return {
 		core,
