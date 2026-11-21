@@ -236,3 +236,32 @@ test('a file that CHANGES WHILE IT IS READ is refused by the streaming loader (t
 	assert.ok(calls >= 3, 'the change happened while entries were being read')
 	fs.rmSync(root, { recursive: true, force: true })
 })
+
+test('snapshot seq assertion (18a23d38): when the manifest read before the entries and the one the store reads afterwards name different snapshot seqs, recovery refuses with the labelled error', async () => {
+	const d = dataset(300, 500)
+	const dir = await walDir(d, 0)
+	const manifestPath = path.join(dir, 'manifest.json')
+	const text = fs.readFileSync(manifestPath, 'utf8')
+	const m = JSON.parse(text) as { walSeq: number }
+	assert.equal(typeof m.walSeq, 'number')
+	// control: untouched, the recovery succeeds and reports that seq
+	const ok = recoverPayoutState(dir, { readOnly: true, loader: 'stream' })
+	assert.equal(ok.snapshotSeq, m.walSeq)
+	// the FIRST read of manifest.json (the one that sets the core's lastAppliedSeq) sees walSeq+1: a manifest that changed between the two reads
+	const realRead = fs.readFileSync
+	let manifestReads = 0
+	;(fs as unknown as { readFileSync: unknown }).readFileSync = ((p: unknown, ...a: unknown[]) => {
+		const out = (realRead as (...x: unknown[]) => unknown)(p, ...a)
+		if (String(p) === manifestPath && typeof out === 'string' && ++manifestReads === 1) return out.replace(/"walSeq":(\s*)\d+/, `"walSeq":$1${m.walSeq + 1}`)
+		return out
+	}) as typeof fs.readFileSync
+	try {
+		assert.throws(() => recoverPayoutState(dir, { readOnly: true, loader: 'stream' }), /labPayoutRecovery: snapshot seq \d+ \(manifest read before the entries\) != \d+ \(after\); the manifest changed while it was read/)
+		assert.ok(manifestReads >= 2, `the manifest was read at least twice (${manifestReads})`)
+	} finally {
+		;(fs as unknown as { readFileSync: unknown }).readFileSync = realRead
+	}
+	// and the directory itself was not touched
+	assert.equal(fs.readFileSync(manifestPath, 'utf8'), text)
+	fs.rmSync(path.dirname(dir), { recursive: true, force: true })
+})
