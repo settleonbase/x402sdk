@@ -103,7 +103,8 @@ import {
 } from './labStartupConfig'
 import { acquireStateDirLock, type StateDirLock } from './labClPayoutStateLock'
 import { assertNoWalEvents } from './labWalGuard'
-import { openWalSession, type WalSession } from './labWalSession'
+import { gracefulStopWalSession, openWalSession, type SnapshotConfig, type WalSession } from './labWalSession'
+import { appendConsumedArchive, consumedArchiveDir } from './labConsumedPrune'
 import { LabPayoutFailClosedGate } from './labClPayoutFailClosed'
 import type { LabStateHandle } from './labStateHandle'
 import { createLegacyStateStore, type LabClPayoutState, type SkimEntry, type LabPendingEntryJson } from './labLegacyState'
@@ -362,11 +363,18 @@ function resolveMaxSettledBatches(): number | null {
 }
 
 /** The settled count is persisted in the same write as the consumed set (lifecycle countSettled). Exit only after that write. */
-function noteSettledBatch(h: LabHandle): void {
+async function noteSettledBatch(h: LabHandle): Promise<void> {
 	const max = resolveMaxSettledBatches()
 	if (shouldStopAfterSettled(h.scalar('settledBatchCount') ?? 0, max)) {
 		logger(Colors.cyan(`[labMiningPoolClPayout] MAX_SETTLED_BATCHES=${max} reached (persisted); exiting 0`))
 		stopValidatorLabMiningPoolClPayoutReporter()
+		if (labWalSession) {
+			// WAL mode: this tick ends here (the process exits and nothing below runs), so it leaves the tick and the batch scope, then the same graceful stop as SIGTERM
+			h.closeScope()
+			h.exitTick()
+			const code = await gracefulStopWalSession(labWalSession, { stateDir: resolveSegmentedStateDir(), tickIdle: true, log: walLog })
+			process.exit(code)
+		}
 		process.exit(0)
 	}
 }
@@ -891,7 +899,7 @@ async function submitLabSkimBatch(
 				}),
 			'[labMiningPoolClPayout]'
 		)
-		if (outcome === 'settled') noteSettledBatch(h)
+		if (outcome === 'settled') await noteSettledBatch(h)
 		return outcome === 'settled'
 	} catch (e: unknown) {
 		logger(Colors.red(`[labMiningPoolClPayout] withdrawNative failed: ${(e as Error)?.message ?? e}`))
@@ -962,7 +970,7 @@ async function flushPendingLabBatches(
 			'[labMiningPoolClPayout]'
 		)
 		if (flight === 'pending') return
-		if (flight === 'settled') noteSettledBatch(h)
+		if (flight === 'settled') await noteSettledBatch(h)
 	}
 
 	const flushMax = resolveFlushMaxEntries()
@@ -1448,6 +1456,7 @@ async function labPayoutTick(): Promise<void> {
 	} finally {
 		tickHandle?.exitTick()
 		labInFlight = false
+		labWalSession?.scheduler.poke() // snapshot when due (interval / log size); at most one runs, failures are alerts, never exceptions
 	}
 }
 
@@ -1495,6 +1504,20 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	void labPayoutTick().finally(() => scheduleNextLabTick())
 }
 
+const walLog = (line: string): void => logger(line.includes('ALERT') ? Colors.red(line) : Colors.cyan(line))
+
+/** Snapshot cadence and the consumed prune of the WAL mode; the same cap and cold archive the legacy path uses. */
+function resolveSnapshotConfig(): SnapshotConfig {
+	const i = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_WAL_SNAPSHOT_INTERVAL_MS)
+	const b = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_WAL_SNAPSHOT_MAX_BYTES)
+	return {
+		intervalMs: Number.isFinite(i) && i >= 1 ? Math.floor(i) : undefined,
+		walMaxBytes: Number.isFinite(b) && b >= 1 ? Math.floor(b) : undefined,
+		consumedCap: resolveConsumedKeysPersistMax(),
+		archive: (keys) => void appendConsumedArchive(consumedArchiveDir(resolveStateFile()), keys),
+	}
+}
+
 /** Test/ops tunable: refuse (fatally) any single log event above this many bytes; unset = the log's 16 MiB. */
 function resolveWalMaxFrameBytes(): number | undefined {
 	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_WAL_MAX_FRAME_BYTES)
@@ -1508,8 +1531,9 @@ async function startWalMode(): Promise<void> {
 			stateDir: resolveSegmentedStateDir(),
 			legacyStateFile: resolveStateFile(),
 			scanFloor: resolveLabScanFloorBlock(),
-			log: (line) => logger(line.includes('ALERT') ? Colors.red(line) : Colors.cyan(line)),
+			log: walLog,
 			maxFrameBytes: resolveWalMaxFrameBytes(),
+			snapshot: resolveSnapshotConfig(),
 		})
 		sessionBackfillFloor = labWalSession.sessionBackfillFloor
 		if (shouldStopAfterSettled(labWalSession.settledBatchCount, resolveMaxSettledBatches())) {
@@ -1544,20 +1568,23 @@ export function stopValidatorLabMiningPoolClPayoutReporter(): void {
 }
 
 /** Persist listening checkpoint before process exit (next restart backfills from lastListeningEndBlock+1). */
-export async function flushLabMiningPoolListeningCheckpoint(): Promise<void> {
+export async function flushLabMiningPoolListeningCheckpoint(opts: { tickIdle?: boolean } = {}): Promise<number> {
 	if (labWalSession) {
+		const s = labWalSession
+		const tickIdle = opts.tickIdle ?? !labInFlight
 		try {
-			const h = labWalSession.handle
-			h.requireIdle() // a tick that is still running means no write in parallel with it (the legacy path wrote anyway; P2c-3 makes the stop wait for the tick)
-			const provider = createLabRpcProvider()
-			const liveHead = Number(await provider.getBlockNumber())
-			if (Number.isFinite(liveHead)) tryPersistListeningCheckpoint(h, liveHead)
-			await h.commit('scalars')
-			await labWalSession.wal.close()
+			if (tickIdle) {
+				s.handle.requireIdle() // a tick that is still running means no write in parallel with it
+				const provider = createLabRpcProvider()
+				const liveHead = Number(await provider.getBlockNumber())
+				if (Number.isFinite(liveHead)) tryPersistListeningCheckpoint(s.handle, liveHead)
+			}
 		} catch {
-			/* best effort */
+			/* best effort: the checkpoint only saves a re-scan; the graceful stop below decides the exit code */
 		}
-		return
+		const code = await gracefulStopWalSession(s, { stateDir: resolveSegmentedStateDir(), tickIdle, log: walLog })
+		if (code === 0) labWalSession = undefined
+		return code
 	}
 	try {
 		const state = labSessionState ?? legacyStore.readStateFromDisk()
@@ -1570,10 +1597,11 @@ export async function flushLabMiningPoolListeningCheckpoint(): Promise<void> {
 	} catch {
 		/* best effort */
 	}
+	return 0
 }
 
 /** Bounded idle wait so SIGTERM cannot hang forever behind a stuck tx.wait. */
-export async function waitForLabMiningPoolClPayoutIdle(maxWaitMs = 90_000): Promise<void> {
+export async function waitForLabMiningPoolClPayoutIdle(maxWaitMs = 90_000): Promise<boolean> {
 	const started = Date.now()
 	while (labInFlight) {
 		if (Date.now() - started >= maxWaitMs) {
@@ -1582,8 +1610,19 @@ export async function waitForLabMiningPoolClPayoutIdle(maxWaitMs = 90_000): Prom
 					`[labMiningPoolClPayout] idle wait timeout ${maxWaitMs}ms (labInFlight still true); continuing shutdown`
 				)
 			)
-			return
+			return false
 		}
 		await new Promise((r) => setTimeout(r, 250))
 	}
+	return true
+}
+
+/**
+ * The shutdown sequence of the daemon (SIGINT/SIGTERM and the E2E child): stop the scheduler first, wait (bounded) for the tick that is running, then persist. In WAL mode a tick that did not end
+ * in time gets no downgrade snapshot (exit 1, log kept). Returns the process exit code.
+ */
+export async function shutdownLabMiningPoolClPayout(maxWaitMs = 90_000): Promise<number> {
+	stopValidatorLabMiningPoolClPayoutReporter()
+	const idle = await waitForLabMiningPoolClPayoutIdle(maxWaitMs)
+	return flushLabMiningPoolListeningCheckpoint({ tickIdle: idle })
 }

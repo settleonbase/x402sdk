@@ -88,5 +88,6 @@ test('S4: the start-up alignment runs inside enterTick/exitTick (finally) and le
 	assert.match(session, /handle\.enterTick\(\)\s*\n\s*let sessionBackfillFloor[\s\S]*?try \{[\s\S]*?await handle\.commit\('scalars'\)\s*\n\s*\} finally \{\s*\n\s*handle\.exitTick\(\)/, 'alignment is wrapped in enterTick ... finally exitTick')
 	const reporter = fs.readFileSync(path.join(__dirname, 'validatorLabMiningPoolClPayoutReporter.ts'), 'utf8')
 	assert.match(reporter, /if \(labInFlight\) throw new Error\('\[labMiningPoolClPayout\] start while a tick is running'\)\s*\n\s*if \(labWalMode\(\)\)/, 'the start refuses while a tick runs, before either start path')
-	assert.match(reporter, /h\.requireIdle\(\)/, 'the WAL shutdown flush refuses to write in parallel with a tick')
+	assert.match(reporter, /s\.handle\.requireIdle\(\)/, 'the WAL shutdown flush refuses to write in parallel with a tick')
+	assert.match(session, /await s\.scheduler\.stop\(\)[\s\S]*?tickIdle[\s\S]*?s\.handle\.requireIdle\(\)[\s\S]*?gracefulStopToV2/, 'the graceful stop stops the scheduler, checks the tick is idle, requires idle, then converts')
 })

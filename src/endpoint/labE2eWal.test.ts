@@ -3,7 +3,7 @@
  * The comparison is on LOGICAL state (the daemon's recovered pending set, consumed keys in order, exited keys, scalars), the signer's request sequence, the per-event-key payments and the key
  * log lines - not on file digests (a log has no pending/consumed files). Documented differences, nothing else is relaxed:
  *   - s12_consumed_prune is excluded: the consumed prune happens at SNAPSHOT time in WAL mode (P2c-3), the legacy path prunes on every write;
- *   - the line "WAL mode: snapshotSeq=..." is added at each start and removed before comparing;
+ *   - the lines "WAL mode: snapshotSeq=..." (each start) and "WAL graceful stop: ..." (each clean shutdown) are added and removed before comparing; instead the end state is asserted: a clean last run leaves a version 2 manifest and an EMPTY wal/;
  *   - the state scalar `updatedAt` is not kept in WAL mode (the snapshot writer does not record it).
  */
 import assert from 'node:assert/strict'
@@ -14,7 +14,7 @@ import { FIXTURE_DIR, runScenario, type ScenarioResult } from './labE2e/harness.
 import { scenarios } from './labE2e/scenarios.test'
 
 const EXCLUDED = new Set(['s12_consumed_prune'])
-const dropWalLines = (logs: string[][]): string[][] => logs.map((run) => run.filter((l) => !l.startsWith('[labMiningPoolClPayout] WAL mode:')))
+const dropWalLines = (logs: string[][]): string[][] => logs.map((run) => run.filter((l) => !l.startsWith('[labMiningPoolClPayout] WAL mode:') && !l.startsWith('[labMiningPoolClPayout] WAL graceful stop:')))
 const stripUpdatedAt = (v: unknown): unknown => {
 	if (v && typeof v === 'object' && !Array.isArray(v)) {
 		const o: Record<string, unknown> = {}
@@ -38,6 +38,8 @@ for (const s of scenarios) {
 		assert.deepEqual(r.exits, golden.exits)
 		assert.deepEqual(dropWalLines(r.logs), golden.logs, 'the reporter logged the same key lines')
 		const g = golden.state as unknown as { scalars: unknown; pending: unknown[]; consumed: string[]; exited: string[] }
+		const lastExit = r.exits[r.exits.length - 1]!
+		if (lastExit.code === 0) assert.deepEqual(r.layout, { manifestVersion: 2, walSegments: 0 }, 'a clean shutdown ends in the version 2 layout with no log segment (an old build can start from it)')
 		assert.ok(r.logical, 'a recovered state exists')
 		assert.deepEqual(stripUpdatedAt(r.logical!.scalars), stripUpdatedAt(g.scalars), 'scalars')
 		assert.deepEqual(r.logical!.pending, g.pending, 'pending set')

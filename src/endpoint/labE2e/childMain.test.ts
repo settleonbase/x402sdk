@@ -35,11 +35,16 @@ async function main(): Promise<void> {
 		shuttingDown = true
 		console.log(`[e2e-child] ${signal}; draining`)
 		console.log(`[e2e-child] compressed=${scheduledTicks} requested=${ticks}`)
-		rep.stopValidatorLabMiningPoolClPayoutReporter()
-		await rep.waitForLabMiningPoolClPayoutIdle(90_000)
-		await rep.flushLabMiningPoolListeningCheckpoint()
+		let code = 0
+		if (typeof rep.shutdownLabMiningPoolClPayout === 'function') code = await rep.shutdownLabMiningPoolClPayout(Number(process.env.E2E_SHUTDOWN_WAIT_MS ?? 90_000))
+		else {
+			// older checkouts (the P1 / df78e6b baselines the goldens are cross-checked against) have no combined shutdown: the same three steps the daemon used then
+			rep.stopValidatorLabMiningPoolClPayoutReporter()
+			await rep.waitForLabMiningPoolClPayoutIdle(90_000)
+			await rep.flushLabMiningPoolListeningCheckpoint()
+		}
 		await queue.waitForAllOnchainTxQueues(90_000)
-		process.exit(0)
+		process.exit(code)
 	}
 	finish = () => void shutdown('E2E_DONE')
 	process.on('SIGTERM', () => void shutdown('SIGTERM'))

@@ -6,17 +6,23 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fsyncDirStrict, inspectSegmentedDir, legacyStateFileExists } from './labClPayoutStateStore'
 import { assertCursorMonotonic, assertNoSkippedHistory } from './labMiningPoolDualCursor'
-import { recoverOrRefuse } from './labPayoutRecovery'
+import { gracefulStopToV2, recoverOrRefuse } from './labPayoutRecovery'
 import { LabPayoutStateCore } from './labPayoutStateCore'
 import { writeSnapshotCooperative } from './labSnapshotWriter'
 import { WalWriter } from './labWal'
+import { WalSnapshotScheduler } from './labWalSnapshotScheduler'
 import { WalStateHandle } from './labWalStateHandle'
 import type { LabClPayoutState, SkimEntry } from './labLegacyState'
+
+export type SnapshotConfig = { intervalMs?: number; walMaxBytes?: number; consumedCap?: number; archive?: (keys: string[]) => void }
 
 export type WalSession = {
 	handle: WalStateHandle<SkimEntry, LabClPayoutState>
 	core: LabPayoutStateCore
 	wal: WalWriter
+	scheduler: WalSnapshotScheduler
+	/** What the snapshot scheduler and the graceful stop share (consumed prune cap and cold archive). */
+	snapshotOpts: SnapshotConfig
 	/** max(lastListeningEndBlock + 1, scan floor): frozen at start. */
 	sessionBackfillFloor: number
 	settledBatchCount: number
@@ -77,6 +83,7 @@ export async function openWalSession(opts: {
 	segmentBytes?: number
 	/** Refuse (fatally) any single event above this size; default the log's 16 MiB. Tunable so the over-limit stop can be exercised end to end. */
 	maxFrameBytes?: number
+	snapshot?: SnapshotConfig
 }): Promise<WalSession> {
 	let status = inspectSegmentedDir(opts.stateDir)
 	const markerPath = path.join(opts.stateDir, WAL_BOOTSTRAP_MARKER)
@@ -125,5 +132,36 @@ export async function openWalSession(opts: {
 	} finally {
 		handle.exitTick()
 	}
-	return { handle, core: rec.core, wal, sessionBackfillFloor, settledBatchCount: (handle.scalar('settledBatchCount') as number | undefined) ?? 0, recovery: { snapshotSeq: rec.snapshotSeq, replayed: rec.replayed, warnings: rec.warnings } }
+	const snapshotOpts = opts.snapshot ?? {}
+	const scheduler = new WalSnapshotScheduler({ core: rec.core, wal, stateDir: opts.stateDir, log: opts.log, ...snapshotOpts })
+	return { handle, core: rec.core, wal, scheduler, snapshotOpts, sessionBackfillFloor, settledBatchCount: (handle.scalar('settledBatchCount') as number | undefined) ?? 0, recovery: { snapshotSeq: rec.snapshotSeq, replayed: rec.replayed, warnings: rec.warnings } }
+}
+
+/**
+ * Graceful stop of a WAL session (SIGTERM, one-shot exit): no new snapshot, wait for the running one, refuse to write while a tick still runs (the caller waited for it and passes `tickIdle`),
+ * flush what is buffered, then the version 2 downgrade snapshot + removal of the log (gracefulStopToV2). Returns the exit code the process should use:
+ *   0  the state is a plain version 2 state again (an old build can start from it)
+ *   1  something failed; the log is KEPT (the P1 guard then refuses an old build, which is the safe outcome) and an ALERT line says why
+ * A tick that did not end in time never gets a downgrade snapshot: its writes would race the snapshot.
+ */
+export async function gracefulStopWalSession(s: WalSession, o: { stateDir: string; tickIdle: boolean; log: (line: string) => void }): Promise<number> {
+	try {
+		await s.scheduler.stop()
+		if (!o.tickIdle) {
+			o.log('[labMiningPoolClPayout] ALERT WAL graceful stop skipped: a tick was still running when the wait ended; no downgrade snapshot, the log is kept (an old build will refuse to start from it)')
+			await s.wal.close().catch(() => undefined)
+			return 1
+		}
+		s.handle.requireIdle()
+		s.handle.closeScope()
+		await s.handle.commit('scalars') // carries anything still buffered and is a durability barrier
+		const r = await gracefulStopToV2(s.core, s.wal, o.stateDir, { consumedCap: s.snapshotOpts.consumedCap, archive: s.snapshotOpts.archive })
+		if (r.stats.archiveFailed) o.log('[labMiningPoolClPayout] ALERT consumed archive failed during the graceful stop: nothing was pruned this time')
+		o.log(`[labMiningPoolClPayout] WAL graceful stop: version 2 snapshot at walSeq=${r.walSeq}, removed ${r.removedSegments} log segment(s), pruned=${r.prunedKeys}`)
+		return 0
+	} catch (e) {
+		o.log(`[labMiningPoolClPayout] ALERT WAL graceful stop failed: ${(e as Error)?.message ?? e}; the log is kept (an old build will refuse to start from it)`)
+		await s.wal.close().catch(() => undefined)
+		return 1
+	}
 }

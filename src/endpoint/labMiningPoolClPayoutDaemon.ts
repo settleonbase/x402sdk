@@ -1,11 +1,6 @@
 import Colors from 'colors/safe'
 import { logger } from '../logger'
-import {
-	flushLabMiningPoolListeningCheckpoint,
-	startValidatorLabMiningPoolClPayoutReporter,
-	stopValidatorLabMiningPoolClPayoutReporter,
-	waitForLabMiningPoolClPayoutIdle,
-} from './validatorLabMiningPoolClPayoutReporter'
+import { shutdownLabMiningPoolClPayout, startValidatorLabMiningPoolClPayoutReporter } from './validatorLabMiningPoolClPayoutReporter'
 import { waitForAllOnchainTxQueues } from '../onchainTxSerialQueue'
 
 /**
@@ -24,12 +19,10 @@ async function shutdown(signal: string): Promise<void> {
 	if (shuttingDown) return
 	shuttingDown = true
 	logger(Colors.yellow(`[labMiningPoolClPayoutDaemon] ${signal}; draining payout queue…`))
-	stopValidatorLabMiningPoolClPayoutReporter()
-	// Hard bound: stuck tx.wait must not block systemd stop beyond TimeoutStopSec.
-	await waitForLabMiningPoolClPayoutIdle(90_000)
-	await flushLabMiningPoolListeningCheckpoint()
+	// Hard bound: stuck tx.wait must not block systemd stop beyond TimeoutStopSec. Stops the scheduler first, waits for the tick, then persists (WAL mode: version 2 graceful stop or exit 1 with the log kept).
+	const code = await shutdownLabMiningPoolClPayout(90_000)
 	await waitForAllOnchainTxQueues(90_000)
-	process.exit(0)
+	process.exit(code)
 }
 
 process.on('SIGINT', () => {

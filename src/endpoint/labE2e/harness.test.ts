@@ -126,10 +126,28 @@ export function digestLogical(stateDir: string): { scalars: unknown; pending: un
 	}
 }
 
+export function digestLayout(stateDir: string): { manifestVersion: number | null; walSegments: number } {
+	let manifestVersion: number | null = null
+	try {
+		manifestVersion = (JSON.parse(fs.readFileSync(path.join(stateDir, 'manifest.json'), 'utf8')) as { version: number }).version
+	} catch {
+		manifestVersion = null
+	}
+	let walSegments = 0
+	try {
+		walSegments = fs.readdirSync(path.join(stateDir, 'wal')).length
+	} catch {
+		walSegments = 0
+	}
+	return { manifestVersion, walSegments }
+}
+
 export type ScenarioResult = {
 	state: StateDigest | null
 	/** Only set in WAL runs (the file-level digest does not apply to a log). */
 	logical?: ReturnType<typeof digestLogical>
+	/** WAL runs: what is on disk at the end (a graceful stop leaves a version 2 manifest and an empty wal/). */
+	layout?: { manifestVersion: number | null; walSegments: number }
 	signerRequests: unknown[]
 	/** Number of distinct transactions (idempotency keys) per EVENT key, from the daemon's persisted in-flight record at the moment the signer received each send. */
 	paymentsPerEventKey: Record<string, number>
@@ -294,7 +312,7 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 		}
 		return {
 			state: opts.walMode ? null : digestState(stateDir),
-			...(opts.walMode ? { logical: digestLogical(stateDir) } : {}),
+			...(opts.walMode ? { logical: digestLogical(stateDir), layout: digestLayout(stateDir) } : {}),
 			signerRequests: signer.requests.filter((r) => r.method === 'signer_sendTransaction').map((r) => {
 				const p = r.params as Record<string, unknown>
 				return { keyArray: p.keyArray, chainId: p.chainId, to: p.to, data: p.data, value: p.value, gasLimit: p.gasLimit, idempotencyKey: p.idempotencyKey, requestFingerprint: p.requestFingerprint }

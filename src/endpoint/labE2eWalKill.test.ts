@@ -8,7 +8,8 @@
  *   receipt-asked     the reporter asks for the receipt of a sent transaction (chain.receiptRule)
  *   after-scan        right after a scan event is logged (queued / scan-summary line)
  *   after-settle      right after a "withdrawNative ok" line
-*   at-start        when the reporter has loaded its manifest, i.e. inside the first-start bootstrap window (found a real bug: a killed first bootstrap left an orphan state dir)
+ *   after-snapshot  right after a "snapshot committed" line (odd seeds snapshot after every tick: interval 1 ms; even seeds use the 10 min default)
+ *   at-start        when the reporter has loaded its manifest, i.e. inside the first-start bootstrap window (found a real bug: a killed first bootstrap left an orphan state dir)
  *   random-ms         a random moment (startup, mid-tick, between ticks)
  * Reproduce a round: C5_SEED=<seed> C5_ROUNDS=1 (the round's seed is printed on failure). More rounds: C5_ROUNDS=200.
  */
@@ -17,8 +18,8 @@ import { after, test } from 'node:test'
 import { runScenario, type Ctx, type Scenario } from './labE2e/harness.test'
 import { eventKeyOf, headPlan, seedValidators, seedWithdrawals } from './labE2e/scenarios.test'
 
-type KillClass = 'intent-not-sent' | 'sent-not-settled' | 'receipt-asked' | 'after-scan' | 'after-settle' | 'at-start' | 'random-ms'
-const CLASSES: KillClass[] = ['intent-not-sent', 'sent-not-settled', 'receipt-asked', 'after-scan', 'after-settle', 'at-start', 'random-ms']
+type KillClass = 'intent-not-sent' | 'sent-not-settled' | 'receipt-asked' | 'after-scan' | 'after-settle' | 'at-start' | 'after-snapshot' | 'random-ms'
+const CLASSES: KillClass[] = ['intent-not-sent', 'sent-not-settled', 'receipt-asked', 'after-scan', 'after-settle', 'at-start', 'after-snapshot', 'random-ms']
 
 function mulberry32(a: number): () => number {
 	return () => {
@@ -50,6 +51,7 @@ async function killedRun(ctx: Ctx, cls: KillClass, nth: number, randomMs: number
 	else if (cls === 'sent-not-settled') ctx.signer.afterRecord = () => void (hit() && kill())
 	else if (cls === 'receipt-asked') ctx.chain.receiptRule = () => (hit() ? (kill(), 'none') : 'mined')
 	else if (cls === 'after-scan') killWhen = (ev) => ev.kind === 'log' && /\] (history|realtime) queued \+|scan-summary line=/.test(ev.line) && hit()
+	else if (cls === 'after-snapshot') killWhen = (ev) => ev.kind === 'log' && /snapshot committed walSeq=/.test(ev.line) && hit()
 	else if (cls === 'at-start') killWhen = (ev) => ev.kind === 'log' && /loaded manifest pubkeys=/.test(ev.line) && hit()
 	else if (cls === 'after-settle') killWhen = (ev) => ev.kind === 'log' && /withdrawNative ok hash=/.test(ev.line) && hit()
 	else timer = setTimeout(kill, randomMs)
@@ -69,7 +71,7 @@ async function killedRun(ctx: Ctx, cls: KillClass, nth: number, randomMs: number
 function roundScenario(seed: number): Scenario {
 	return {
 		name: `c5_round_${seed}`,
-		env: { CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_BATCH_ENTRIES: '2' },
+		env: { CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_BATCH_ENTRIES: '2', ...(seed % 2 === 1 ? { CONET_LAB_MINING_POOL_CL_PAYOUT_WAL_SNAPSHOT_INTERVAL_MS: '1' } : {}) },
 		body: async (ctx) => {
 			const rnd = mulberry32(seed)
 			seedValidators(ctx)
