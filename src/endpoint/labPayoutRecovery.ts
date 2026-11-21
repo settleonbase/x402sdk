@@ -15,7 +15,7 @@
  *   (no empty file left behind). A failure at any step leaves the log in place (the P1 guard then refuses a rollback start, which is the point).
  */
 import path from 'node:path'
-import { SEGMENTED_STATE_VERSION, inspectSegmentedDir, loadCommittedForRecovery, readManifest, type SegmentedManifest } from './labClPayoutStateStore'
+import { SEGMENTED_STATE_VERSION, SEGMENTED_STATE_VERSION_WAL, inspectSegmentedDir, loadCommittedForRecovery, readManifest, streamCommittedForRecovery, type GenerationSink, type SegmentedManifest } from './labClPayoutStateStore'
 import { LabPayoutStateCore, type PendingEntry } from './labPayoutStateCore'
 import { writeSnapshotCooperative, type SnapshotStats, type SnapshotWriteOptions } from './labSnapshotWriter'
 import { WAL_DIR, WalMidCorruptionError, WalWriter, formatWalMidCorruptionAlert, listSegments, nodeWalFs, removeWalSegmentsThrough, scanWal, type ScanResult, type WalFs } from './labWal'
@@ -45,27 +45,71 @@ export function recoverPayoutState(
 		fs?: WalFs
 		/** Offline tools: change nothing on disk - no torn-tail truncation, no removal of covered segments. A torn tail is reported through scan.truncatedBytes > 0. */
 		readOnly?: boolean
+		/**
+		 * How the snapshot is loaded. 'stream' (default, P2d M3): every entry goes straight into the layered structures, no whole-state copies. 'whole': the original loader that reads the whole
+		 * state into arrays and a Record first; kept so that the two can be compared on the same directories (differential tests) and as a fallback for offline tools.
+		 */
+		loader?: 'stream' | 'whole'
 	} = {}
 ): RecoveryResult {
 	const t0 = process.hrtime.bigint()
 	const status = inspectSegmentedDir(stateDir)
 	if (status !== 'committed') throw new Error(`labPayoutRecovery: ${stateDir} has no committed snapshot (${status}); refusing to start from an empty state`)
-	const { manifest, state, snapshotSeq } = loadCommittedForRecovery(stateDir)
-	const scalars: Record<string, unknown> = {}
-	for (const [k, v] of Object.entries(state)) if (!NOT_SCALARS.has(k)) scalars[k] = v
-	delete scalars.walSeq // informational in a version 2 manifest; the real value is snapshotSeq
-	const rec = (state as Record<string, unknown>).inFlightWithdraw
-	const core = new LabPayoutStateCore(
-		{
-			pending: state.pending as PendingEntry[],
-			consumed: Object.keys(state.consumedEventKeys),
-			exited: Object.keys(state.exitedPubkeys),
-			scalars,
-			inFlight: rec && typeof rec === 'object' ? (rec as Record<string, unknown>) : null,
-			lastAppliedSeq: snapshotSeq,
-		},
-		{ onDrift: opts.onDrift }
-	)
+	let manifest: SegmentedManifest
+	let snapshotSeq: number
+	let core: LabPayoutStateCore
+	if ((opts.loader ?? 'stream') === 'whole') {
+		const loaded = loadCommittedForRecovery(stateDir)
+		manifest = loaded.manifest
+		snapshotSeq = loaded.snapshotSeq
+		const state = loaded.state
+		const scalars: Record<string, unknown> = {}
+		for (const [k, v] of Object.entries(state)) if (!NOT_SCALARS.has(k)) scalars[k] = v
+		delete scalars.walSeq // informational in a version 2 manifest; the real value is snapshotSeq
+		const rec = (state as Record<string, unknown>).inFlightWithdraw
+		core = new LabPayoutStateCore(
+			{
+				pending: state.pending as PendingEntry[],
+				consumed: Object.keys(state.consumedEventKeys),
+				exited: Object.keys(state.exitedPubkeys),
+				scalars,
+				inFlight: rec && typeof rec === 'object' ? (rec as Record<string, unknown>) : null,
+				lastAppliedSeq: snapshotSeq,
+			},
+			{ onDrift: opts.onDrift }
+		)
+	} else {
+		let c: LabPayoutStateCore | undefined
+		let seq = 0
+		const sink: GenerationSink = {
+			begin(all) {
+				const scalars: Record<string, unknown> = {}
+				for (const [k, v] of Object.entries(all)) if (!NOT_SCALARS.has(k)) scalars[k] = v
+				delete scalars.walSeq
+				const rec = all.inFlightWithdraw
+				// the snapshot seq is known from the manifest before the entries are read
+				c = new LabPayoutStateCore({ scalars, inFlight: rec && typeof rec === 'object' ? (rec as Record<string, unknown>) : null, lastAppliedSeq: seq }, { onDrift: opts.onDrift })
+			},
+			pending: (rec) => c!.pendingSet(rec as unknown as PendingEntry),
+			consumed: (k) => {
+				const before = c!.consumedSize
+				c!.consumedAdd(k)
+				return c!.consumedSize > before
+			},
+			exited: (k) => {
+				const before = c!.exitedSize
+				c!.exitedAdd(k)
+				return c!.exitedSize > before
+			},
+		}
+		const m = readManifest(stateDir)
+		const informational = m.scalars.walSeq
+		seq = m.version === SEGMENTED_STATE_VERSION_WAL ? (m.walSeq as number) : typeof informational === 'number' ? informational : 0
+		const loaded = streamCommittedForRecovery(stateDir, sink)
+		manifest = loaded.manifest
+		snapshotSeq = loaded.snapshotSeq
+		core = c!
+	}
 	let replayed = 0
 	const scan = scanWal(stateDir, {
 		afterSeq: snapshotSeq,

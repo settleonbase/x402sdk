@@ -920,6 +920,84 @@ export function readGenerationFromManifest(dir: string, manifest: SegmentedManif
 }
 
 /**
+ * Streaming counterpart of readGenerationFromManifest (P2d M3): the same checks, but every entry is handed to a sink as soon as its line is parsed, so the state is never held as an array of
+ * all pending records, a Record of all consumed keys, an Object.keys() copy and then the real structure (the whole-state read keeps several copies alive at the same time, which is what made the
+ * recovery peak of a 2M-pending / 3M-consumed state about 2.27 GB). What is kept besides the sink's own structure is one array of key REFERENCES per file (the key-set hash needs the sorted keys).
+ * Checks, all unchanged: scalars hash; per file lines, bytes and sha256 against the manifest (computed while reading; a file that changes while it is read ends in a mismatch); pending count and
+ * key-set hash; consumed/exited: valid key lines, no duplicate line (the sink says whether the key was new), key-set hash; in-flight blob (id, count, hash, segments). Order of the checks differs
+ * from the whole-state read only in which error is reported first when several things are wrong.
+ */
+export type GenerationSink = {
+	/** Called once, before any entry: the manifest scalars with the in-flight record (its eventKeys loaded from the verified blob). */
+	begin(scalars: Record<string, unknown>): void
+	pending(rec: PendingRecord): void
+	/** false = the key was already present: the store refuses a duplicate key line */
+	consumed(key: string): boolean
+	exited(key: string): boolean
+}
+
+export function streamGenerationFromManifest(dir: string, manifest: SegmentedManifest, sink: GenerationSink): void {
+	const genDir = path.join(dir, manifest.generation)
+	if (!pathExistsStrict(genDir)) throw bad(genDir, 'generation directory missing')
+	if (sha256Hex(canonicalJson(manifest.scalars)) !== manifest.scalarsSha256) {
+		throw bad(genDir, 'scalars sha256 does not match manifest')
+	}
+	const scalars: Record<string, unknown> = { ...manifest.scalars }
+	if (manifest.inFlightKeys) {
+		const rec = scalars.inFlightWithdraw
+		if (!isPlainObject(rec) || typeof rec.idempotencyKey !== 'string') throw bad(genDir, 'in-flight blob has no matching record')
+		const keys = readInFlightKeys(dir, manifest.inFlightKeys, rec.idempotencyKey)
+		inflightCache.set(keys, { dir, ref: manifest.inFlightKeys })
+		scalars.inFlightWithdraw = { ...rec, eventKeys: keys }
+	}
+	sink.begin(scalars)
+	let pendingLines = 0
+	const pendingKeys: string[] = []
+	for (const seg of manifest.pending.segments) {
+		const label = path.join(genDir, seg.file)
+		const got = streamJsonlFile(label, (line) => {
+			const rec: unknown = JSON.parse(line)
+			if (!isPlainObject(rec) || typeof rec.eventKey !== 'string' || rec.eventKey === '') {
+				throw bad(label, 'invalid pending record')
+			}
+			sink.pending(rec as PendingRecord)
+			pendingKeys.push(rec.eventKey)
+			pendingLines++
+		})
+		verifyDigest(label, got, seg)
+	}
+	if (pendingLines !== manifest.pending.count) {
+		throw bad(genDir, `pending count ${pendingLines} != manifest ${manifest.pending.count}`)
+	}
+	if (keySetHash(pendingKeys) !== manifest.pending.keySetSha256) {
+		throw bad(genDir, 'pending key-set hash does not match manifest')
+	}
+	const streamKeyFile = (ref: KeyFileRef, add: (k: string) => boolean): void => {
+		const keys: string[] = []
+		const label = path.join(genDir, ref.file)
+		const got = streamJsonlFile(label, (line) => {
+			const k: unknown = JSON.parse(line)
+			if (typeof k !== 'string' || k === '' || k === '__proto__') throw bad(label, 'invalid key line')
+			if (!add(k)) throw bad(label, 'duplicate key line')
+			keys.push(k)
+		})
+		verifyDigest(label, got, ref)
+		if (keySetHash(keys) !== ref.keySetSha256) throw bad(label, 'key-set hash does not match manifest')
+	}
+	streamKeyFile(manifest.consumed, (k) => sink.consumed(k))
+	streamKeyFile(manifest.exited, (k) => sink.exited(k))
+}
+
+/** Streaming counterpart of loadCommittedForRecovery: the manifest is read and validated as before; the entries go to the sink. Returns the manifest and the seq the snapshot contains. */
+export function streamCommittedForRecovery(dir: string, sink: GenerationSink): { manifest: SegmentedManifest; snapshotSeq: number } {
+	const manifest = readManifest(dir)
+	streamGenerationFromManifest(dir, manifest, sink)
+	const informational = manifest.scalars.walSeq
+	const snapshotSeq = manifest.version === SEGMENTED_STATE_VERSION_WAL ? (manifest.walSeq as number) : typeof informational === 'number' ? informational : 0
+	return { manifest, snapshotSeq }
+}
+
+/**
  * Load the committed state. Throws when the manifest is missing, unreadable, or any file or hash
  * does not match. There is no fallback to an empty state.
  */

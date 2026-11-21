@@ -73,9 +73,10 @@ async function childMain(mode: string, dir: string): Promise<void> {
 	const t0 = process.hrtime.bigint()
 	const lap = (name: string, from: bigint): void => void (phases[name] = Number(process.hrtime.bigint() - from) / 1e6)
 	let hold: unknown
-	if (mode === 'recover-wal') {
+	if (mode === 'recover-wal' || mode === 'recover-wal-whole') {
 		const t = process.hrtime.bigint()
-		const rec = recoverPayoutState(dir, { readOnly: true })
+		// 'recover-wal' = the daemon's default loader (streaming since P2d M3); 'recover-wal-whole' = the original whole-state loader, for the before/after comparison
+		const rec = recoverPayoutState(dir, { readOnly: true, loader: mode === 'recover-wal-whole' ? 'whole' : 'stream' })
 		lap('recoverMs', t)
 		counts.pending = rec.core.pendingSize
 		counts.consumed = rec.core.consumedSize
@@ -238,11 +239,13 @@ async function tierRun(tier: string, out: string, repeats: number, keep: boolean
 	const du = (d: string): number => Number(execFileSync('du', ['-sk', d], { encoding: 'utf8' }).split('\t')[0]) * 1024
 	const sizes: Record<string, number> = {}
 	for (const f of forms) sizes[f] = du(path.join(out, f))
-	const runs: Record<string, Extract<ChildRun, { ok: true }>[]> = { 'recover-wal': [], 'read-legacy': [], snapshot: [], 'recover-walTail': [] }
+	const runs: Record<string, Extract<ChildRun, { ok: true }>[]> = { 'recover-wal': [], 'recover-wal-whole': [], 'read-legacy': [], snapshot: [], 'recover-walTail': [], 'recover-walTail-whole': [] }
 	for (let i = 0; i < repeats; i++) {
 		runs['recover-wal']!.push(okRun(await runChild('recover-wal', g.dirs.wal!)))
+		runs['recover-wal-whole']!.push(okRun(await runChild('recover-wal-whole', g.dirs.wal!)))
 		runs['read-legacy']!.push(okRun(await runChild('read-legacy', g.dirs.v2!)))
 		if (g.dirs.walTail) runs['recover-walTail']!.push(okRun(await runChild('recover-wal', g.dirs.walTail!)))
+		if (g.dirs.walTail) runs['recover-walTail-whole']!.push(okRun(await runChild('recover-wal-whole', g.dirs.walTail!)))
 		if (i < 3) runs.snapshot!.push(okRun(await runChild('snapshot', g.dirs.wal!)))
 		process.stderr.write(`${tier}: repeat ${i + 1}/${repeats} done\n`)
 	}
@@ -268,6 +271,8 @@ async function tierRun(tier: string, out: string, repeats: number, keep: boolean
 		sizesBytes: sizes,
 		defaultHeapLimitBytes: heapLimitDefault,
 		recoverWal: runs['recover-wal']!.length ? { releasePeakGB: sum('recover-wal', (r) => r.releasePeakBytes / G), osHighWaterGB: sum('recover-wal', (r) => r.report.maxRssBytes / G), timeMaxRssGB: sum('recover-wal', (r) => r.timeMaxRssBytes / G), peakFootprintGB: sum('recover-wal', (r) => r.peakFootprintBytes / G), psPeakGB: sum('recover-wal', (r) => r.psPeakBytes / G), rssBeforeGcGB: sum('recover-wal', (r) => r.report.rssBeforeGcBytes / G), rssAfterOneGcGB: sum('recover-wal', (r) => r.report.rssAfterOneGcBytes / G), rssAfterGcGB: sum('recover-wal', (r) => r.report.rssAfterGcBytes / G), heapAfterGcGB: sum('recover-wal', (r) => r.report.heapUsedAfterGcBytes / G), heapBeforeGcGB: sum('recover-wal', (r) => r.report.heapUsedBeforeGcBytes / G), recoverMs: sum('recover-wal', (r) => r.report.phases.recoverMs!), gcMaxPauseMs: sum('recover-wal', (r) => r.report.gc.maxPauseMs), gcTotalPauseMs: sum('recover-wal', (r) => r.report.gc.totalPauseMs) } : null,
+		recoverWalWhole: runs['recover-wal-whole']!.length ? { releasePeakGB: sum('recover-wal-whole', (r) => r.releasePeakBytes / G), osHighWaterGB: sum('recover-wal-whole', (r) => r.report.maxRssBytes / G), rssBeforeGcGB: sum('recover-wal-whole', (r) => r.report.rssBeforeGcBytes / G), rssAfterOneGcGB: sum('recover-wal-whole', (r) => r.report.rssAfterOneGcBytes / G), heapAfterGcGB: sum('recover-wal-whole', (r) => r.report.heapUsedAfterGcBytes / G), heapBeforeGcGB: sum('recover-wal-whole', (r) => r.report.heapUsedBeforeGcBytes / G), recoverMs: sum('recover-wal-whole', (r) => r.report.phases.recoverMs!), gcMaxPauseMs: sum('recover-wal-whole', (r) => r.report.gc.maxPauseMs), gcTotalPauseMs: sum('recover-wal-whole', (r) => r.report.gc.totalPauseMs) } : null,
+		recoverWalTailWhole: runs['recover-walTail-whole']!.length ? { releasePeakGB: sum('recover-walTail-whole', (r) => r.releasePeakBytes / G), recoverMs: sum('recover-walTail-whole', (r) => r.report.phases.recoverMs!) } : null,
 		recoverWalTail: runs['recover-walTail']!.length ? { releasePeakGB: sum('recover-walTail', (r) => r.releasePeakBytes / G), recoverMs: sum('recover-walTail', (r) => r.report.phases.recoverMs!), replayed: runs['recover-walTail']![0]!.report.counts.replayed } : null,
 		readLegacy: { releasePeakGB: sum('read-legacy', (r) => r.releasePeakBytes / G), osHighWaterGB: sum('read-legacy', (r) => r.report.maxRssBytes / G), timeMaxRssGB: sum('read-legacy', (r) => r.timeMaxRssBytes / G), psPeakGB: sum('read-legacy', (r) => r.psPeakBytes / G), maxRssAfterStateReadOnlyGB: sum('read-legacy', (r) => (r.report.counts.maxRssAfterReadStateKb! * 1024) / G), rssBeforeGcGB: sum('read-legacy', (r) => r.report.rssBeforeGcBytes / G), rssAfterOneGcGB: sum('read-legacy', (r) => r.report.rssAfterOneGcBytes / G), rssAfterGcGB: sum('read-legacy', (r) => r.report.rssAfterGcBytes / G), heapAfterGcGB: sum('read-legacy', (r) => r.report.heapUsedAfterGcBytes / G), readStateMs: sum('read-legacy', (r) => r.report.phases.readStateMs!), pendingMapMs: sum('read-legacy', (r) => r.report.phases.pendingMapMs!), gcMaxPauseMs: sum('read-legacy', (r) => r.report.gc.maxPauseMs) },
 		snapshot: { snapshotMs: sum('snapshot', (r) => r.report.phases.snapshotMs!), slices: sum('snapshot', (r) => Number(r.report.extra!.slices)), maxSliceMs: sum('snapshot', (r) => Number(r.report.extra!.maxSliceMs)), eventLoopMaxMs: sum('snapshot', (r) => Number((r.report.extra!.eventLoopDelayMs as { max: number }).max)), releasePeakGB: sum('snapshot', (r) => r.releasePeakBytes / G), rssBeforeSnapshotGB: sum('snapshot', (r) => Number(r.report.extra!.rssBeforeSnapshotBytes) / G), bytesWritten: sum('snapshot', (r) => Number(r.report.extra!.bytesWritten)), gcMaxPauseMs: sum('snapshot', (r) => r.report.gc.maxPauseMs) },
