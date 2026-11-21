@@ -1241,7 +1241,10 @@ async function flushPendingLabBatches(
 	if (invC) {
 		state.maxPaidHistoryBlock = invPlan.maxPaidHistoryBlock
 		if (invPlan.stateChanged) persistPending(state, pending)
-		for (const line of invPlan.logs) logger(line.startsWith('ALERT') ? Colors.red(`[labMiningPoolClPayout] ${line}`) : Colors.cyan(`[labMiningPoolClPayout] ${line}`))
+		for (const line of invPlan.logs) {
+			const text = `[labMiningPoolClPayout] ${line}`
+			logger(line.startsWith('ALERT') ? Colors.red(text) : line.startsWith('WARN') ? Colors.yellow(text) : Colors.cyan(text))
+		}
 	}
 	const historyMaxBlock = invPlan.historyMaxBlock
 	// Realtime reserved quota first, then history (see labFlushSelect.ts). Without a freeze height the line cannot be told: oldest-first as before.

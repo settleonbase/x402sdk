@@ -389,7 +389,11 @@ test('C merge (M1): value = max(current, oldest pending history block) capped at
 	// the oldest pending block beyond the cursor is capped at the cursor (no false violation)
 	const cap = mergeInitialMaxPaid(undefined, [{ blockNumber: 5000 }], H, 3000)
 	assert.equal(cap.value, 3000)
-	assert.match(cap.log!, /capped-at-cursor/)
+	assert.match(cap.log!, /^WARN .*capped-at-cursor.*verify that the history payment front is still behind the cursor/s, 'a capped value is a WARN that asks for an operator check')
+	// capped again on a later start with the value already at the cursor: no state change, but the warning must still be printed
+	const again = mergeInitialMaxPaid(3000, [{ blockNumber: 5000 }], H, 3000)
+	assert.equal(again.changed, false)
+	assert.match(again.log!, /^WARN /)
 	// nothing known
 	const none = mergeInitialMaxPaid(undefined, [], H, null)
 	assert.equal(none.value, undefined)

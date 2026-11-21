@@ -140,9 +140,10 @@ export function mergeInitialMaxPaid(
 	}
 	const value = current === undefined ? candidate : Math.max(current, candidate)
 	const changed = value !== current
-	const log = changed
-		? `invariant C on: maxPaidHistoryBlock ${current === undefined ? 'initialised' : `raised ${current} ->`} ${value} (initial=${init.value} source=${init.source}${capped ? ' capped-at-cursor' : ''}) committedHistoryCursor=${committedHistoryCursor ?? 'unset'}`
-		: null
+	// A capped initial value (oldest pending history block beyond the cursor) cannot tell a legitimate catch-up from a payment that passed the cursor while the
+	// invariant was off (review of M1: B > cursor is ambiguous). So it is a WARN: the operator must check that the payment front is still behind the cursor.
+	const base = `invariant C on: maxPaidHistoryBlock ${current === undefined ? 'initialised' : `raised ${current} ->`} ${value} (initial=${init.value} source=${init.source}${capped ? ' capped-at-cursor' : ''}) committedHistoryCursor=${committedHistoryCursor ?? 'unset'}`
+	const log = changed || capped ? (capped ? `WARN ${base}; capped at the cursor: verify that the history payment front is still behind the cursor (operator check required when switching the invariant from off to on)` : base) : null
 	return { value, changed, log }
 }
 
