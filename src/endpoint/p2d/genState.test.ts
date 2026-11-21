@@ -33,6 +33,8 @@ export const TIERS: Record<string, Tier> = {
 }
 
 export const FREE_SPACE_FLOOR_BYTES = 30 * 1024 ** 3
+/** P2D_SORTED_KEYS=1 makes the event keys monotonically increasing (as the reviewer's own generator did): ONLY for the snapshot-time comparison; real keys are keccak hashes, i.e. random-ordered */
+const SORTED_KEYS = process.env.P2D_SORTED_KEYS === '1'
 const sha = (s: string): string => createHash('sha256').update(s).digest('hex')
 /** the field counted 1,887 distinct pubkeys among the 1.68M pending entries */
 const PUBKEY_POOL = 1_887
@@ -58,7 +60,7 @@ export function makeDataset(t: Tier, seed: number): Dataset {
 	const histBlocks = Math.ceil(nHist / 13)
 	const pending: PendingEntry[] = new Array(t.pending)
 	for (let i = 0; i < t.pending; i++) {
-		const k = sha(`${seed}:pend:${i}`)
+		const k = SORTED_KEYS ? i.toString(16).padStart(64, '0') : sha(`${seed}:pend:${i}`)
 		pending[i] = {
 			eventKey: '0x' + k,
 			// 22 digits: with the 5 production keys this puts the average JSON line at about 267.2 bytes, the field's measured 267.17-267.18
@@ -71,7 +73,7 @@ export function makeDataset(t: Tier, seed: number): Dataset {
 	const freezeHeight = BASE + histBlocks - 1
 	const lastBlock = BASE + histBlocks + Math.floor((t.pending - nHist) / 13)
 	const consumed: string[] = new Array(t.consumed)
-	for (let i = 0; i < t.consumed; i++) consumed[i] = '0x' + sha(`${seed}:cons:${i}`)
+	for (let i = 0; i < t.consumed; i++) consumed[i] = '0x' + (SORTED_KEYS ? (10_000_000 + i).toString(16).padStart(64, '0') : sha(`${seed}:cons:${i}`))
 	const exited: string[] = new Array(t.exited)
 	for (let i = 0; i < t.exited; i++) exited[i] = '0x' + sha(`${seed}:exit1:${i}`) + sha(`${seed}:exit2:${i}`).slice(0, 32)
 	const scalars: Record<string, unknown> = {

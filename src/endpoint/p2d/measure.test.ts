@@ -43,6 +43,8 @@ type ChildReport = {
 	rssAfterGcBytes: number
 	/** RSS right after the work, BEFORE any forced GC (what a plain measurement of the process shows; the OS does not give freed pages back at once) */
 	rssBeforeGcBytes: number
+	/** RSS after exactly ONE forced GC (the reviewer's method for "steady"); rssAfterGcBytes is after two */
+	rssAfterOneGcBytes: number
 	gc: { count: number; maxPauseMs: number; totalPauseMs: number }
 	counts: Record<string, number>
 	extra?: Record<string, unknown>
@@ -127,6 +129,7 @@ async function childMain(mode: string, dir: string): Promise<void> {
 	const maxRssKb = process.resourceUsage().maxRSS
 	const gcStats = await go.stop() // the workload's own collections only (before the forced ones below)
 	gc?.()
+	const rssAfterOneGc = process.memoryUsage().rss // the reviewer's "steady": exactly ONE global.gc(), then rss
 	gc?.()
 	const mem = process.memoryUsage()
 	void hold
@@ -142,6 +145,7 @@ async function childMain(mode: string, dir: string): Promise<void> {
 		heapUsedAfterGcBytes: mem.heapUsed,
 		rssAfterGcBytes: mem.rss,
 		rssBeforeGcBytes: memBefore.rss,
+		rssAfterOneGcBytes: rssAfterOneGc,
 		gc: gcStats,
 		counts,
 		extra,
@@ -156,8 +160,17 @@ type ChildRun = { ok: true; report: ChildReport; psPeakBytes: number; timeMaxRss
  * One measured child. Run under `/usr/bin/time -l` (maximum resident set size and peak memory footprint, in bytes on macOS) and sampled externally every 20 ms; the child also reports its own OS high-water mark.
  * The number used for a release decision is the LARGEST of the three (the reviewer's rule: a sample can miss a short peak). `allowFail` returns a failure (e.g. a V8 out-of-memory abort) instead of throwing.
  */
+/** Spawn limits (after the first version of the tool multiplied its own children): depth 1 only (a child must not start children: P2D_CHILD), one child at a time, and a total cap per process. */
+export const P2D_MAX_CHILDREN = Number(process.env.P2D_MAX_CHILDREN ?? 400)
+const spawnState = { started: 0, running: 0 }
+export const spawnStateForTest = spawnState
+
 function runChild(mode: string, dir: string, extraNodeArgs: string[] = [], allowFail = false): Promise<ChildRun> {
 	if (process.env.P2D_CHILD) throw new Error('p2d: a measurement child must not start children of its own')
+	if (spawnState.running >= 1) throw new Error('p2d: a measurement child is still running; the tool runs one child at a time')
+	if (spawnState.started >= P2D_MAX_CHILDREN) throw new Error(`p2d: ${spawnState.started} children already started in this process (cap ${P2D_MAX_CHILDREN}); refusing to start more`)
+	spawnState.started++
+	spawnState.running++
 	const loader = process.execArgv.some((a) => a.includes('tsx')) ? [...process.execArgv] : ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href]
 	// the parent may run with a big heap only to GENERATE data; a measured child gets exactly the flags passed in extraNodeArgs (default: Node's own default old-space limit), and its flags are recorded in its report
 	const nodeArgs = [...loader.filter((a) => !a.startsWith('--expose-gc') && !a.startsWith('--max-old-space-size')), '--expose-gc', ...extraNodeArgs, __filename, '--child', mode, '--dir', dir]
@@ -181,6 +194,7 @@ function runChild(mode: string, dir: string, extraNodeArgs: string[] = [], allow
 		}, 20)
 		child.on('exit', (code, signal) => {
 			clearInterval(timer)
+			spawnState.running--
 			const wallMs = Date.now() - t0
 			const line = out.split('\n').find((l) => l.startsWith('P2D_REPORT '))
 			const m1 = /(\d+)\s+maximum resident set size/.exec(err)
@@ -215,6 +229,7 @@ async function tierRun(tier: string, out: string, repeats: number, keep: boolean
 	if (!t) throw new Error(`unknown tier ${tier}`)
 	fs.mkdirSync(out, { recursive: true })
 	const forms = tier === 'B2' || tier === 'P0' ? ['v2', 'wal', 'walTail'] : ['v2', 'wal']
+	process.stderr.write(`${tier}: uptime at start: ${execFileSync('uptime', { encoding: 'utf8' }).trim()}\n`)
 	const freeBefore = dfFreeBytes(out)
 	process.stderr.write(`${tier}: disk free before: ${gb(freeBefore)} GB (floor ${gb(FREE_SPACE_FLOOR_BYTES)} GB)\n`)
 	const tGen = Date.now()
@@ -252,12 +267,13 @@ async function tierRun(tier: string, out: string, repeats: number, keep: boolean
 		tier: { name: tier, ...t },
 		sizesBytes: sizes,
 		defaultHeapLimitBytes: heapLimitDefault,
-		recoverWal: runs['recover-wal']!.length ? { releasePeakGB: sum('recover-wal', (r) => r.releasePeakBytes / G), osHighWaterGB: sum('recover-wal', (r) => r.report.maxRssBytes / G), timeMaxRssGB: sum('recover-wal', (r) => r.timeMaxRssBytes / G), peakFootprintGB: sum('recover-wal', (r) => r.peakFootprintBytes / G), psPeakGB: sum('recover-wal', (r) => r.psPeakBytes / G), rssBeforeGcGB: sum('recover-wal', (r) => r.report.rssBeforeGcBytes / G), rssAfterGcGB: sum('recover-wal', (r) => r.report.rssAfterGcBytes / G), heapAfterGcGB: sum('recover-wal', (r) => r.report.heapUsedAfterGcBytes / G), heapBeforeGcGB: sum('recover-wal', (r) => r.report.heapUsedBeforeGcBytes / G), recoverMs: sum('recover-wal', (r) => r.report.phases.recoverMs!), gcMaxPauseMs: sum('recover-wal', (r) => r.report.gc.maxPauseMs), gcTotalPauseMs: sum('recover-wal', (r) => r.report.gc.totalPauseMs) } : null,
+		recoverWal: runs['recover-wal']!.length ? { releasePeakGB: sum('recover-wal', (r) => r.releasePeakBytes / G), osHighWaterGB: sum('recover-wal', (r) => r.report.maxRssBytes / G), timeMaxRssGB: sum('recover-wal', (r) => r.timeMaxRssBytes / G), peakFootprintGB: sum('recover-wal', (r) => r.peakFootprintBytes / G), psPeakGB: sum('recover-wal', (r) => r.psPeakBytes / G), rssBeforeGcGB: sum('recover-wal', (r) => r.report.rssBeforeGcBytes / G), rssAfterOneGcGB: sum('recover-wal', (r) => r.report.rssAfterOneGcBytes / G), rssAfterGcGB: sum('recover-wal', (r) => r.report.rssAfterGcBytes / G), heapAfterGcGB: sum('recover-wal', (r) => r.report.heapUsedAfterGcBytes / G), heapBeforeGcGB: sum('recover-wal', (r) => r.report.heapUsedBeforeGcBytes / G), recoverMs: sum('recover-wal', (r) => r.report.phases.recoverMs!), gcMaxPauseMs: sum('recover-wal', (r) => r.report.gc.maxPauseMs), gcTotalPauseMs: sum('recover-wal', (r) => r.report.gc.totalPauseMs) } : null,
 		recoverWalTail: runs['recover-walTail']!.length ? { releasePeakGB: sum('recover-walTail', (r) => r.releasePeakBytes / G), recoverMs: sum('recover-walTail', (r) => r.report.phases.recoverMs!), replayed: runs['recover-walTail']![0]!.report.counts.replayed } : null,
-		readLegacy: { releasePeakGB: sum('read-legacy', (r) => r.releasePeakBytes / G), osHighWaterGB: sum('read-legacy', (r) => r.report.maxRssBytes / G), timeMaxRssGB: sum('read-legacy', (r) => r.timeMaxRssBytes / G), psPeakGB: sum('read-legacy', (r) => r.psPeakBytes / G), maxRssAfterStateReadOnlyGB: sum('read-legacy', (r) => (r.report.counts.maxRssAfterReadStateKb! * 1024) / G), rssBeforeGcGB: sum('read-legacy', (r) => r.report.rssBeforeGcBytes / G), rssAfterGcGB: sum('read-legacy', (r) => r.report.rssAfterGcBytes / G), heapAfterGcGB: sum('read-legacy', (r) => r.report.heapUsedAfterGcBytes / G), readStateMs: sum('read-legacy', (r) => r.report.phases.readStateMs!), pendingMapMs: sum('read-legacy', (r) => r.report.phases.pendingMapMs!), gcMaxPauseMs: sum('read-legacy', (r) => r.report.gc.maxPauseMs) },
+		readLegacy: { releasePeakGB: sum('read-legacy', (r) => r.releasePeakBytes / G), osHighWaterGB: sum('read-legacy', (r) => r.report.maxRssBytes / G), timeMaxRssGB: sum('read-legacy', (r) => r.timeMaxRssBytes / G), psPeakGB: sum('read-legacy', (r) => r.psPeakBytes / G), maxRssAfterStateReadOnlyGB: sum('read-legacy', (r) => (r.report.counts.maxRssAfterReadStateKb! * 1024) / G), rssBeforeGcGB: sum('read-legacy', (r) => r.report.rssBeforeGcBytes / G), rssAfterOneGcGB: sum('read-legacy', (r) => r.report.rssAfterOneGcBytes / G), rssAfterGcGB: sum('read-legacy', (r) => r.report.rssAfterGcBytes / G), heapAfterGcGB: sum('read-legacy', (r) => r.report.heapUsedAfterGcBytes / G), readStateMs: sum('read-legacy', (r) => r.report.phases.readStateMs!), pendingMapMs: sum('read-legacy', (r) => r.report.phases.pendingMapMs!), gcMaxPauseMs: sum('read-legacy', (r) => r.report.gc.maxPauseMs) },
 		snapshot: { snapshotMs: sum('snapshot', (r) => r.report.phases.snapshotMs!), slices: sum('snapshot', (r) => Number(r.report.extra!.slices)), maxSliceMs: sum('snapshot', (r) => Number(r.report.extra!.maxSliceMs)), eventLoopMaxMs: sum('snapshot', (r) => Number((r.report.extra!.eventLoopDelayMs as { max: number }).max)), releasePeakGB: sum('snapshot', (r) => r.releasePeakBytes / G), rssBeforeSnapshotGB: sum('snapshot', (r) => Number(r.report.extra!.rssBeforeSnapshotBytes) / G), bytesWritten: sum('snapshot', (r) => Number(r.report.extra!.bytesWritten)), gcMaxPauseMs: sum('snapshot', (r) => r.report.gc.maxPauseMs) },
 		heapFloorProbe: floorProbe,
 	}
+	process.stderr.write(`${tier}: uptime at end: ${execFileSync('uptime', { encoding: 'utf8' }).trim()}\n`)
 	const raw = path.join(out, `results-${tier}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
 	fs.writeFileSync(raw, JSON.stringify({ summary, runs, freeBeforeBytes: freeBefore }, null, 2))
 	process.stdout.write(JSON.stringify(summary, null, 2) + '\n')
@@ -315,3 +331,43 @@ if (process.env.NODE_TEST_CONTEXT) test('measurement tool self-test: the three c
 		fs.rmSync(out, { recursive: true, force: true })
 	}
 })
+
+if (process.env.NODE_TEST_CONTEXT) {
+	test('spawn guards: a measurement child cannot start children, children run one at a time, the total is capped, and a child process registers no tests', async () => {
+		const out = fs.mkdtempSync(path.join(process.env.P2D_TMP ?? '/tmp', 'p2d-guard-'))
+		try {
+			const g = await generate({ tier: 'tiny', forms: ['wal'], out, seed: 5, tail: 0 })
+			// 1. depth: with the child marker set (as every child has it) runChild refuses
+			process.env.P2D_CHILD = '1'
+			try {
+				assert.throws(() => runChild('heap-limit', g.dirs.wal!), /must not start children of its own/)
+			} finally {
+				delete process.env.P2D_CHILD
+			}
+			// 2. concurrency: a second child while one runs is refused (the first one is allowed to finish)
+			const first = runChild('heap-limit', g.dirs.wal!)
+			assert.throws(() => runChild('heap-limit', g.dirs.wal!), /one child at a time/)
+			okRun(await first)
+			// 3. total cap
+			const before = spawnState.started
+			const savedCap = (spawnStateForTest as { started: number }).started
+			spawnState.started = P2D_MAX_CHILDREN
+			try {
+				assert.throws(() => runChild('heap-limit', g.dirs.wal!), /cap \d+\); refusing to start more/)
+			} finally {
+				spawnState.started = savedCap
+			}
+			assert.equal(spawnState.started, before)
+			// 4. a child process that imports this module registers and runs NO test and prints no TAP: it only reports (the first version's children ran the self-test, which started children...)
+			const r = okRun(await runChild('heap-limit', g.dirs.wal!))
+			assert.ok(r.report.counts.heapSizeLimitBytes! > 0)
+			// the raw output of a child is one report line: re-run the child by hand and look at everything it printed
+			const loader = process.execArgv.some((a) => a.includes('tsx')) ? [...process.execArgv] : ['--import', pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'loader.mjs')).href]
+			const raw = execFileSync(process.execPath, [...loader.filter((a) => !a.startsWith('--max-old-space-size')), '--expose-gc', __filename, '--child', 'heap-limit', '--dir', g.dirs.wal!], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: os.tmpdir(), P2D_CHILD: '1' } })
+			assert.ok(!/TAP version|# Subtest|^ok |^not ok /m.test(raw), `a child printed test output: ${raw.slice(0, 200)}`)
+			assert.equal(raw.trim().split('\n').length, 1, 'exactly one line: the report')
+		} finally {
+			fs.rmSync(out, { recursive: true, force: true })
+		}
+	})
+}
