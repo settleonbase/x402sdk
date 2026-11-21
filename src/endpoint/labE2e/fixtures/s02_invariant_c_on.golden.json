@@ -1,0 +1,156 @@
+{
+  "chainSent": [
+    {
+      "amountWei": "4000000000000000",
+      "idempotencyKey": "lab-withdrawNative:11fefbf78ac6896059a4c79f4ac81e282da467695724402a61ac416739d85670",
+      "keyArray": "lab_e2e_payout",
+      "mined": true,
+      "to": "0xc71e246DD78B37C2fABc905D340932F28F503433",
+      "value": "0"
+    },
+    {
+      "amountWei": "1000000000000000",
+      "idempotencyKey": "lab-withdrawNative:d44b338f2cdb51b9f7e713272c2d7218135088a4a77913353b1e4091091724c3",
+      "keyArray": "lab_e2e_payout",
+      "mined": true,
+      "to": "0xc71e246DD78B37C2fABc905D340932F28F503433",
+      "value": "0"
+    }
+  ],
+  "exits": [
+    {
+      "code": 0,
+      "killed": false,
+      "signal": null
+    }
+  ],
+  "logs": [
+    [
+      "[labMiningPoolClPayout] loaded manifest pubkeys=6 pool=0x32bE583C…",
+      "[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=6 tick=15000ms maxGasGwei=0.03 src=env name=CONET_LAB_MINING_POOL_CL_PAYOUT_MAX_GAS_PRICE_WEI reason=\"accepted\" gasWaitForceMs=300000 src=default name=default reason=\"unset\" gasLimit=800000 src=default name=default reason=\"unset\" realtimeReserved=1 rpcHttpTimeoutMs=30000 txWaitTimeoutMs=120000 pendingPool=on",
+      "[labMiningPoolClPayout] dual-cursor H=120 frozenAt=<ts> historyCursor=104 realtimeCursor=120 floor=100 liveHead=120 (legacy listen=none backfill=104)",
+      "[labMiningPoolClPayout] history 105-114",
+      "[labMiningPoolClPayout] scan-summary line=history blocks=105-114 n=10 proxyWithdrawals=0 invalid=0 localHit=0 nonLab=0 labChainConsumed=0 nonSkim=0 nonActive=0 guardianBeneficiary=0 added=0 consumedDelta=0 fetchFailed=0 unconfirmed=0 paused=0",
+      "[labMiningPoolClPayout] progress hist remaining=6 pct=95% rt tipGap=0 pending=5 histPayable=2 histAhead=3",
+      "[labMiningPoolClPayout] invariant C on: maxPaidHistoryBlock initialised 101 (initial=101 source=oldest-pending-history) committedHistoryCursor=114",
+      "[labMiningPoolClPayout] flush inspect=4/5 live=4 → 1 batch(es) A2 rtFirst=0 hist=1 reserved=1 rtLatency tipGap=0 histProgress remaining=6 pct=95% (maxEntries=200 batchEntries=10 maxBatches=2) gasPrice=0.001gwei",
+      "[labMiningPoolClPayout] withdrawNative sent via signer tx=0xa703b87f6dd2455a324fe01fb818f112448cdf38dd87a59d27fcaea5d6153e53 line=history recovered=0 n=4 gasPrice=0.001gwei",
+      "[labMiningPoolClPayout] withdrawNative ok hash=0xa703b87f6dd2455a324fe01fb818f112448cdf38dd87a59d27fcaea5d6153e53 n=4",
+      "[labMiningPoolClPayout] flush-summary inspect=4/5 droppedChainConsumed=0 unconfirmed=0 guardianHeld=0 held=0 signable=4 batches=1 settledEntries=4 consumedDelta=4 failed=0 inspectRealtime=0 inspectHistory=4 pendingRealtime=0 pendingHistory=5 pendingHistoryPayable=4 pendingHistoryAhead=1 histAheadHeld=1 histCursor=114 maxPaidHistoryBlock=101 frontLead=-13",
+      "[labMiningPoolClPayout] history 115-120",
+      "[labMiningPoolClPayout] scan-summary line=history blocks=115-120 n=6 proxyWithdrawals=0 invalid=0 localHit=0 nonLab=0 labChainConsumed=0 nonSkim=0 nonActive=0 guardianBeneficiary=0 added=0 consumedDelta=0 fetchFailed=0 unconfirmed=0 paused=0",
+      "[labMiningPoolClPayout] progress hist remaining=0 pct=100% rt tipGap=0 pending=1 histPayable=0 histAhead=1",
+      "[labMiningPoolClPayout] flush inspect=1/1 live=1 → 1 batch(es) A2 rtFirst=0 hist=1 reserved=1 rtLatency tipGap=0 histProgress remaining=0 pct=100% (maxEntries=200 batchEntries=10 maxBatches=2) gasPrice=0.001gwei",
+      "[labMiningPoolClPayout] withdrawNative sent via signer tx=0xb710b082fedd6aaf5e55bc845b295aa7c11f63bc607daa57b92cf9d18fece833 line=history recovered=0 n=1 gasPrice=0.001gwei",
+      "[labMiningPoolClPayout] withdrawNative ok hash=0xb710b082fedd6aaf5e55bc845b295aa7c11f63bc607daa57b92cf9d18fece833 n=1",
+      "[labMiningPoolClPayout] flush-summary inspect=1/1 droppedChainConsumed=0 unconfirmed=0 guardianHeld=0 held=0 signable=1 batches=1 settledEntries=1 consumedDelta=1 failed=0 inspectRealtime=0 inspectHistory=1 pendingRealtime=0 pendingHistory=1 pendingHistoryPayable=1 pendingHistoryAhead=0 histAheadHeld=0 histCursor=120 maxPaidHistoryBlock=109 frontLead=-11",
+      "[labMiningPoolClPayout] listening checkpoint lastListeningEndBlock=120 (backfill≥119)",
+      "[labMiningPoolClPayout] progress hist remaining=0 pct=100% rt tipGap=0 pending=0 histPayable=0 histAhead=0",
+      "[e2e-child] E2E_DONE; draining"
+    ]
+  ],
+  "paymentsPerKey": {
+    "lab-withdrawNative:11fefbf78ac6896059a4c79f4ac81e282da467695724402a61ac416739d85670": 1,
+    "lab-withdrawNative:d44b338f2cdb51b9f7e713272c2d7218135088a4a77913353b1e4091091724c3": 1
+  },
+  "signerRequests": [
+    {
+      "chainId": 224422,
+      "data": "0x07b18bde00000000000000000000000032be583c8e778fffc5107bf34820c2b225336201000000000000000000000000000000000000000000000000000e35fa931a0000",
+      "gasLimit": "800000",
+      "idempotencyKey": "lab-withdrawNative:11fefbf78ac6896059a4c79f4ac81e282da467695724402a61ac416739d85670",
+      "keyArray": "lab_e2e_payout",
+      "requestFingerprint": "0x11fefbf78ac6896059a4c79f4ac81e282da467695724402a61ac416739d85670",
+      "to": "0xc71e246DD78B37C2fABc905D340932F28F503433",
+      "value": "0"
+    },
+    {
+      "chainId": 224422,
+      "data": "0x07b18bde00000000000000000000000032be583c8e778fffc5107bf34820c2b22533620100000000000000000000000000000000000000000000000000038d7ea4c68000",
+      "gasLimit": "800000",
+      "idempotencyKey": "lab-withdrawNative:d44b338f2cdb51b9f7e713272c2d7218135088a4a77913353b1e4091091724c3",
+      "keyArray": "lab_e2e_payout",
+      "requestFingerprint": "0xd44b338f2cdb51b9f7e713272c2d7218135088a4a77913353b1e4091091724c3",
+      "to": "0xc71e246DD78B37C2fABc905D340932F28F503433",
+      "value": "0"
+    }
+  ],
+  "state": {
+    "consumed": [
+      "0x4a7203f705e51df4a56139a9b86b4a0970bed7ab7a3446eaffe2289989c1645c",
+      "0x682158d08466d11c566d5712d4396197fdd67e65be71d83c97ef719ec468867b",
+      "0xaa31d2a33b224bee3888830916f2f56f41bb5a40ed8a3273c6e72e6992d6223a",
+      "0xe670ad3737592689b6d0787c59715ff4f5de89240d521457493a4f75d9962a79",
+      "0x915da9abdae48b56e38f1c8581eb1f6060cdb1aac1fd60a1040a8eab69db2431"
+    ],
+    "exited": [],
+    "files": {
+      "consumed.jsonl": "dc6ae1e070bb83e4bfaecbb66dc84cccdbff04eb606e4426fb7fd9f659b24c47",
+      "exited.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "manifest": {
+      "consumed": {
+        "bytes": 345,
+        "file": "consumed.jsonl",
+        "keySetSha256": "8f19d56ceb2299e1149ff863dca4384677eb5b15abd4fc681c94abfd6110ea5e",
+        "lines": 5,
+        "sha256": "dc6ae1e070bb83e4bfaecbb66dc84cccdbff04eb606e4426fb7fd9f659b24c47"
+      },
+      "exited": {
+        "bytes": 0,
+        "file": "exited.jsonl",
+        "keySetSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "lines": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "format": "beamio-lab-clpayout-state",
+      "pending": {
+        "count": 0,
+        "keySetSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "segments": []
+      },
+      "scalars": {
+        "cursorHighWater": {
+          "backfill": 120,
+          "listen": 120
+        },
+        "freezeH": {
+          "frozenAt": "<ts>",
+          "hash": "0x91dd322905b5b66a080df2ce05c2900037861bb006e5c0d98b0cb3b416f90599",
+          "height": 120
+        },
+        "historyCursor": 120,
+        "lastBackfillProcessedBlock": 120,
+        "lastListeningEndBlock": 120,
+        "lastLiveHeadScanned": 120,
+        "maxPaidHistoryBlock": 115,
+        "realtimeCursor": 120,
+        "settledBatchCount": 2,
+        "updatedAt": "<ts>"
+      },
+      "segmentSize": 100000,
+      "version": 2
+    },
+    "pending": [],
+    "scalars": {
+      "cursorHighWater": {
+        "backfill": 120,
+        "listen": 120
+      },
+      "freezeH": {
+        "frozenAt": "<ts>",
+        "hash": "0x91dd322905b5b66a080df2ce05c2900037861bb006e5c0d98b0cb3b416f90599",
+        "height": 120
+      },
+      "historyCursor": 120,
+      "lastBackfillProcessedBlock": 120,
+      "lastListeningEndBlock": 120,
+      "lastLiveHeadScanned": 120,
+      "maxPaidHistoryBlock": 115,
+      "realtimeCursor": 120,
+      "settledBatchCount": 2,
+      "updatedAt": "<ts>"
+    }
+  },
+  "unknownRpcMethods": []
+}

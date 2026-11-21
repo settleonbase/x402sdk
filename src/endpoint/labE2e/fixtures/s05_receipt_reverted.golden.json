@@ -1,0 +1,148 @@
+{
+  "chainSent": [
+    {
+      "amountWei": "39000000000000000",
+      "idempotencyKey": "lab-withdrawNative:86c25413332ad1d41f1baeeda84c8fd1d783d597a1ecabbe8788aa5af41a02ab",
+      "keyArray": "lab_e2e_payout",
+      "mined": true,
+      "to": "0xc71e246DD78B37C2fABc905D340932F28F503433",
+      "value": "0"
+    }
+  ],
+  "exits": [
+    {
+      "code": 3,
+      "killed": false,
+      "signal": null
+    },
+    {
+      "code": 0,
+      "killed": false,
+      "signal": null
+    }
+  ],
+  "logs": [
+    [
+      "[labMiningPoolClPayout] loaded manifest pubkeys=6 pool=0x32bE583C…",
+      "[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=6 tick=15000ms maxGasGwei=0.03 src=env name=CONET_LAB_MINING_POOL_CL_PAYOUT_MAX_GAS_PRICE_WEI reason=\"accepted\" gasWaitForceMs=300000 src=default name=default reason=\"unset\" gasLimit=800000 src=default name=default reason=\"unset\" realtimeReserved=1 rpcHttpTimeoutMs=30000 txWaitTimeoutMs=120000 pendingPool=on",
+      "[labMiningPoolClPayout] dual-cursor H=120 frozenAt=<ts> historyCursor=99 realtimeCursor=120 floor=100 liveHead=120 (legacy listen=none backfill=99)",
+      "[labMiningPoolClPayout] history queued +3 (pending=3) 100-109",
+      "[labMiningPoolClPayout] history queued +2 (pending=5) 110-119",
+      "[labMiningPoolClPayout] history 120-120",
+      "[labMiningPoolClPayout] scan-summary line=history blocks=100-120 n=21 proxyWithdrawals=6 invalid=0 localHit=0 nonLab=1 labChainConsumed=0 nonSkim=0 nonActive=0 guardianBeneficiary=0 added=5 consumedDelta=0 fetchFailed=0 unconfirmed=0 paused=0",
+      "[labMiningPoolClPayout] progress hist remaining=0 pct=100% rt tipGap=0 pending=5",
+      "[labMiningPoolClPayout] flush inspect=5/5 live=5 → 1 batch(es) A2 rtFirst=0 hist=1 reserved=1 rtLatency tipGap=0 histProgress remaining=0 pct=100% (maxEntries=200 batchEntries=10 maxBatches=2) gasPrice=0.001gwei",
+      "[labMiningPoolClPayout] withdrawNative sent via signer tx=0x797578632e7981a0df5ae1b1b225fd428010fa1b1868a182b139013ce01c8cb2 line=history recovered=0 n=5 gasPrice=0.001gwei",
+      "[labMiningPoolClPayout] withdrawNative reverted hash=0x797578632e7981a0df5ae1b1b225fd428010fa1b1868a182b139013ce01c8cb2; batch released, entries stay pending",
+      "[labMiningPoolClPayout] HALT (exit 3): receipt status 0: halted, batch released, no same-key re-send"
+    ],
+    [
+      "[labMiningPoolClPayout] loaded manifest pubkeys=6 pool=0x32bE583C…",
+      "[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=6 tick=15000ms maxGasGwei=0.03 src=env name=CONET_LAB_MINING_POOL_CL_PAYOUT_MAX_GAS_PRICE_WEI reason=\"accepted\" gasWaitForceMs=300000 src=default name=default reason=\"unset\" gasLimit=800000 src=default name=default reason=\"unset\" realtimeReserved=1 rpcHttpTimeoutMs=30000 txWaitTimeoutMs=120000 pendingPool=on",
+      "[labMiningPoolClPayout] dual-cursor H=120 frozenAt=<ts> historyCursor=120 realtimeCursor=120 floor=100 liveHead=120 (legacy listen=none backfill=120)",
+      "[labMiningPoolClPayout] progress hist remaining=0 pct=100% rt tipGap=0 pending=5",
+      "[labMiningPoolClPayout] flush inspect=5/5 live=5 → 1 batch(es) A2 rtFirst=0 hist=1 reserved=1 rtLatency tipGap=0 histProgress remaining=0 pct=100% (maxEntries=200 batchEntries=10 maxBatches=2) gasPrice=0.001gwei",
+      "[labMiningPoolClPayout] withdrawNative sent via signer tx=0x797578632e7981a0df5ae1b1b225fd428010fa1b1868a182b139013ce01c8cb2 line=history recovered=0 n=5 gasPrice=0.001gwei",
+      "[labMiningPoolClPayout] withdrawNative ok hash=0x797578632e7981a0df5ae1b1b225fd428010fa1b1868a182b139013ce01c8cb2 n=5",
+      "[labMiningPoolClPayout] flush-summary inspect=5/5 droppedChainConsumed=0 unconfirmed=0 guardianHeld=0 held=0 signable=5 batches=1 settledEntries=5 consumedDelta=5 failed=0 inspectRealtime=0 inspectHistory=5 pendingRealtime=0 pendingHistory=5",
+      "[e2e-child] E2E_DONE; draining"
+    ]
+  ],
+  "paymentsPerKey": {
+    "lab-withdrawNative:86c25413332ad1d41f1baeeda84c8fd1d783d597a1ecabbe8788aa5af41a02ab": 1
+  },
+  "signerRequests": [
+    {
+      "chainId": 224422,
+      "data": "0x07b18bde00000000000000000000000032be583c8e778fffc5107bf34820c2b225336201000000000000000000000000000000000000000000000000008a8e4b1a3d8000",
+      "gasLimit": "800000",
+      "idempotencyKey": "lab-withdrawNative:86c25413332ad1d41f1baeeda84c8fd1d783d597a1ecabbe8788aa5af41a02ab",
+      "keyArray": "lab_e2e_payout",
+      "requestFingerprint": "0x86c25413332ad1d41f1baeeda84c8fd1d783d597a1ecabbe8788aa5af41a02ab",
+      "to": "0xc71e246DD78B37C2fABc905D340932F28F503433",
+      "value": "0"
+    },
+    {
+      "chainId": 224422,
+      "data": "0x07b18bde00000000000000000000000032be583c8e778fffc5107bf34820c2b225336201000000000000000000000000000000000000000000000000008a8e4b1a3d8000",
+      "gasLimit": "800000",
+      "idempotencyKey": "lab-withdrawNative:86c25413332ad1d41f1baeeda84c8fd1d783d597a1ecabbe8788aa5af41a02ab",
+      "keyArray": "lab_e2e_payout",
+      "requestFingerprint": "0x86c25413332ad1d41f1baeeda84c8fd1d783d597a1ecabbe8788aa5af41a02ab",
+      "to": "0xc71e246DD78B37C2fABc905D340932F28F503433",
+      "value": "0"
+    }
+  ],
+  "state": {
+    "consumed": [
+      "0x2cc30221e0553428287371236269b4e2f6f11f95f33fb976fdb79b586bb6c342",
+      "0x366a7b92acda364086cc991f618bf9f10b629ec0f7ae94543f96b691b69ec992",
+      "0x422cccb7cea5c0e46f340bb7b21b81debac329f72e31669c20ff0f3a05cc2b5b",
+      "0x6ce4024642c4779dc119f2ece9b9cc34663ef4cfd6a7942d809a7de1813aca7d",
+      "0x7786f24ec8e68c1f537753be90a834aeb9797aa2ade11dc9f54973d24a879c0e"
+    ],
+    "exited": [],
+    "files": {
+      "consumed.jsonl": "d37e252dc649e2c7671db0a45245616d098760dc86011f95853e43536a5d17bf",
+      "exited.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "manifest": {
+      "consumed": {
+        "bytes": 345,
+        "file": "consumed.jsonl",
+        "keySetSha256": "41a4e57dc850844f7db0c7e232d07c0f2264d4ba4a0dc70005b019333dbc7eda",
+        "lines": 5,
+        "sha256": "d37e252dc649e2c7671db0a45245616d098760dc86011f95853e43536a5d17bf"
+      },
+      "exited": {
+        "bytes": 0,
+        "file": "exited.jsonl",
+        "keySetSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "lines": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "format": "beamio-lab-clpayout-state",
+      "pending": {
+        "count": 0,
+        "keySetSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "segments": []
+      },
+      "scalars": {
+        "cursorHighWater": {
+          "backfill": 120,
+          "listen": -1
+        },
+        "freezeH": {
+          "frozenAt": "<ts>",
+          "hash": "0x91dd322905b5b66a080df2ce05c2900037861bb006e5c0d98b0cb3b416f90599",
+          "height": 120
+        },
+        "historyCursor": 120,
+        "lastBackfillProcessedBlock": 120,
+        "realtimeCursor": 120,
+        "settledBatchCount": 1,
+        "updatedAt": "<ts>"
+      },
+      "segmentSize": 100000,
+      "version": 2
+    },
+    "pending": [],
+    "scalars": {
+      "cursorHighWater": {
+        "backfill": 120,
+        "listen": -1
+      },
+      "freezeH": {
+        "frozenAt": "<ts>",
+        "hash": "0x91dd322905b5b66a080df2ce05c2900037861bb006e5c0d98b0cb3b416f90599",
+        "height": 120
+      },
+      "historyCursor": 120,
+      "lastBackfillProcessedBlock": 120,
+      "realtimeCursor": 120,
+      "settledBatchCount": 1,
+      "updatedAt": "<ts>"
+    }
+  },
+  "unknownRpcMethods": []
+}
