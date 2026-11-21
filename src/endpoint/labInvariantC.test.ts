@@ -3,7 +3,11 @@
  * Pure functions and a small in-memory simulation. No RPC, no beacon, no socket, no files.
  */
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { readSegmentedState, writeSegmentedState } from './labClPayoutStateStore'
 import { decideLinePauses, nextPaused, PENDING_HIGH_WATER_ALL_DEFAULT, PENDING_HIGH_WATER_HISTORY_DEFAULT, BACKPRESSURE_RESUME_RATIO } from './labBackpressure'
 import { planPrune } from './labConsumedPrune'
 import { selectFlushCandidates, type FlushPos } from './labFlushSelect'
@@ -332,4 +336,22 @@ test('C property (control group): with the invariant off the same model DOES pay
 	// and the production-like safe case (cursor faster than payments) is clean even without it, so the invariant costs nothing there
 	const calm = simulate({ blocks: 300, perBlock: 8, cursorStart: 5, cursorPerCycle: 20, payPerCycle: 40, cap: 100, invariantC: false })
 	assert.equal(calm.duplicatePays, 0)
+})
+
+// ------------------------------------------------------------ persistence of the high-water mark (J1)
+test('C persistence: maxPaidHistoryBlock survives a state write and read (it is a plain scalar of the v2 store), and a later write keeps the larger value', () => {
+	const dir = mkdtempSync(join(tmpdir(), 'labinvc-'))
+	try {
+		const v2 = join(dir, 'state.v2')
+		writeSegmentedState(v2, { pending: [], consumedEventKeys: {}, exitedPubkeys: {}, historyCursor: 2_013_146, maxPaidHistoryBlock: 2_010_452 })
+		const back = readSegmentedState(v2)
+		assert.equal((back as unknown as { maxPaidHistoryBlock?: number }).maxPaidHistoryBlock, 2_010_452)
+		assert.equal((back as unknown as { historyCursor?: number }).historyCursor, 2_013_146)
+		// the daemon only ever advances it with advanceMaxPaidHistoryBlock (max), so a second write carries the larger value
+		const next = advanceMaxPaidHistoryBlock(2_010_452, [{ blockNumber: 2_010_460 }], H + 5_000_000)
+		writeSegmentedState(v2, { pending: [], consumedEventKeys: {}, exitedPubkeys: {}, historyCursor: 2_013_200, maxPaidHistoryBlock: next })
+		assert.equal((readSegmentedState(v2) as unknown as { maxPaidHistoryBlock?: number }).maxPaidHistoryBlock, 2_010_460)
+	} finally {
+		rmSync(dir, { recursive: true, force: true })
+	}
 })
