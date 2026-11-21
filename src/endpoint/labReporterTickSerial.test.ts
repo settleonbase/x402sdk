@@ -17,7 +17,7 @@ test('C4: ticks cannot overlap - the guard is set before the first await and rel
 	const guardAt = tick.indexOf('labInFlight = true')
 	const firstAwait = tick.indexOf('await ')
 	assert.ok(guardAt > 0 && guardAt < firstAwait, 'the in-flight guard is set before the first await')
-	assert.match(tick, /finally \{\s*labInFlight = false\s*\}/)
+	assert.match(tick, /finally \{\s*tickHandle\?\.exitTick\(\)\s*labInFlight = false\s*\}/)
 	const sched = src.slice(src.indexOf('function scheduleNextLabTick()'), src.indexOf('export function startValidatorLabMiningPoolClPayoutReporter'))
 	assert.match(sched, /await labPayoutTick\(\)\s*\n\s*scheduleNextLabTick\(\)/, 'the next timer is armed after the tick returned')
 	assert.match(src, /void labPayoutTick\(\)\.finally\(\(\) => scheduleNextLabTick\(\)\)/, 'the first tick re-arms only when it finished')
