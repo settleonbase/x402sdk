@@ -302,22 +302,22 @@ export class CooperativeKeySetHasher {
  * Same result as labConsumedPrune.planPrune(keysInInsertionOrder, pendingKeysLower, cap, ratio) but cooperative, and the lowercase-pending set is only built when the cap is exceeded.
  */
 export async function planPruneCooperative(
-	consumed: ReadonlyMap<string, unknown>,
-	pending: ReadonlyMap<string, unknown>,
+	consumedView: ReadonlyMap<string, unknown>,
+	pendingView: ReadonlyMap<string, unknown>,
 	cap: number,
 	slicer: Slicer | null,
 	ratio: number = CONSUMED_PRUNE_TARGET_RATIO
 ): Promise<string[]> {
-	if (consumed.size <= cap) return []
+	if (consumedView.size <= cap) return []
 	const target = Math.max(0, Math.floor(cap * ratio))
-	const excess = consumed.size - target
+	const excess = consumedView.size - target
 	const pendingLower = new Set<string>()
-	for (const k of pending.keys()) {
+	for (const k of pendingView.keys()) {
 		pendingLower.add(k.toLowerCase())
 		if (slicer) await slicer.tick()
 	}
 	const out: string[] = []
-	for (const k of consumed.keys()) {
+	for (const k of consumedView.keys()) {
 		if (out.length >= excess) break
 		if (!pendingLower.has(k.toLowerCase())) out.push(k)
 		if (slicer) await slicer.tick()

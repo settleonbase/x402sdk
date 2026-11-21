@@ -18,7 +18,7 @@ import path from 'node:path'
 import { SEGMENTED_STATE_VERSION, inspectSegmentedDir, loadCommittedForRecovery, readManifest, type SegmentedManifest } from './labClPayoutStateStore'
 import { LabPayoutStateCore, type PendingEntry } from './labPayoutStateCore'
 import { writeSnapshotCooperative, type SnapshotStats, type SnapshotWriteOptions } from './labSnapshotWriter'
-import { WAL_DIR, WalWriter, listSegments, nodeWalFs, removeWalSegmentsThrough, scanWal, type ScanResult, type WalFs } from './labWal'
+import { WAL_DIR, WalMidCorruptionError, WalWriter, formatWalMidCorruptionAlert, listSegments, nodeWalFs, removeWalSegmentsThrough, scanWal, type ScanResult, type WalFs } from './labWal'
 
 export type RecoveryResult = {
 	core: LabPayoutStateCore
@@ -78,6 +78,27 @@ export function recoverPayoutState(stateDir: string, opts: { onDrift?: (what: st
 		writerLastSeq: Math.max(snapshotSeq, scan.lastSeq),
 		warnings,
 		durationMs: Number(process.hrtime.bigint() - t0) / 1e6,
+	}
+}
+
+/**
+ * What the daemon calls at start (P2c): recovery, and on mid-log WAL damage ONLY alert and refuse. It never calls the repair command and never truncates; the operator runs
+ * labWalRepair offline with a run id and the written approval (review R5). `exit` is injectable for tests; the default exits with 78 (configuration/data error).
+ */
+export function recoverOrRefuse(
+	stateDir: string,
+	opts: { log?: (line: string) => void; exit?: (code: number) => never; onDrift?: (what: string) => void } = {}
+): RecoveryResult {
+	const log = opts.log ?? ((l: string) => process.stderr.write(`${l}\n`))
+	const exit = opts.exit ?? ((c: number): never => process.exit(c))
+	try {
+		return recoverPayoutState(stateDir, { onDrift: opts.onDrift })
+	} catch (e) {
+		if (e instanceof WalMidCorruptionError) {
+			log(formatWalMidCorruptionAlert(e))
+			return exit(78)
+		}
+		throw e
 	}
 }
 

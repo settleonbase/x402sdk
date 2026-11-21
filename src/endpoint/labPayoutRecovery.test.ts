@@ -7,64 +7,19 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { canonicalJson, readManifest, readSegmentedState, writeSegmentedState } from './labClPayoutStateStore'
+import { readManifest, readSegmentedState, writeSegmentedState } from './labClPayoutStateStore'
+import { Model, modelView, view } from './labPayoutTestSupport'
 import { opsForSeq } from './labWalKillChild'
 import { LabPayoutStateCore, type PendingEntry } from './labPayoutStateCore'
-import { gracefulStopToV2, postReplayChecks, recoverPayoutState } from './labPayoutRecovery'
+import { gracefulStopToV2, postReplayChecks, recoverOrRefuse, recoverPayoutState } from './labPayoutRecovery'
 import { writeSnapshotCooperative } from './labSnapshotWriter'
-import { WAL_DIR, WalMidCorruptionError, WalWriter, applyOps, listSegments, segmentFileName, type WalApplyTarget, type WalOp } from './labWal'
+import { WAL_DIR, WalMidCorruptionError, WalWriter, listSegments, segmentFileName, type WalOp } from './labWal'
 import { assertNoWalEvents } from './labWalGuard'
 
 const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'labrecov-'))
 const done = (d: string): void => fs.rmSync(d, { recursive: true, force: true })
 const noFatal = (e: Error): void => {
 	throw e
-}
-
-/** The reference: plain Maps, no layers, no snapshots. Same op semantics through applyOps. */
-class Model implements WalApplyTarget {
-	pending = new Map<string, Record<string, unknown>>()
-	consumed: string[] = []
-	private consumedSet = new Set<string>()
-	exited = new Set<string>()
-	scalars: Record<string, unknown> = {}
-	inFlight: Record<string, unknown> | null = null
-	pendingHas = (k: string): boolean => this.pending.has(k)
-	pendingSet = (e: { eventKey: string } & Record<string, unknown>): void => void this.pending.set(e.eventKey, e)
-	pendingDelete = (k: string): void => void this.pending.delete(k)
-	consumedAdd = (k: string): void => {
-		if (!this.consumedSet.has(k)) {
-			this.consumedSet.add(k)
-			this.consumed.push(k)
-		}
-	}
-	exitedAdd = (k: string): void => void this.exited.add(k)
-	getScalar = (n: string): unknown => this.scalars[n]
-	setScalar = (n: string, v: unknown): void => void (this.scalars[n] = v)
-	deleteScalar = (n: string): void => void delete this.scalars[n]
-	setInFlight = (r: Record<string, unknown> | null): void => void (this.inFlight = r)
-	apply(ops: WalOp[]): void {
-		applyOps(this, ops)
-	}
-}
-
-function view(core: LabPayoutStateCore): string {
-	return canonicalJson({
-		pending: [...core.pendingEntries()].map((e) => ({ ...e })).sort((a, b) => (a.eventKey < b.eventKey ? -1 : 1)),
-		consumed: [...core.consumedKeys()],
-		exited: [...core.exited.keys()].sort(),
-		scalars: core.scalarsCopy(),
-		inFlight: core.getInFlight(),
-	})
-}
-function modelView(m: Model): string {
-	return canonicalJson({
-		pending: [...m.pending.values()].map((e) => ({ ...e })).sort((a, b) => ((a.eventKey as string) < (b.eventKey as string) ? -1 : 1)),
-		consumed: m.consumed,
-		exited: [...m.exited].sort(),
-		scalars: m.scalars,
-		inFlight: m.inFlight,
-	})
 }
 
 type Sim = { dir: string; seed: number; core: LabPayoutStateCore; wal: WalWriter; model: Model; segmentBytes: number }
@@ -404,4 +359,41 @@ test('post-replay self-checks: maxPaidHistoryBlock above the cursor and in-fligh
 	assert.match(w[1]!, /2 key\(s\) that are neither pending nor consumed/)
 	const ok = new LabPayoutStateCore({ scalars: { historyCursor: 100, maxPaidHistoryBlock: 100 } })
 	assert.deepEqual(postReplayChecks(ok), [])
+})
+
+test('recoverOrRefuse: mid-log damage only alerts (the alert text names the offline repair, no automatic repair) and exits; the module never references the repair command; other errors propagate', async () => {
+	const dir = tmp()
+	try {
+		const sim = await bootstrap(dir, 81, 100000)
+		await emit(sim, 20)
+		await sim.wal.close()
+		const file = path.join(dir, WAL_DIR, segmentFileName(1))
+		const buf = fs.readFileSync(file)
+		buf[40] = buf[40]! ^ 0x55
+		fs.writeFileSync(file, buf)
+		const lines: string[] = []
+		class Exited extends Error {}
+		assert.throws(
+			() =>
+				recoverOrRefuse(dir, {
+					log: (l) => lines.push(l),
+					exit: (c) => {
+						lines.push(`exit ${c}`)
+						throw new Exited()
+					},
+				}),
+			Exited
+		)
+		assert.equal(lines.length, 2)
+		assert.match(lines[0]!, /ALERT WAL damaged in the middle/)
+		assert.match(lines[0]!, /Refusing to start; nothing was truncated; no automatic repair/)
+		assert.equal(lines[1], 'exit 78')
+		assert.deepEqual(fs.readFileSync(file), buf, 'nothing was changed')
+		const src = fs.readFileSync(path.join(__dirname, 'labPayoutRecovery.ts'), 'utf8')
+		assert.doesNotMatch(src.replace(/\/\*[\s\S]*?\*\//g, ''), /labWalRepair|repairMidCorruption/)
+		// an unrelated failure is not swallowed
+		assert.throws(() => recoverOrRefuse(path.join(dir, 'missing'), { exit: () => { throw new Exited() } }), /no committed snapshot/)
+	} finally {
+		done(dir)
+	}
 })
