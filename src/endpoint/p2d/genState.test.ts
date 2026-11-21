@@ -22,23 +22,23 @@ import { WalWriter, type WalOp } from '../labWal'
 
 export type Tier = { pending: number; consumed: number; exited: number; historyShare: number }
 export const TIERS: Record<string, Tier> = {
-	/** half scale: only to reproduce the reviewer's already measured numbers (M0) */
+	/** half scale: only to reproduce the reviewer's already measured numbers (M0); entries as before the field aggregates */
 	A: { pending: 830_000, consumed: 1_500_000, exited: 2_000, historyShare: 0.95 },
-	/** today's real shape (old path): about 1.68M pending, about 250k consumed */
-	P0: { pending: 1_680_000, consumed: 250_000, exited: 2_000, historyShare: 0.95 },
-	/** release tier: about 2.05M pending (the back-pressure pause lines), consumed = the production cap (field value pending; bracketed by B2_250K and B2_3M until then) */
-	B2_250K: { pending: 2_050_000, consumed: 250_000, exited: 2_000, historyShare: 0.93 },
-	B2_3M: { pending: 2_050_000, consumed: 3_000_000, exited: 2_000, historyShare: 0.93 },
+	/** today's real shape, from the field's read-only aggregates (2026-11-21T20:28Z): 1,683,285 pending (1,609,706 history + 73,579 realtime), 252,951 consumed */
+	P0: { pending: 1_683_285, consumed: 252_951, exited: 2_000, historyShare: 1_609_706 / 1_683_285 },
+	/** release tier: about 2.05M pending (history at the 1.8M back-pressure pause line + 250k realtime), consumed at the production CONSUMED_KEYS_MAX = 3,000,000 (field value, not interpolated) */
+	B2: { pending: 2_050_000, consumed: 3_000_000, exited: 2_000, historyShare: 1_800_000 / 2_050_000 },
 	/** self-test */
 	tiny: { pending: 3_000, consumed: 5_000, exited: 40, historyShare: 0.9 },
 }
 
 export const FREE_SPACE_FLOOR_BYTES = 30 * 1024 ** 3
 const sha = (s: string): string => createHash('sha256').update(s).digest('hex')
-const PUBKEY_POOL = 60_000
+/** the field counted 1,887 distinct pubkeys among the 1.68M pending entries */
+const PUBKEY_POOL = 1_887
 
 export function estimateBytes(t: Tier, forms: number): number {
-	return (t.pending * 330 + t.consumed * 70) * forms
+	return (t.pending * 290 + t.consumed * 75) * forms
 }
 
 export function assertFreeSpace(dir: string, needBytes: number): void {
@@ -61,7 +61,8 @@ export function makeDataset(t: Tier, seed: number): Dataset {
 		const k = sha(`${seed}:pend:${i}`)
 		pending[i] = {
 			eventKey: '0x' + k,
-			amount: (BigInt('0x' + k.slice(0, 15)) % 30_000_000_000_000_000_000n + 1_000_000_000n).toString(),
+			// 22 digits: with the 5 production keys this puts the average JSON line at about 267.2 bytes, the field's measured 267.17-267.18
+			amount: (BigInt('0x' + k.slice(0, 15)) % 9_000_000_000_000_000_000_000n + 1_000_000_000_000_000_000_000n).toString(),
 			blockNumber: i < nHist ? BASE + Math.floor(i / 13) : BASE + histBlocks + Math.floor((i - nHist) / 13), // history exactly up to the freeze height, realtime above it
 			withdrawalIndex: i % 13,
 			pubkey: pubkeys[i % PUBKEY_POOL]!,
@@ -204,6 +205,11 @@ if (process.env.NODE_TEST_CONTEXT) test('generator self-test: deterministic, the
 		assert.match(String(e0.eventKey), /^0x[0-9a-f]{64}$/)
 		assert.match(String(e0.pubkey), /^0x[0-9a-f]{96}$/)
 		assert.match(String(e0.amount), /^[0-9]+$/)
+		// the field's aggregates: average pending JSON line 267.17-267.18 bytes (without the newline), 1,887 distinct pubkeys, consumed lines 69.00 bytes with the newline
+		const avgLine = again.pending.reduce((a, e) => a + JSON.stringify(e).length, 0) / again.pending.length
+		assert.ok(Math.abs(avgLine - 267.2) < 1.0, `average pending line ${avgLine.toFixed(2)} bytes`)
+		assert.equal(new Set(again.pending.map((e) => e.pubkey)).size, 1_887)
+		assert.equal(JSON.stringify(again.consumed[0]).length + 1, 69)
 		const fz = (again.scalars.freezeH as { height: number }).height
 		assert.equal(again.pending.filter((e) => (e.blockNumber as number) <= fz).length, Math.floor(3000 * 0.9), 'history share')
 		// the free-space guard: an absurd size is refused, nothing is written
