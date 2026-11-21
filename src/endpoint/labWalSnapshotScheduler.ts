@@ -9,6 +9,7 @@
  *   - snapshot failed / skipped because the previous is still running
  *   - consumed archive failed (the snapshot committed, nothing was pruned this time)
  *   - the log is more than twice the size limit (snapshots are not keeping up)
+ *   - the history-block counts drifted (found at a snapshot or on a removal; the session also wires the core's own drift callback)
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -141,7 +142,8 @@ export class WalSnapshotScheduler {
 				waitDurable: (seq) => wal.whenDurable(seq),
 				...this.o.writeOptions,
 			})
-			core.finishSnapshot(src, { committed: true, prunedKeys: res.prunedKeys, frozenHistCounts: res.frozenHistCounts })
+			const fin = core.finishSnapshot(src, { committed: true, prunedKeys: res.prunedKeys, frozenHistCounts: res.frozenHistCounts })
+			if (fin.drift) this.o.log(`[labMiningPoolClPayout] ALERT history-block counts drifted: the incremental counts and the snapshot's own count differed at walSeq ${src.walSeq}; the live counts were corrected`)
 			const removed = wal.truncateThrough(src.walSeq)
 			this.stats.committed++
 			this.stats.lastCommittedAt = this.now()

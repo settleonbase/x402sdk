@@ -91,3 +91,18 @@ test('S4: the start-up alignment runs inside enterTick/exitTick (finally) and le
 	assert.match(reporter, /s\.handle\.requireIdle\(\)/, 'the WAL shutdown flush refuses to write in parallel with a tick')
 	assert.match(session, /await s\.scheduler\.stop\(\)[\s\S]*?tickIdle[\s\S]*?s\.handle\.requireIdle\(\)[\s\S]*?gracefulStopToV2/, 'the graceful stop stops the scheduler, checks the tick is idle, requires idle, then converts')
 })
+
+test('drift in the incremental history counts is an ALERT from the session (the core carries the callback)', async () => {
+	const t = tmp()
+	const logs: string[] = []
+	const s = await open(t, logs)
+	try {
+		s.core.setScalar('freezeH', { height: 500 }) // history entries are only counted once a freeze height exists
+		s.core.pending.set('0x' + '9'.repeat(64), { eventKey: '0x' + '9'.repeat(64), blockNumber: 55, withdrawalIndex: 0, amount: '1', pubkey: '0xabc' } as never) // bypasses the counting path
+		s.core.pendingDelete('0x' + '9'.repeat(64))
+		assert.ok(logs.some((l) => /ALERT history-block count drift: remove of block 55 with no count/.test(l)), logs.join('\n'))
+	} finally {
+		await s.wal.close()
+		fs.rmSync(t.root, { recursive: true, force: true })
+	}
+})

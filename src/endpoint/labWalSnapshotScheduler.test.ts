@@ -187,3 +187,20 @@ test('a log more than twice the limit raises its own ALERT (rate limited); stop(
 		await w.done()
 	}
 })
+
+test('count drift found at a snapshot is an ALERT and is corrected', async () => {
+	const w = await world()
+	try {
+		await fill(w.h, 1, 5)
+		// an entry that reaches the pool without going through the counting path (what a bug would do): the snapshot writer counts it, the incremental counts do not
+		w.core.pending.set(key(900), { eventKey: key(900), blockNumber: 77, withdrawalIndex: 0, amount: '1', pubkey: '0xabc' } as never)
+		const s = w.mk()
+		w.clock.t += 600_000
+		s.poke()
+		await w.settle(s)
+		assert.equal(s.stats.committed, 1)
+		assert.ok(w.logs.some((l) => /ALERT history-block counts drifted/.test(l)), w.logs.join('\n'))
+	} finally {
+		await w.done()
+	}
+})

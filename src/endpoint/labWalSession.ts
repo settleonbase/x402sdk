@@ -104,7 +104,7 @@ export async function openWalSession(opts: {
 		boot.finishSnapshot(src, { committed: true, prunedKeys: [], frozenHistCounts: res.frozenHistCounts })
 		removeBootstrapMarker(opts.stateDir)
 	}
-	const rec = recoverOrRefuse(opts.stateDir, { log: opts.log })
+	const rec = recoverOrRefuse(opts.stateDir, { log: opts.log, onDrift: (what) => opts.log(`[labMiningPoolClPayout] ALERT history-block count drift: ${what}`) })
 	for (const w of rec.warnings) opts.log(`[labMiningPoolClPayout] ALERT WAL recovery warning: ${w}`)
 	if (rec.warnings.length > 0) throw new Error('[labMiningPoolClPayout] WAL recovery reported warnings; refusing to start (operator check required)')
 	const wal = new WalWriter({ stateDir: opts.stateDir, lastSeq: rec.writerLastSeq, segmentBytes: opts.segmentBytes, maxFrameBytes: opts.maxFrameBytes })
