@@ -6,6 +6,7 @@
  *   B  balance read failing for a whole run: zero signer requests, no slot; after the read works again everything is paid once
  *   C  the realtime and the history wallet race for a balance that covers exactly one batch: exactly one batch is paid, the other wallet refuses, total <= balance, nothing isolated
  *   C2 deterministic version of C: the first two balance reads are held until both wallets are inside the claim window; only the claims of the others can keep them from both sending
+ *   S  deterministic: a COMMITTED slot of one wallet (receipt late) keeps the other wallet from sending though the balance is not deducted yet
  *   E  boundary: a balance exactly equal to one batch pays it
  *   GAS1/GAS2 the per-wallet gas-shortage alarm (immediate on an 'insufficient funds' text, from the third failed pass otherwise; no isolation, no hand-over)
  *   D  with a low balance, kill -9 after a send, a lost ACK and a late receipt: no key twice, total <= balance
@@ -246,6 +247,59 @@ test('C2 (deterministic): both wallets have CLAIMED and are blocked inside the b
 	assert.ok(res.logs.flat().some((l) => l.includes('refuse batch') && /others=0\.0[0-9]/.test(l)), 'a wallet refused because the OTHER wallet\'s claim was subtracted (others > 0 in the line)')
 	for (const [, n] of Object.entries(res.paymentsPerEventKey)) assert.equal(n, 1)
 	assert.ok(!res.logs.flat().some((l) => /wallet \S+ isolated/.test(l)))
+})
+
+test('S (deterministic): wallet A has a COMMITTED slot (sent, receipt late) and wallet B reads the balance only after that send: the balance is not deducted yet, only the slot amount keeps B from sending - exactly one batch is paid', { timeout: 300_000 }, async () => {
+	let paid = 0n
+	let initial = 0n
+	let batches = 0
+	let heldThenReleasedAfterSend = false
+	const s: Scenario = {
+		name: 'pm_s',
+		env: { ...BASE_ENV },
+		body: async (ctx) => {
+			seedValidators(ctx)
+			headPlan(ctx, [300, 300, 300, 300, 300, 300, 300, 300])
+			ctx.chain.head = 300
+			const amount = 5_000_000_000_000_000n
+			const mk = (i: number, block: number): Record<string, unknown> => ({ eventKey: ethers.keccak256(ethers.toUtf8Bytes(`pm-s-${i}`)), amount: amount.toString(), blockNumber: block, withdrawalIndex: i, pubkey: ctx.labPubkeys[0] })
+			ctx.seedState({
+				lastBackfillProcessedBlock: 300,
+				historyCursor: 300,
+				realtimeCursor: 300,
+				lastLiveHeadScanned: 300,
+				freezeH: { height: 300, hash: ctx.chain.blockHash(300), frozenAt: new Date().toISOString() },
+				pending: [...Array.from({ length: 12 }, (_, i) => mk(i, 200 + i)), ...Array.from({ length: 12 }, (_, i) => mk(100 + i, 310 + i))],
+				consumedEventKeys: {},
+				exitedPubkeys: {},
+			})
+			initial = 12n * amount + 1_000_000_000_000_000n // one batch plus a bit: a second batch only fits if the first one's money is not subtracted
+			ctx.chain.balanceWei = initial
+			// the receipt of the first transaction stays empty for a while: its slot is committed, the balance is NOT deducted yet
+			ctx.chain.receiptRule = (_tx, ask) => (ask <= 12 ? 'none' : 'mined')
+			// the first balance read passes (the wallet that gets to send first); every later one is held until that send exists
+			let firstPassed = false
+			ctx.chain.onRequest = async (m) => {
+				if (m !== 'eth_getBalance') return
+				if (!firstPassed) {
+					firstPassed = true
+					return
+				}
+				const t0 = Date.now()
+				while (ctx.chain.sent.size === 0 && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 5))
+				if (ctx.chain.sent.size >= 1) heldThenReleasedAfterSend = true
+			}
+			await ctx.run({ ticks: 8, timeoutMs: 200_000 })
+			paid = minedTotal(ctx)
+			batches = ctx.chain.sent.size
+		},
+	}
+	const res = await runScenario(s, undefined, { walMode: true, decoupled: true, pools: { realtime: 1, history: 1, sendDelayMs: 15 } })
+	assert.ok(heldThenReleasedAfterSend, 'a balance read was held until the first send existed (the test is valid)')
+	assert.equal(batches, 1, `exactly one batch is sent (${batches}); without the slot amount the second wallet would read the full balance and send too`)
+	assert.ok(paid <= initial, `paid ${paid} > balance ${initial}`)
+	assert.ok(res.logs.flat().some((l) => l.includes('refuse batch') && /others=0\.06/.test(l)), 'the other wallet refused because of the committed slot (others = 0.06)')
+	for (const [, n] of Object.entries(res.paymentsPerEventKey)) assert.equal(n, 1)
 })
 
 test('E (boundary): a balance EXACTLY equal to one batch pays it (one wei less would not); the other wallet refuses', { timeout: 300_000 }, async () => {
