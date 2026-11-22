@@ -460,3 +460,22 @@ test('input: negative, fractional, hex and text reserve values refuse the start 
 	}
 	assert.ok(zeroLog, 'the effective value 0 is read back on its own line')
 })
+
+test('TICKMODE: a bad CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MODE refuses the start (exit 1, the message names the variable); fixed and continuous start and say so in the start line', { timeout: 300_000 }, async () => {
+	const out: Record<string, { code: number | null; msg: boolean; line: string | undefined }> = {}
+	await run('pm_tickmode', 2, 1, async (ctx) => {
+		for (const mode of ['bogus', 'Continuous', 'true', 'fixed', 'continuous']) {
+			const r = await ctx.run({ ticks: 3, timeoutMs: 60_000, env: { CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MODE: mode } })
+			out[mode] = { code: r.code, msg: r.lines.some((l) => l.includes('TICK_MODE must be "fixed" or "continuous"')), line: r.lines.find((l) => l.includes('starting dual-cursor+withdrawNative')) }
+		}
+	})
+	for (const bad of ['bogus', 'Continuous', 'true']) {
+		assert.equal(out[bad]!.code, 1, `TICK_MODE=${bad} must refuse the start`)
+		assert.ok(out[bad]!.msg, `the refusal for ${bad} names the variable and the rule`)
+		assert.equal(out[bad]!.line, undefined, 'no start line, nothing ran')
+	}
+	assert.equal(out.fixed!.code, 0)
+	assert.match(out.fixed!.line ?? '', /tickMode=fixed idleBackoffMs=/)
+	assert.equal(out.continuous!.code, 0)
+	assert.match(out.continuous!.line ?? '', /tickMode=continuous idleBackoffMs=/)
+})

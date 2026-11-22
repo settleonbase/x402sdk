@@ -27,3 +27,11 @@ test('merge (b): caught up (nothing to scan) the scan waits TICK_MS - at most a 
 	assert.ok(r.counts.walletPasses >= 60, `wallet passes in 6 s with a 50 ms idle wait and 3 wallets: ${r.counts.walletPasses}`)
 	process.stderr.write(`merge (b): scanTicks=${r.counts.scanTicks} scanWaits=${r.counts.scanWaits} walletPasses=${r.counts.walletPasses}\n`)
 })
+
+test('merge (c): TICK_MODE=fixed (the deployed default): a working scan tick is followed by ONE TICK_MS wait - only a couple of ticks in 6 s although there is scan work; the wallets still pass every PAY_IDLE_MS', { timeout: 120_000 }, async () => {
+	const r = await runCurve({ ...base({}), waitMs: 'real' as never, tickMode: 'fixed' })
+	assert.equal(r.exit, 0)
+	assert.ok(r.counts.scanTicks <= 3, `scan ticks in 6 s in fixed mode with scan work: ${r.counts.scanTicks} (continuous mode makes 6 or more)`)
+	assert.ok(r.counts.scanWaits >= 1, `a TICK_MS timer was armed after the working tick: ${r.counts.scanWaits}`)
+	assert.ok(r.counts.walletPasses >= 20, `wallet passes: ${r.counts.walletPasses} (the payment loops do not depend on TICK_MS)`)
+})

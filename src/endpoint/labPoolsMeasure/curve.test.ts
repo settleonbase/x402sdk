@@ -41,6 +41,8 @@ export type Opts = {
 	waitMs: number
 	fieldFactor: number
 	budget: number
+	/** TICK_MODE of the child (default: E2E_TICK_MODE or continuous - the curves and the merge checks were written for the continuous loop). */
+	tickMode?: 'fixed' | 'continuous'
 	root: string
 	outDir?: string
 }
@@ -187,6 +189,7 @@ export async function runCurve(o: Opts): Promise<CurveResult> {
 			CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_ADDRESS: SIGNER_ADDRESS,
 			CONET_LAB_DENY_LIST_FILE: path.join(dir, 'deny.json'),
 			CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MS: '15000',
+			CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MODE: o.tickMode ?? process.env.E2E_TICK_MODE ?? 'continuous',
 			CONET_LAB_MINING_POOL_CL_PAYOUT_DEPLOY_BLOCK: String(DEPLOY_BLOCK),
 			CONET_LAB_MINING_POOL_CL_PAYOUT_CHUNK_BLOCKS: '32',
 			CONET_LAB_MINING_POOL_CL_PAYOUT_CHUNKS_PER_TICK: '1',

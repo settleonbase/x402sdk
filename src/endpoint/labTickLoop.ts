@@ -17,6 +17,11 @@ export type LabTickLoopDeps = {
 	tick: () => Promise<LabTickOutcome>
 	/** Wait after a tick that did not make progress (re-read on every use so a configuration change is honoured). */
 	backoffMs: () => number
+	/**
+	 * Optional switch (default: continuous). When it returns false the loop behaves like the daemon before this loop existed: ONE wait of backoffMs() after EVERY tick, a working tick included.
+	 * The daemon reads CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MODE (fixed | continuous, default fixed - the continuous mode is the "cancel the fixed wait" patch, held by the owner's decision 2026-11-22).
+	 */
+	continuous?: () => boolean
 	/** Timer seams (tests). Defaults are the platform functions. */
 	setImmediate?: (fn: () => void) => unknown
 	clearImmediate?: (h: unknown) => void
@@ -37,6 +42,7 @@ export class LabTickLoop {
 		this.d = {
 			tick: deps.tick,
 			backoffMs: deps.backoffMs,
+			continuous: deps.continuous ?? (() => true),
 			setImmediate: deps.setImmediate ?? ((fn) => setImmediate(fn)),
 			clearImmediate: deps.clearImmediate ?? ((h) => clearImmediate(h as NodeJS.Immediate)),
 			setTimeout: deps.setTimeout ?? ((fn, ms) => setTimeout(fn, ms)),
@@ -104,7 +110,7 @@ export class LabTickLoop {
 			if (!this.current(gen)) return
 			void this.runOnce(gen)
 		}
-		if (outcome === 'progress') {
+		if (outcome === 'progress' && this.d.continuous()) {
 			this.d.onSchedule?.({ generation: gen, outcome, mode: 'immediate', delayMs: 0 })
 			this.handle = { kind: 'immediate', h: this.d.setImmediate(again) }
 			return
@@ -113,4 +119,15 @@ export class LabTickLoop {
 		this.d.onSchedule?.({ generation: gen, outcome, mode: 'backoff', delayMs })
 		this.handle = { kind: 'timeout', h: this.d.setTimeout(again, delayMs) }
 	}
+}
+
+/**
+ * TICK_MODE (CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MODE): `fixed` (default, unset = fixed) waits TICK_MS after EVERY tick, exactly like the daemon before the continuous loop; `continuous` is the
+ * "cancel the fixed wait" patch (a working tick is followed at once; owner decision 2026-11-22: held, not part of a deployment unless the owner enables it). Anything else refuses the start.
+ */
+export function parseTickMode(raw: string | undefined): 'fixed' | 'continuous' {
+	const v = raw?.trim()
+	if (v === undefined || v === '' || v === 'fixed') return 'fixed'
+	if (v === 'continuous') return 'continuous'
+	throw new Error(`[labMiningPoolClPayout] CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MODE must be "fixed" or "continuous" (default fixed); got "${v.slice(0, 40)}"`)
 }

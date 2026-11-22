@@ -114,7 +114,7 @@ import type { ActorView } from './labActorHandle'
 import type { LabPayoutStateCore } from './labPayoutStateCore'
 import type { LabStateHandle } from './labStateHandle'
 import { createLegacyStateStore, type LabClPayoutState, type SkimEntry, type LabPendingEntryJson } from './labLegacyState'
-import { LabTickLoop, type LabTickOutcome } from './labTickLoop'
+import { LabTickLoop, parseTickMode, type LabTickOutcome } from './labTickLoop'
 import {
 	resumeLabWithdrawInFlight,
 	sameEventKeys,
@@ -262,7 +262,7 @@ type PoolActor = ActorView<SkimEntry, LabClPayoutState>
 type PoolWalletState = { w: PoolWallet; running: boolean; wakeQueued: boolean; timer?: ReturnType<typeof setTimeout>; isolated?: string; passes: number; settledBatches: number; lastAdminAlertAt?: number; gasAlert: GasAlertTracker; lastSendError?: string }
 let labPool: { cfg: PoolConfig; wallets: PoolWalletState[] } | undefined
 /** Serial tick loop (labTickLoop.ts): working ticks continue at once, idle/fault/skipped ticks wait resolveTickMs(). Used by EVERY mode: the coupled tick, the decoupled scan tick and the pool's scan tick; the payment loops (wakePayWorker / wakePoolWallet) are separate and wait PAY_IDLE_MS, not TICK_MS. */
-const labLoop = new LabTickLoop({ tick: () => labPayoutTick(), backoffMs: () => resolveTickMs() })
+const labLoop = new LabTickLoop({ tick: () => labPayoutTick(), backoffMs: () => resolveTickMs(), continuous: () => resolveTickMode() === 'continuous' })
 let labPubkeySet = new Set<string>()
 let labMiningPool = ''
 let labManifestMtime = 0
@@ -333,6 +333,18 @@ function resolveTickMs(): number {
 	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MS || 60_000)
 	return Number.isFinite(n) && n >= 15_000 ? Math.floor(n) : 60_000
 }
+
+/**
+ * TICK_MODE (CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MODE): `fixed` (default, unset = fixed) waits TICK_MS after EVERY tick, exactly like the daemon before the continuous loop; `continuous` is the
+ * "cancel the fixed wait" patch (a working tick is followed at once, owner decision 2026-11-22: held, not part of a deployment unless the owner enables it). Anything else refuses the start.
+ */
+function resolveTickMode(): 'fixed' | 'continuous' {
+	return parseTickMode(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MODE)
+}
+const tickModeLine = (): string =>
+	resolveTickMode() === 'continuous'
+		? `tickMode=continuous idleBackoffMs=${resolveTickMs()} (TICK_MS: wait after an idle/fault/skipped tick only, a working tick is followed at once)`
+		: `tickMode=fixed idleBackoffMs=${resolveTickMs()} (TICK_MS: a wait after every tick, as before the continuous loop)`
 
 function resolveChunkBlocks(): number {
 	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_CHUNK_BLOCKS || 32)
@@ -1880,6 +1892,7 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 		return
 	}
 	if (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_FILE?.trim() && !labDecoupled()) throw new Error('[labMiningPoolClPayout] CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_FILE needs CONET_LAB_MINING_POOL_CL_PAYOUT_DECOUPLED=1')
+	resolveTickMode() // a bad TICK_MODE refuses the start
 	if (labDecoupled() && !labWalMode()) throw new Error('[labMiningPoolClPayout] CONET_LAB_MINING_POOL_CL_PAYOUT_DECOUPLED=1 needs WAL mode (CONET_LAB_MINING_POOL_CL_PAYOUT_WAL=1): the decoupled actors share the log')
 	if (!loadManifestIfNeeded(true)) return
 	// Refuses to start when another live process holds the state dir (throws, daemon exits).
@@ -1904,7 +1917,7 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	labStarted = true
 	logger(
 		Colors.cyan(
-			`[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=${labPubkeySet.size} tickMode=continuous idleBackoffMs=${resolveTickMs()} (TICK_MS: wait after an idle/fault/skipped tick only, a working tick is followed at once) ` +
+			`[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=${labPubkeySet.size} ${tickModeLine()} ` +
 				`${startupConfigLine()} ` +
 				`realtimeReserved=${resolveRealtimeReservedBatches()} ` +
 				`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} txWaitTimeoutMs=${resolveTxWaitTimeoutMs()} pendingPool=on`
@@ -2029,7 +2042,7 @@ async function startWalMode(): Promise<void> {
 		labStarted = true
 		logger(
 			Colors.cyan(
-				`[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=${labPubkeySet.size} tickMode=continuous idleBackoffMs=${resolveTickMs()} (TICK_MS: wait after an idle/fault/skipped tick only, a working tick is followed at once) ` +
+				`[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=${labPubkeySet.size} ${tickModeLine()} ` +
 					`${startupConfigLine()} ` +
 					`realtimeReserved=${resolveRealtimeReservedBatches()} ` +
 					`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} txWaitTimeoutMs=${resolveTxWaitTimeoutMs()} pendingPool=on` +

@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { LabTickLoop, type LabTickOutcome } from './labTickLoop'
+import { LabTickLoop, parseTickMode, type LabTickOutcome } from './labTickLoop'
 
 /** Virtual timers: setImmediate and setTimeout queues that the test drives by hand. */
 function makeFakeTimers() {
@@ -342,4 +342,53 @@ test('L9: real timers: idle and fault loops with a 300 ms backoff make at most o
 		await new Promise((r) => setTimeout(r, 700))
 		assert.equal(calls, before, `${outcome}: no tick after stop`)
 	}
+})
+
+test('L10: fixed mode (continuous=false): EVERY outcome, a working tick included, is followed by exactly one backoff - never by setImmediate; flipping the switch at runtime is honoured', async () => {
+	const ft = makeFakeTimers()
+	const t = makeTick(['progress', 'progress', 'idle', 'progress'], 'idle')
+	let continuous = false
+	const events: string[] = []
+	const loop = new LabTickLoop({ tick: t.fn, backoffMs: () => 60_000, continuous: () => continuous, ...ft.deps, onSchedule: (e) => events.push(`${e.outcome}:${e.mode}:${e.delayMs}`) })
+	loop.start()
+	await flush()
+	assert.equal(t.calls, 1)
+	assert.equal(ft.pendingImmediates(), 0, 'a working tick does not arm an immediate in fixed mode')
+	assert.deepEqual(ft.requested, [60_000])
+	ft.fireNextTimer()
+	await flush()
+	assert.equal(t.calls, 2)
+	assert.equal(ft.pendingImmediates(), 0)
+	assert.deepEqual(ft.requested, [60_000, 60_000])
+	ft.fireNextTimer()
+	await flush()
+	assert.equal(t.calls, 3) // idle
+	assert.deepEqual(ft.requested, [60_000, 60_000, 60_000])
+	continuous = true // switched on at runtime: the next working tick is followed at once
+	ft.fireNextTimer()
+	await flush()
+	assert.equal(t.calls, 4) // progress
+	assert.equal(ft.pendingImmediates(), 1)
+	assert.deepEqual(events, ['progress:backoff:60000', 'progress:backoff:60000', 'idle:backoff:60000', 'progress:immediate:0'])
+	loop.stop()
+	assert.equal(t.max, 1)
+})
+
+test('L11: the default of the loop is continuous (the existing contract), and TICK_MODE parses strictly: unset/blank/fixed = fixed, continuous = continuous, anything else refuses', async () => {
+	const ft = makeFakeTimers()
+	const t = makeTick(['progress'], 'idle')
+	const loop = new LabTickLoop({ tick: t.fn, backoffMs: () => 60_000, ...ft.deps })
+	loop.start()
+	await flush()
+	assert.equal(ft.pendingImmediates(), 1, 'no continuous option given: a working tick is followed at once')
+	loop.stop()
+	assert.equal(parseTickMode(undefined), 'fixed')
+	assert.equal(parseTickMode(''), 'fixed')
+	assert.equal(parseTickMode('   '), 'fixed')
+	assert.equal(parseTickMode('fixed'), 'fixed')
+	assert.equal(parseTickMode(' fixed '), 'fixed')
+	assert.equal(parseTickMode('continuous'), 'continuous')
+	assert.equal(parseTickMode(' continuous\n'), 'continuous')
+	for (const bad of ['Continuous', 'CONTINUOUS', 'cont', 'true', '1', '0', 'on', 'off', 'fixed,continuous', 'immediate', 'none', 'continuous2'])
+		assert.throws(() => parseTickMode(bad), /TICK_MODE must be "fixed" or "continuous"/, bad)
 })

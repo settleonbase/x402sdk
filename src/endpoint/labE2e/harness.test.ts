@@ -64,6 +64,7 @@ export function normalizeLine(raw: string): string {
 		.replace(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z/g, '<ts>')
 		// the cancel-the-fixed-wait patch reworded the start line: `tick=15000ms` became `tickMode=continuous idleBackoffMs=15000 (TICK_MS: ...)`; the golden fixtures keep the old wording, so the new wording maps back to it (nothing else is relaxed)
 		.replace(/tickMode=continuous idleBackoffMs=(\d+) \(TICK_MS: [^)]*\)/, 'tick=$1ms')
+		.replace(/tickMode=fixed idleBackoffMs=(\d+) \(TICK_MS: [^)]*\)/, 'tick=$1ms')
 		.replace(/\b\d+s\/\d+s\b/g, '<dur>')
 		.replace(/force in \d+s/g, 'force in <dur>')
 		.replace(/gas wait \d+s ≥ \d+s/g, 'gas wait <dur> ≥ <dur>')
@@ -189,6 +190,8 @@ function childEnv(ctx: Pick<Ctx, 'root' | 'dir' | 'stateFile' | 'stateDir' | 'ch
 		CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_ADDRESS: SIGNER_ADDRESS,
 		CONET_LAB_DENY_LIST_FILE: path.join(ctx.dir, 'deny.json'),
 		CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MS: '15000',
+		// the suites were written for the continuous loop; E2E_TICK_MODE=fixed runs the same scenarios in the deployed default (fixed wait after every tick)
+		CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MODE: process.env.E2E_TICK_MODE ?? 'continuous',
 		CONET_LAB_MINING_POOL_CL_PAYOUT_DEPLOY_BLOCK: '100',
 		CONET_LAB_MINING_POOL_CL_PAYOUT_CHUNK_BLOCKS: '10',
 		CONET_LAB_MINING_POOL_CL_PAYOUT_CHUNKS_PER_TICK: '4',
