@@ -11,6 +11,7 @@
  *   after-snapshot  right after a "snapshot committed" line (odd seeds snapshot after every tick: interval 1 ms; even seeds use the 10 min default)
  *   at-start        when the reporter has loaded its manifest, i.e. inside the first-start bootstrap window (found a real bug: a killed first bootstrap left an orphan state dir)
  *   random-ms         a random moment (startup, mid-tick, between ticks)
+ * C5_DECOUPLED=1 runs the same rounds with the P3 decoupled payment worker (scan and payment as separate actors on the same log).
  * Reproduce a round: C5_SEED=<seed> C5_ROUNDS=1 (the round's seed is printed on failure). More rounds: C5_ROUNDS=200.
  */
 import assert from 'node:assert/strict'
@@ -99,8 +100,8 @@ const BASE = Number(process.env.C5_SEED ?? 20261121)
 const ROUNDS = Number(process.env.C5_ROUNDS ?? 18)
 for (let r = 0; r < ROUNDS; r++) {
 	const seed = BASE + r
-	test(`C5 WAL random kill round seed=${seed}: each event key paid exactly once, none left unpaid`, { timeout: 400_000 }, async () => {
-		const res = await runScenario(roundScenario(seed), undefined, { walMode: true })
+	test(`C5 WAL${process.env.C5_DECOUPLED === '1' ? ' (decoupled payment worker)' : ''} random kill round seed=${seed}: each event key paid exactly once, none left unpaid`, { timeout: 400_000 }, async () => {
+		const res = await runScenario(roundScenario(seed), undefined, { walMode: true, decoupled: process.env.C5_DECOUPLED === '1' })
 		assert.deepEqual(res.unknownRpcMethods, [])
 		const last = res.exits[res.exits.length - 1]!
 		assert.equal(last.killed, false, 'the clean run was not killed')

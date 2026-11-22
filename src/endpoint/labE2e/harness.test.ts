@@ -299,7 +299,8 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 				if (timedOut) throw new Error(`the child did not finish within ${o.timeoutMs ?? 120_000} ms: the tick timer was probably not compressed (renamed scheduler?) or the reporter hung`)
 				const done = lines.some((l) => normalizeLine(l).startsWith('[e2e-child] E2E_DONE'))
 				const compressed = lines.map((l) => /\[e2e-child\] compressed=(\d+) requested=(\d+)/.exec(normalizeLine(l))).find((m) => m)
-				if (done && o.ticks > 1 && (!compressed || Number(compressed[1]) < 1)) throw new Error('the run finished but no tick timer was compressed: the scheduler detection no longer matches the reporter')
+				// (a run killed by a fault hook while the decoupled child was draining printed E2E_DONE but never its compressed= line: that is the kill, not a detection failure)
+				if (done && !res.killed && res.signal !== 'SIGKILL' && o.ticks > 1 && (!compressed || Number(compressed[1]) < 1)) throw new Error(`the run finished but no tick timer was compressed: the scheduler detection no longer matches the reporter (exit code ${res.code}, signal ${res.signal}; last lines: ${JSON.stringify(lines.slice(-8).map((l) => normalizeLine(l).slice(0, 160)))})`)
 				return res
 			},
 		}
