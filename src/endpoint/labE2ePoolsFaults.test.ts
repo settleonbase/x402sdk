@@ -333,3 +333,40 @@ test('migration, crash between its two commits (the slot of the wallet was commi
 	assert.ok(r.res.logs[1]!.some((l) => l.includes('migrated the legacy in-flight record')), 'the repair ran')
 	reconcile(r.res, r.world, r.end, 'migration between commits')
 })
+
+// ---------------------------------------------------------------- the authorization read-back gate
+test('a wallet that is not a VDR admin claims and sends nothing (ALERT, no signer request at all) until admins(address)=true; once granted it takes work; every key once', { timeout: 300_000 }, async () => {
+	const r = await run('pf_admin_gate', POOL(2, 1), async (ctx) => {
+		const addr = (id: string): string => (JSON.parse(fs.readFileSync(path.join(ctx.dir, 'pools.json'), 'utf8')) as { realtime: { id: string; address: string }[]; history: { id: string; address: string }[] }).realtime.concat((JSON.parse(fs.readFileSync(path.join(ctx.dir, 'pools.json'), 'utf8')) as { history: { id: string; address: string }[] }).history).find((w) => w.id === id)!.address.toLowerCase()
+		const all = ['rt1', 'rt2', 'hi1'].map(addr)
+		ctx.chain.adminAddrs = new Set(all.filter((a) => a !== addr('rt2'))) // rt2 is not an admin (yet)
+		let calls = 0
+		let granted = false
+		ctx.chain.onRequest = async () => {
+			calls++
+			if (calls > 700 && !granted) {
+				granted = true
+				ctx.chain.adminAddrs!.add(addr('rt2')) // the grant happens mid-run (by the PM wallet, outside the daemon)
+			}
+			await new Promise((res) => setTimeout(res, 3))
+		}
+		const rt2 = ctx.poolSigners.get('rt2')!
+		await ctx.run({ ticks: 14, timeoutMs: 200_000 })
+		assert.ok(granted, 'the grant was made during the run')
+		assert.ok(rt2.sends.length >= 1, `after the grant rt2 took work (${rt2.sends.length} sends)`)
+	})
+	assert.ok(r.res.logs.flat().some((l) => l.includes('ALERT wallet rt2') && l.includes('is not a VDR admin')), 'the ALERT names the wallet')
+	reconcile(r.res, r.world, r.end, 'admin gate')
+})
+
+test('a wallet that is never an admin never reaches its signer: zero requests on its socket, the others pay every key', { timeout: 300_000 }, async () => {
+	const r = await run('pf_admin_never', POOL(2, 1), async (ctx) => {
+		const pools = JSON.parse(fs.readFileSync(path.join(ctx.dir, 'pools.json'), 'utf8')) as { realtime: { id: string; address: string }[]; history: { id: string; address: string }[] }
+		const others = [...pools.realtime, ...pools.history].filter((w) => w.id !== 'rt2').map((w) => w.address.toLowerCase())
+		ctx.chain.adminAddrs = new Set(others)
+		await ctx.run({ ticks: 12, timeoutMs: 200_000 })
+		const rt2 = ctx.poolSigners.get('rt2')!
+		assert.equal(rt2.requests.length, 0, `rt2's signer saw ${rt2.requests.length} requests (not even signer_getAddress: nothing is read from a wallet that is not authorized)`)
+	})
+	reconcile(r.res, r.world, r.end, 'admin never')
+})

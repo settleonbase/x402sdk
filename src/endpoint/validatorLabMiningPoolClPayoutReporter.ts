@@ -225,6 +225,7 @@ const READ_ABI = [
 	'function getNodeByValidatorPubkeyHash(bytes32 pubkeyHash) view returns (uint256 guardianId)',
 	'function guardianIdBeneficiary(uint256 guardianId) view returns (address)',
 	'function consumedRewardEventKey(bytes32 key) view returns (bool)',
+	'function admins(address account) view returns (bool)',
 ] as const
 
 type BlockWithdrawal = {
@@ -256,7 +257,7 @@ let labPayRunning = false
 let labPayWakeQueued = false
 /** P4 wallet pools (decoupled mode only): one payment loop per wallet. */
 type PoolActor = ActorView<SkimEntry, LabClPayoutState>
-type PoolWalletState = { w: PoolWallet; running: boolean; wakeQueued: boolean; timer?: ReturnType<typeof setTimeout>; isolated?: string; passes: number; settledBatches: number }
+type PoolWalletState = { w: PoolWallet; running: boolean; wakeQueued: boolean; timer?: ReturnType<typeof setTimeout>; isolated?: string; passes: number; settledBatches: number; lastAdminAlertAt?: number }
 let labPool: { cfg: PoolConfig; wallets: PoolWalletState[] } | undefined
 /** Serial tick loop (labTickLoop.ts): working ticks continue at once, idle/fault/skipped ticks wait resolveTickMs(). Used by EVERY mode: the coupled tick, the decoupled scan tick and the pool's scan tick; the payment loops (wakePayWorker / wakePoolWallet) are separate and wait PAY_IDLE_MS, not TICK_MS. */
 const labLoop = new LabTickLoop({ tick: () => labPayoutTick(), backoffMs: () => resolveTickMs() })
@@ -1673,6 +1674,23 @@ async function poolWalletPassBody(ws: PoolWalletState): Promise<boolean> {
 	ws.passes++
 	const lifeDeps = (gasPrice: bigint): LabLifecycleDeps => makeLabLifecycleDeps(h, provider, gasPrice, { ws, handle: h })
 	try {
+		// the authorization read-back gate (plan G3): a wallet works only while the VDR says admins(wallet)=true; read at every pass, before anything is resumed, claimed or sent. A wallet that is not (yet) an admin
+		// is idle (one ALERT a minute) and is picked up by the first pass after the grant; the daemon never grants anything itself.
+		let isAdmin = false
+		try {
+			isAdmin = Boolean(await readContract.admins!(w.address))
+		} catch (e: unknown) {
+			logger(Colors.yellow(`[labMiningPoolClPayout] wallet ${w.id}: admins(${w.address}) could not be read (${(e as Error)?.message ?? e}); idle this pass`))
+			return false
+		}
+		if (!isAdmin) {
+			const now = Date.now()
+			if (ws.lastAdminAlertAt === undefined || now - ws.lastAdminAlertAt >= 60_000) {
+				ws.lastAdminAlertAt = now
+				logger(Colors.red(`[labMiningPoolClPayout] ALERT wallet ${w.id} (${w.address}) is not a VDR admin: it claims and sends nothing until admins(address)=true`))
+			}
+			return false
+		}
 		const gasPrice = await readGasPriceWei(provider)
 		// a committed slot (a restart, or an unknown outcome): resume it first; nothing new is composed while it is unresolved
 		if (h.slot(w.id)) {

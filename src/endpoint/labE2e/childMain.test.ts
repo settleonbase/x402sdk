@@ -23,7 +23,7 @@ if (process.env.E2E_TRACE_GC) {
 	}, 25).unref()
 }
 ;(global as unknown as { setTimeout: unknown }).setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...a: unknown[]) => {
-	if (typeof ms === 'number' && ms === 15_000 && String(new Error().stack).includes('scheduleNextLabTick')) {
+	if (typeof ms === 'number' && ms === 15_000 && /scheduleNextLabTick|LabTickLoop/.test(String(new Error().stack))) {
 		scheduledTicks++
 		if (scheduledTicks >= ticks) return realSetTimeout(() => finish(), 20)
 		// before every scheduled tick the child asks the fake chain (plain HTTP) to move its head to this tick's value
@@ -39,6 +39,32 @@ if (process.env.E2E_TRACE_GC) {
 async function main(): Promise<void> {
 	const rep = await import(pathToFileURL(path.join(root!, 'src/endpoint/validatorLabMiningPoolClPayoutReporter.ts')).href)
 	const queue = await import(pathToFileURL(path.join(root!, 'src/onchainTxSerialQueue.ts')).href)
+	// Legacy pacing for the fixture (P2c-0 scenarios drive the chain head per scheduled tick): since the cancel-the-fixed-wait patch a tick that made progress is followed at once, with no timer and so
+	// no head step. The scenarios keep their meaning if EVERY tick is followed by the (compressed) wait, so the loop's tick function is wrapped here, in the test child only, to report 'idle'. The reporter's
+	// own behaviour (continuous ticks) is tested in labTickE2e and labTickLoop.test.ts.
+	if (!process.env.E2E_CONTINUOUS_TICKS) {
+		try {
+			const loopMod = await import(pathToFileURL(path.join(root!, 'src/endpoint/labTickLoop.ts')).href)
+			const proto = loopMod.LabTickLoop?.prototype as { runOnce: (g: number) => Promise<void> } | undefined
+			if (proto) {
+				const orig = proto.runOnce
+				proto.runOnce = async function (this: unknown, gen: number): Promise<void> {
+					const d = (this as { d: { tick: () => Promise<string>; __legacy?: boolean } }).d
+					if (!d.__legacy) {
+						d.__legacy = true
+						const inner = d.tick
+						d.tick = async () => {
+							await inner()
+							return 'idle'
+						}
+					}
+					return orig.call(this, gen)
+				}
+			}
+		} catch {
+			/* a checkout without the loop module (df78e6b baselines): nothing to wrap */
+		}
+	}
 	let shuttingDown = false
 	const shutdown = async (signal: string): Promise<void> => {
 		if (shuttingDown) return
