@@ -1,7 +1,9 @@
 /**
  * P3/P4 long run: a scan actor and W payment actors (each with its own wallet slot) working at full speed on one core and one log, WITH the snapshot scheduler running (snapshots every few seconds, the log
- * trimmed after each commit). Every few seconds a copy of the state directory is taken (a kill -9 at that instant) and recovered: it must equal the state the core really had at the recovered seq. At the
- * end the replay of everything on disk equals the core, no key is in two slots, no consumed key is pending, no ALERT line was printed. Default 20 s (a unit test); the 10-minute run of the review:
+ * trimmed after each commit). Two kinds of directory copies (a kill -9 at that instant): (1) at QUIESCED points (the actors are paused between two iterations and everything is durable) the copy must recover to
+ * exactly the state of the core at that instant (a full digest; this is the kill-at-a-state-boundary check, repeated every few seconds and across snapshot commits and log trims); (2) at arbitrary instants
+ * while the actors run, the copy must recover without error, to a seq not beyond the log head, with disjoint slots and no consumed key pending (the digest of every seq is not kept: it would be O(state) per commit).
+ * At the end the replay of everything on disk equals the core, no ALERT line was printed. Default 20 s (a unit test); the 10-minute run of the review:
  *   LAB_LONG_MS=600000 node --import tsx --test src/endpoint/labPoolsLong.test.ts
  */
 import assert from 'node:assert/strict'
@@ -47,43 +49,51 @@ test(`scan + 3 wallets + snapshot scheduler for ${DURATION} ms: recovered copies
 		const hub = new ActorHub<E, S>({ core, wal, onFatal: fatal, log: (l) => l.includes('ALERT') && alerts.push(l) })
 		const scheduler = new WalSnapshotScheduler({ core, wal, stateDir, log: (l) => (l.includes('ALERT') ? alerts.push(l) : undefined), intervalMs: Math.max(1500, Math.min(10_000, DURATION / 8)), quiet: () => !hub.hasUncommittedWrites() })
 		scheduler.start()
-		const digestBySeq = new Map<number, string>([[0, digest(core)]])
-		const copies: string[] = []
+		const copies: { dir: string; headAtCopy: number }[] = []
+		const quiesced: { dir: string; want: string; seq: number }[] = []
+		let paused = false
+		let busy = 0
 		let nextKey = 1
 		let block = 500
 		let stop = false
 		let seed = 0x2545f491
 		const rnd = (m: number): number => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) % m)
 		const turn = (): Promise<void> => new Promise((r) => setImmediate(r))
-		const note = (): void => void digestBySeq.set(wal.lastSeq, digest(core))
+		const gate = async (): Promise<void> => {
+			while (paused) await new Promise((r) => setTimeout(r, 2))
+			busy++
+		}
 		const scanner = async (): Promise<void> => {
 			const h = hub.actor('scan')
 			while (!stop) {
+				await gate()
 				block += 1
 				h.pendingAdd(Array.from({ length: 16 }, (_, i) => ({ eventKey: key(nextKey++), amount: '1000', blockNumber: block, withdrawalIndex: i, pubkey: '0xabcdef' })))
 				h.setScalar('realtimeCursor', block)
 				h.setScalar('lastLiveHeadScanned', block)
-				const p = h.commit('scan')
-				note() // the digest right after the synchronous record of this commit is the state AT its seq
-				await p
+				await h.commit('scan')
+				busy--
 				await new Promise((r) => setTimeout(r, 2 + rnd(6)))
 			}
 		}
 		const payer = async (wl: string): Promise<void> => {
 			const h = hub.actor(`pay:${wl}`)
 			while (!stop) {
+				await gate()
 				const cand = [...h.pendingValues()].filter((e) => !hub.isReserved(e.eventKey)).slice(0, 40)
 				if (cand.length === 0) {
+					busy--
 					await new Promise((r) => setTimeout(r, 3))
 					continue
 				}
 				const keys = cand.map((e) => e.eventKey)
-				if (!hub.claim(wl, keys, BigInt(keys.length) * 1000n)) continue
+				if (!hub.claim(wl, keys, BigInt(keys.length) * 1000n)) {
+					busy--
+					continue
+				}
 				await turn()
 				h.setSlot(wl, { batchId: `b${Math.floor(rnd(1e9))}`, idempotencyKey: `i-${wl}-${wal.lastSeq}`, line: 'realtime', amountWei: String(keys.length * 1000), eventKeys: keys, status: 'intent' })
-				let p = h.commit('intent')
-				note()
-				await p
+				await h.commit('intent')
 				hub.releaseClaim(wl)
 				await new Promise((r) => setTimeout(r, 1 + rnd(4)))
 				h.setSlot(wl, null)
@@ -92,17 +102,27 @@ test(`scan + 3 wallets + snapshot scheduler for ${DURATION} ms: recovered copies
 					h.consumedAdd(k)
 				}
 				h.incScalar('settledBatchCount', 1)
-				p = h.commit('settle')
-				note()
-				await p
+				await h.commit('settle')
+				busy--
 			}
 		}
 		const snapper = async (): Promise<void> => {
+			let n = 0
 			while (!stop) {
 				await new Promise((r) => setTimeout(r, Math.max(400, DURATION / 40)))
 				const c = fs.mkdtempSync(path.join(os.tmpdir(), 'labpoolslong-copy-'))
 				fs.cpSync(stateDir, path.join(c, 'state.v2'), { recursive: true })
-				copies.push(c)
+				copies.push({ dir: c, headAtCopy: wal.lastSeq })
+				// every 4th round: a QUIESCED point (the actors finish their iteration and wait), everything durable, then the full digest and a copy
+				if (++n % 4 === 0) {
+					paused = true
+					while (busy > 0) await new Promise((r) => setTimeout(r, 2))
+					await wal.whenDurable(wal.lastSeq)
+					const q = fs.mkdtempSync(path.join(os.tmpdir(), 'labpoolslong-q-'))
+					fs.cpSync(stateDir, path.join(q, 'state.v2'), { recursive: true })
+					quiesced.push({ dir: q, want: digest(core), seq: core.lastAppliedSeq })
+					paused = false
+				}
 			}
 		}
 		const t0 = Date.now()
@@ -112,37 +132,46 @@ test(`scan + 3 wallets + snapshot scheduler for ${DURATION} ms: recovered copies
 		await Promise.all(jobs)
 		await scheduler.stop()
 		await wal.whenDurable(wal.lastSeq)
-		digestBySeq.set(wal.lastSeq, digest(core))
+		await wal.whenDurable(wal.lastSeq)
 		const st = scheduler.stats
 		const full = recoverPayoutState(stateDir, { readOnly: true })
 		assert.equal(digest(full.core), digest(core), 'the replay of everything on disk equals the core')
+		const sound = (c: LabPayoutStateCore, label: string): void => {
+			const own = new Map<string, string>()
+			for (const [w, r] of c.slotEntries()) for (const k of (r as { eventKeys: string[] }).eventKeys) {
+				assert.equal(own.get(k), undefined, `${label}: key ${k} in two slots`)
+				own.set(k, w)
+			}
+			let n = 0
+			for (const k of c.consumedKeys()) if (c.pendingHas(k) && ++n > 0) assert.fail(`${label}: consumed key ${k} is pending`)
+		}
 		let checked = 0
 		for (const c of copies) {
 			try {
-				const rec = recoverPayoutState(path.join(c, 'state.v2'), { readOnly: true })
-				const want = digestBySeq.get(rec.core.lastAppliedSeq)
-				// a copy may have been taken while a snapshot was being written into the directory: the recovery then starts from the older committed snapshot plus the log; its seq is still one the core had
-				assert.notEqual(want, undefined, `a copy recovered to seq ${rec.core.lastAppliedSeq}, which no commit produced`)
-				assert.equal(digest(rec.core), want, `a kill at seq ${rec.core.lastAppliedSeq} recovers to the state the core had there`)
+				const rec = recoverPayoutState(path.join(c.dir, 'state.v2'), { readOnly: true })
+				assert.ok(rec.core.lastAppliedSeq <= wal.lastSeq, 'a copy recovered beyond the log head')
+				sound(rec.core, `random copy at head ${c.headAtCopy}`)
 				checked++
 			} catch (e) {
-				// a copy of a directory in the middle of a log segment rotation or snapshot commit may be refused as a whole by the recovery (never read as something else): count, do not hide
 				if (!/refus|no committed snapshot|damaged|corrupt/i.test((e as Error).message)) throw e
-				process.stderr.write(`long: a copy was refused by the recovery: ${(e as Error).message.slice(0, 120)}\n`)
+				process.stderr.write(`long: a random copy was refused by the recovery: ${(e as Error).message.slice(0, 120)}\n`)
 			}
-			fs.rmSync(c, { recursive: true, force: true })
+			fs.rmSync(c.dir, { recursive: true, force: true })
 		}
-		const owners = new Map<string, string>()
-		for (const [w, r] of core.slotEntries()) for (const k of (r as { eventKeys: string[] }).eventKeys) {
-			assert.equal(owners.get(k), undefined, `key ${k} in two slots`)
-			owners.set(k, w)
+		for (const q of quiesced) {
+			const rec = recoverPayoutState(path.join(q.dir, 'state.v2'), { readOnly: true })
+			assert.equal(rec.core.lastAppliedSeq, q.seq, 'a quiesced copy recovers to the seq the core had')
+			assert.equal(digest(rec.core), q.want, `a kill at the quiesced point seq ${q.seq} recovers to exactly the core's state (across snapshots and log trims)`)
+			sound(rec.core, `quiesced copy seq ${q.seq}`)
+			fs.rmSync(q.dir, { recursive: true, force: true })
 		}
-		for (const k of core.consumedKeys()) assert.equal(core.pendingHas(k), false, 'a consumed key is pending')
+		sound(core, 'final core')
 		assert.deepEqual(alerts, [], 'no ALERT')
 		assert.ok(st.committed >= 2, `snapshots committed during the run: ${st.committed} (started ${st.started}, failed ${st.failed}, skippedBusy ${st.skippedBusy}, deferredNotQuiet ${st.deferredNotQuiet})`)
 		assert.equal(st.failed, 0)
-		assert.ok(checked >= Math.floor(copies.length * 0.8), `copies recovered ${checked}/${copies.length}`)
-		process.stderr.write(`long ${Date.now() - t0} ms: events=${wal.lastSeq} settledBatches=${core.getScalar('settledBatchCount')} pending=${core.pendingSize} consumed=${core.consumedSize} snapshots committed=${st.committed} failed=${st.failed} skippedBusy=${st.skippedBusy} deferredNotQuiet=${st.deferredNotQuiet} copiesChecked=${checked}/${copies.length}\n`)
+		assert.ok(quiesced.length >= 2, `quiesced checks: ${quiesced.length}`)
+		assert.ok(checked >= Math.floor(copies.length * 0.8), `random copies recovered ${checked}/${copies.length}`)
+		process.stderr.write(`long ${Date.now() - t0} ms: events=${wal.lastSeq} settledBatches=${core.getScalar('settledBatchCount')} pending=${core.pendingSize} consumed=${core.consumedSize} snapshots committed=${st.committed} failed=${st.failed} skippedBusy=${st.skippedBusy} deferredNotQuiet=${st.deferredNotQuiet} randomCopies=${checked}/${copies.length} quiescedChecks=${quiesced.length}\n`)
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true })
 	}
