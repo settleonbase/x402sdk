@@ -423,3 +423,34 @@ test('A9: an exception inside the batch scope after the send (here in settle, be
 		w.done()
 	}
 })
+
+test('A10: claim accounting - the money other wallets have claimed counts for everyone else but not for the claimer; a refused claim reserves nothing and adds no money; release clears it', async () => {
+	const w = await world()
+	try {
+		const hub = w.hub
+		assert.equal(hub.claimedAmountExcept('w1'), 0n)
+		assert.equal(hub.claim('w1', [key(1), key(2)], 300n), true)
+		assert.equal(hub.claimedAmountExcept('w2'), 300n, 'w2 sees w1\'s claim')
+		assert.equal(hub.claimedAmountExcept('w1'), 0n, 'w1 does not count its own claim twice')
+		assert.equal(hub.claimCount, 1)
+		assert.equal(hub.claim('w2', [key(2), key(3)], 500n), false, 'key 2 is held by w1: refused')
+		assert.equal(hub.claimedAmountExcept('w1'), 0n, 'a refused claim adds no money')
+		assert.equal(hub.isReserved(key(3)), false, 'a refused claim reserves nothing')
+		assert.equal(hub.claim('w2', [key(4)], 200n), true)
+		assert.equal(hub.claimedAmountExcept('w1'), 200n)
+		assert.equal(hub.claimedAmountExcept('w2'), 300n)
+		assert.equal(hub.claimedAmountExcept('w3'), 500n, 'a third wallet sees both')
+		assert.equal(hub.claim('w1', [key(5)], 50n), true, 'a wallet can claim more')
+		assert.equal(hub.claimedAmountExcept('w2'), 350n)
+		hub.releaseClaim('w1')
+		assert.equal(hub.claimedAmountExcept('w2'), 0n, 'release clears w1\'s money')
+		assert.equal(hub.claimedAmountExcept('w1'), 200n)
+		assert.equal(hub.isReserved(key(1)), false)
+		assert.equal(hub.claimCount, 1)
+		hub.releaseClaim('w2')
+		assert.equal(hub.claimCount, 0)
+		assert.equal(hub.claimedAmountExcept('nobody'), 0n)
+	} finally {
+		w.done()
+	}
+})
