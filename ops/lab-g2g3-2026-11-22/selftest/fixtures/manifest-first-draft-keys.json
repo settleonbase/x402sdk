@@ -1,0 +1,28 @@
+{
+ "format": "beamio-lab-clpayout-state",
+ "generation": "gen-0000000000abcdef",
+ "previousGeneration": "gen-0000000000abcde0",
+ "writtenAt": "2026-11-22T07:00:00.000Z",
+ "segmentSize": 50000,
+ "scalars": {
+  "settledBatchCount": 2054,
+  "realtimeCursor": 2266500,
+  "historyCursor": 2019999,
+  "freezeH": 2266000
+ },
+ "scalarsSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+ "exited": {
+  "file": "exited.jsonl",
+  "lines": 0,
+  "bytes": 0,
+  "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "keySetSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+ },
+ "version": 2,
+ "pendingCount": 1,
+ "consumedCount": 2,
+ "counts": {
+  "pending": 1,
+  "consumed": 2
+ }
+}
