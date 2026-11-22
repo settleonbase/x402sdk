@@ -360,6 +360,7 @@ test('A9: an exception inside the batch scope after the send (here in settle, be
 		await w.hub.actor('scan').commit('scan')
 		const sends = new Map<string, string>() // the signer's idempotency journal
 		let broadcasts = 0
+		let sendCalls = 0 // EVERY call of the send dependency, whether or not the signer's journal already knows the key (a recovery path that calls send again must be visible)
 		let throwInSettle = true
 		const logs: string[] = []
 		const deps: LabLifecycleDeps = {
@@ -372,6 +373,7 @@ test('A9: an exception inside the batch scope after the send (here in settle, be
 			persist: (step) => h.commit(step),
 			countSettled: () => h.incScalar('settledBatchCount', 1),
 			send: async (rec) => {
+				sendCalls++
 				const prior = sends.get(rec.idempotencyKey)
 				if (prior) return { hash: prior }
 				broadcasts++
@@ -395,6 +397,7 @@ test('A9: an exception inside the batch scope after the send (here in settle, be
 		await assert.rejects(() => submitWithdrawBatchDurably(deps, req), /boom inside settle/)
 		h.closeScope() // what the reporter's finally does
 		assert.equal(broadcasts, 1)
+		assert.equal(sendCalls, 1)
 		assert.ok(w.hub.stats.discardedOps >= 1, 'the uncommitted settle writes were discarded')
 		const rec = w.core.getInFlight() as { hash?: string } | null
 		assert.ok(rec && rec.hash, 'the committed in-flight record has its hash (intent and hash steps were committed before the failure)')
@@ -407,6 +410,9 @@ test('A9: an exception inside the batch scope after the send (here in settle, be
 		h.closeScope()
 		assert.equal(out, 'settled')
 		assert.equal(broadcasts, 1, 'no second broadcast')
+		// negative control (review): resumeLabWithdrawInFlight starts from the committed record's hash; if it ignored it (`let hash = undefined`) it would call send again, the signer journal would answer with
+		// the old hash and `broadcasts` would stay 1 - only this call count sees it
+		assert.equal(sendCalls, 1, 'resuming a record that already has its hash asks for the receipt and never calls send')
 		assert.equal(w.core.getInFlight(), null)
 		for (const k of [key(1), key(2)]) {
 			assert.equal(w.core.consumedHas(k), true)
