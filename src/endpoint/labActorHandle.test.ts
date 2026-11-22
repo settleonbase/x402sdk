@@ -79,7 +79,7 @@ test('A1: a payer sees only committed writes - the scan actor\'s half window (pe
 	}
 })
 
-test('A2: per-actor scopes - a second scope on the SAME actor is refused, scopes of different actors are open at the same time; a scope left without a commit keeps its writes (carried)', async () => {
+test('A2: per-actor scopes - a second scope on the SAME actor is refused, scopes of different actors are open at the same time; a scope left without a commit DISCARDS the actor\'s overlay (F-A0-3)', async () => {
 	const lines: string[] = []
 	const w = await world()
 	try {
@@ -91,12 +91,20 @@ test('A2: per-actor scopes - a second scope on the SAME actor is refused, scopes
 		b.openScope('batch') // another actor: allowed
 		await assert.rejects(() => b.commit('scan'), /commit scope 'batch' is open/)
 		a.pendingAdd([entry(5, 10)])
-		a.closeScope() // left without its commit: the writes stay in the overlay
+		a.setScalar('realtimeCursor', 99)
+		a.closeScope() // left without its commit (an exception inside the scope): the overlay is discarded, nothing of it ever reached the core
 		assert.equal(w.core.pendingSize, 0)
-		assert.equal(a.pendingHas(key(5)), true)
+		assert.equal(a.pendingHas(key(5)), false, 'the discarded add is gone from the actor\'s own view too')
+		assert.equal(a.scalar('realtimeCursor'), undefined)
+		assert.ok(lines.some((l) => l.includes('discarded 2 uncommitted ops of an aborted \'scan\' scope')), lines.join('|'))
+		assert.equal(hub.stats.discardedOps, 2)
 		await a.commit('scalars')
-		assert.equal(w.core.pendingHas(key(5)), true)
-		assert.ok(lines.some((l) => l.includes('carried 1 ops')), lines.join('|'))
+		assert.equal(events(w.stateDir).length, 0, 'an empty commit appends nothing')
+		// writes made OUTSIDE a scope are not discarded by a later closeScope of nothing: they wait for the actor's next commit
+		a.pendingAdd([entry(6, 11)])
+		a.closeScope()
+		await a.commit('scalars')
+		assert.equal(w.core.pendingHas(key(6)), true)
 		b.closeScope()
 		a.enterTick()
 		assert.throws(() => a.enterTick(), /ticks must be serial/)
@@ -232,8 +240,8 @@ test('A6: randomized interleaving of 4 actors (adds, deletes, consumed, incremen
 						h.incScalar('settledBatchCount', 1)
 					} else if (k === 4) h.setScalarIfUnset('gasWaitStartedAt', `t${id}`)
 					else if (k === 5) h.delScalar('gasWaitStartedAt')
-					else if (k === 6) h.setScalar('inFlightWithdraw', { idempotencyKey: `w${id}-${s}`, eventKeys: pend.slice(0, 2).map((e) => e.eventKey) })
-					else h.setScalar('inFlightWithdraw', undefined as never)
+					else if (k === 6 && id === 1) h.setScalar('inFlightWithdraw', { idempotencyKey: `w${id}-${s}`, eventKeys: pend.slice(0, 2).map((e) => e.eventKey) })
+					else if (k === 7 && id === 1) h.setScalar('inFlightWithdraw', undefined as never)
 				}
 				for (let t = rnd(3); t > 0; t--) await turn()
 				if (rnd(2) === 0) {
@@ -270,6 +278,35 @@ test('A6: randomized interleaving of 4 actors (adds, deletes, consumed, incremen
 			fs.rmSync(c, { recursive: true, force: true })
 		}
 		console.log(`A6 events=${w.wal.lastSeq} commits=${w.hub.stats.commits} dropped consumed=${w.hub.stats.droppedConsumedAdds} copies=${copies.length} settled=${w.core.getScalar('settledBatchCount')}`)
+	} finally {
+		w.done()
+	}
+})
+
+test('A7: cursorHighWater is a maximum (F-A0-1): an actor whose cursor commits later but is lower cannot pull the high-water back; and a second actor writing the single in-flight slot is refused (F-A0-4)', async () => {
+	const w = await world()
+	try {
+		const a = w.hub.actor('scan-a')
+		const b = w.hub.actor('scan-b')
+		b.setScalar('lastBackfillProcessedBlock', 400) // b looked first (committed high-water was 0) ...
+		b.setScalar('lastListeningEndBlock', 300)
+		a.setScalar('lastBackfillProcessedBlock', 500)
+		a.setScalar('lastListeningEndBlock', 350)
+		await a.commit('scan') // ... a commits the higher cursors first
+		assert.deepEqual(w.core.getScalar('cursorHighWater'), { backfill: 500, listen: 350 })
+		await b.commit('scan') // ... b commits its lower ones afterwards
+		assert.equal(w.core.getScalar('lastBackfillProcessedBlock'), 500, 'the cursor is max-merged at apply')
+		assert.deepEqual(w.core.getScalar('cursorHighWater'), { backfill: 500, listen: 350 }, 'the high-water keeps the maximum of the committed and the committed-now values')
+		const rec = recoverPayoutState(w.stateDir, { readOnly: true })
+		assert.deepEqual(rec.core.getScalar('cursorHighWater'), { backfill: 500, listen: 350 }, 'and so does the replay')
+		// a cursor below the committed high-water is refused when it is set (monotonicity, before it is recorded)
+		assert.throws(() => a.setScalar('lastBackfillProcessedBlock', 450), /cursor|monoton|backwards|high/i)
+		// one writer for the single in-flight slot
+		const p1 = w.hub.actor('pay-1')
+		const p2 = w.hub.actor('pay-2')
+		p1.setScalar('inFlightWithdraw', { idempotencyKey: 'k1', eventKeys: [] })
+		assert.throws(() => p2.setScalar('inFlightWithdraw', { idempotencyKey: 'k2', eventKeys: [] }), /owns \(one writer until per-wallet slots\)|one writer/)
+		assert.throws(() => p2.delScalar('inFlightWithdraw'), /one writer/)
 	} finally {
 		w.done()
 	}

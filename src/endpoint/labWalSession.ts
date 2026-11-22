@@ -12,12 +12,15 @@ import { writeSnapshotCooperative } from './labSnapshotWriter'
 import { WalWriter } from './labWal'
 import { WalSnapshotScheduler } from './labWalSnapshotScheduler'
 import { WalStateHandle } from './labWalStateHandle'
+import { ActorHub } from './labActorHandle'
 import type { LabClPayoutState, SkimEntry } from './labLegacyState'
 
 export type SnapshotConfig = { intervalMs?: number; walMaxBytes?: number; consumedCap?: number; archive?: (keys: string[]) => void }
 
 export type WalSession = {
 	handle: WalStateHandle<SkimEntry, LabClPayoutState>
+	/** Concurrent actors (P3 decoupled mode): scan loop and payment worker(s) on the same core and log. Unused in the coupled mode. */
+	hub: ActorHub<SkimEntry, LabClPayoutState>
 	core: LabPayoutStateCore
 	wal: WalWriter
 	scheduler: WalSnapshotScheduler
@@ -142,9 +145,10 @@ export async function openWalSession(opts: {
 		handle.exitTick()
 	}
 	const snapshotOpts = opts.snapshot ?? {}
-	const scheduler = new WalSnapshotScheduler({ core: rec.core, wal, stateDir: opts.stateDir, log: opts.log, quiet: () => !handle.hasUncommittedWrites(), ...snapshotOpts })
+	const hub = new ActorHub<SkimEntry, LabClPayoutState>({ core: rec.core, wal, log: opts.log })
+	const scheduler = new WalSnapshotScheduler({ core: rec.core, wal, stateDir: opts.stateDir, log: opts.log, quiet: () => !handle.hasUncommittedWrites() && !hub.hasUncommittedWrites(), ...snapshotOpts })
 	scheduler.start()
-	return { handle, core: rec.core, wal, scheduler, snapshotOpts, sessionBackfillFloor, settledBatchCount: (handle.scalar('settledBatchCount') as number | undefined) ?? 0, recovery: { snapshotSeq: rec.snapshotSeq, replayed: rec.replayed, warnings: rec.warnings } }
+	return { handle, hub, core: rec.core, wal, scheduler, snapshotOpts, sessionBackfillFloor, settledBatchCount: (handle.scalar('settledBatchCount') as number | undefined) ?? 0, recovery: { snapshotSeq: rec.snapshotSeq, replayed: rec.replayed, warnings: rec.warnings } }
 }
 
 /**

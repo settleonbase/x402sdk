@@ -10,7 +10,10 @@
  *   incScalar         committed value + delta   (settledBatchCount: two wallets each settling N batches end at 2N)
  *   setScalarIfUnset  set only if the committed value is unset (gasWaitStartedAt: the first actor starts the clock)
  *   cursorHighWater   max of the committed high-water, the committed cursors and the cursors this commit sets
- * A pendingAdd whose key has become consumed (or pending) since the actor looked is dropped at commit: consumed wins, a paid key never returns to the pool.
+ * A pendingAdd whose key has become consumed (or is reserved by a wallet's in-flight batch) since the actor looked is dropped at commit: consumed wins, a paid key never returns to the pool.
+ * A pendingAdd whose key has become pending meanwhile is NOT filtered here: the add is idempotent at apply time (labWal.applyOps skips a pending key), so the event stays a faithful record of what the actor did.
+ * A scope that ends without its commit (an exception inside it) DISCARDS the actor's overlay: nothing of it ever reached the core, so memory is never ahead of the log, and the next window/step redoes it (a rescan of the window finds the same entries).
+ * The single in-flight slot (inFlightWithdraw) has one writer actor; a second writer is refused until P4 gives every wallet its own slot.
  *
  * Scopes are per actor (HandleGuard is per ActorView): a second scope on the SAME actor is refused, scopes of different actors interleave freely.
  * Node built-ins only.
@@ -39,7 +42,9 @@ export class ActorHub<E extends PendingLike, S extends object> {
 	private readonly byName = new Map<string, ActorView<E, S>>()
 	readonly onFatal: (err: Error) => void
 	/** Counters for the journal and the tests. */
-	stats = { commits: 0, emptyCommits: 0, droppedConsumedAdds: 0, droppedReservedAdds: 0 }
+	stats = { commits: 0, emptyCommits: 0, droppedConsumedAdds: 0, droppedReservedAdds: 0, discardedOps: 0 }
+	/** The one actor allowed to write the single in-flight slot (F-A0-4). */
+	inFlightWriter: string | undefined
 	constructor(readonly d: ActorHubDeps) {
 		this.onFatal =
 			d.onFatal ??
@@ -83,7 +88,6 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 	private sc = new Map<string, ScalarWrite>()
 	/** undefined = not read yet; null = no record; object = the live mutable copy of the in-flight record. */
 	private live: Record<string, unknown> | null | undefined = undefined
-	private carried = 0
 
 	constructor(
 		private readonly hub: ActorHub<E, S>,
@@ -93,6 +97,13 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 	}
 	private get core(): LabPayoutStateCore {
 		return this.hub.d.core
+	}
+
+	/** F-A0-4: until every wallet has its own slot (P4) the single in-flight record has exactly one writer; a second writing actor is a programming error, not a race to tolerate. */
+	private claimInFlightSlot(): void {
+		const w = this.hub.inFlightWriter
+		if (w !== undefined && w !== this.name) throw new Error(`labActorHandle: actor ${this.name} wrote the in-flight slot that actor ${w} owns (one writer until per-wallet slots)`)
+		this.hub.inFlightWriter = this.name
 	}
 
 	overlayCount(): number {
@@ -192,10 +203,12 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 		if (value === undefined) return this.delScalar(name)
 		const n = name as string
 		if (n === IN_FLIGHT) {
+			this.claimInFlightSlot()
 			this.live = value as unknown as Record<string, unknown>
 			return
 		}
-		// checked BEFORE it is recorded: a refused value changes nothing (against the committed high-water and this actor's own earlier writes)
+		// checked BEFORE it is recorded against the COMMITTED high-water: a refused value changes nothing. (Another actor may commit a higher cursor before this one commits; the commit then keeps the
+		// committed maximum: the scalar is max-merged at apply time and cursorHighWater is computed as a maximum in buildOps.)
 		if (n === 'lastBackfillProcessedBlock' || n === 'lastListeningEndBlock') {
 			const hw = (this.core.getScalar('cursorHighWater') ?? {}) as { backfill?: number; listen?: number }
 			assertCursorMonotonic(n, n === 'lastBackfillProcessedBlock' ? hw.backfill : hw.listen, value as number)
@@ -205,6 +218,7 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 	delScalar(name: keyof S): void {
 		const n = name as string
 		if (n === IN_FLIGHT) {
+			this.claimInFlightSlot()
 			this.live = null
 			return
 		}
@@ -225,9 +239,16 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 		if (!this.sc.has(n)) this.sc.set(n, { ifUnset: clone(value) })
 	}
 
-	/** Leaving a scope with uncommitted writes keeps them in the overlay: the next commit of this actor carries them (and says so in the log). */
+	/** Leaving a scope without its commit (an exception inside it) discards this actor's overlay and says so in the log (see the header). */
 	override closeScope(): void {
-		if (this.openScopeLabel !== null) this.carried += this.ops.length + this.sc.size
+		if (this.openScopeLabel !== null) {
+			const n = this.ops.length + this.sc.size + (this.live !== undefined && JSON.stringify(this.live) !== JSON.stringify(this.core.getInFlight()) ? 1 : 0)
+			if (n > 0) {
+				this.hub.stats.discardedOps += n
+				this.hub.d.log?.(`[labMiningPoolClPayout] actor ${this.name}: discarded ${n} uncommitted ops of an aborted '${this.openScopeLabel}' scope`)
+				this.clearOverlay()
+			}
+		}
 		super.closeScope()
 	}
 
@@ -287,10 +308,6 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 	async commit(label: StateCommitLabel): Promise<void> {
 		this.guardCommit(label)
 		const ops = this.buildOps()
-		if (this.carried > 0) {
-			this.hub.d.log?.(`[labMiningPoolClPayout] actor ${this.name}: carried ${this.carried} ops from an aborted scope into the '${label}' commit`)
-			this.carried = 0
-		}
 		this.hub.stats.commits++
 		if (ops.length === 0) {
 			this.hub.stats.emptyCommits++

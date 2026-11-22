@@ -229,6 +229,11 @@ let labStopRequested = false
 let labWalStarting: Promise<void> | null = null
 let labTimer: ReturnType<typeof setTimeout> | undefined
 let labInFlight = false
+/** P3 decoupled mode: the payment worker's own in-flight flag, timers and wake-up (the scan tick above never pays in this mode). */
+let labPayInFlight = false
+let labPayTimer: ReturnType<typeof setTimeout> | undefined
+let labPayRunning = false
+let labPayWakeQueued = false
 let labPubkeySet = new Set<string>()
 let labMiningPool = ''
 let labManifestMtime = 0
@@ -365,6 +370,16 @@ function resolveMaxSettledBatches(): number | null {
 	return Number.isInteger(n) && n >= 1 ? n : null
 }
 
+/** P3: payment worker decoupled from the scan tick (needs WAL mode). Off = the coupled tick of P2, unchanged. */
+function labDecoupled(): boolean {
+	return process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_DECOUPLED === '1'
+}
+/** How long an idle payment worker waits before looking again (a scan commit that added pending entries wakes it earlier). */
+function resolvePayIdleMs(): number {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_PAY_IDLE_MS)
+	return Number.isFinite(n) && n >= 50 ? Math.floor(n) : 5_000
+}
+
 /** The settled count is persisted in the same write as the consumed set (lifecycle countSettled). Exit only after that write. */
 async function noteSettledBatch(h: LabHandle): Promise<void> {
 	const max = resolveMaxSettledBatches()
@@ -375,6 +390,9 @@ async function noteSettledBatch(h: LabHandle): Promise<void> {
 			// WAL mode: this tick ends here (the process exits and nothing below runs), so it leaves the tick and the batch scope, then the same graceful stop as SIGTERM
 			h.closeScope()
 			h.exitTick()
+			// decoupled: the scan tick may still be running; the graceful stop is only legal when it has ended (this payment tick is the caller, so it is not waited for)
+			const scanIdle = labDecoupled() ? await waitForLabMiningPoolClPayoutIdle(90_000, { exceptPay: true }) : true
+			if (!scanIdle) process.exit(1)
 			const code = await gracefulStopWalSession(labWalSession, { stateDir: resolveSegmentedStateDir(), tickIdle: true, log: walLog })
 			process.exit(code)
 		}
@@ -809,7 +827,7 @@ function makeLabLifecycleDeps(
 		},
 		persist: (step) => h.commit(step),
 		countSettled: () => {
-			h.setScalar('settledBatchCount', (h.scalar('settledBatchCount') ?? 0) + 1)
+			h.incScalar('settledBatchCount', 1)
 		},
 		stopBeforeSend: () => shouldStopAfterSettled(h.scalar('settledBatchCount') ?? 0, resolveMaxSettledBatches()),
 		halt: (code, reason) => haltDaemon(h, code, reason),
@@ -939,7 +957,7 @@ async function flushPendingLabBatches(
 	if (gasPrice > maxGas + gasDustWei) {
 		const now = Date.now()
 		if (!h.scalar('gasWaitStartedAt')) {
-			h.setScalar('gasWaitStartedAt', new Date(now).toISOString())
+			h.setScalarIfUnset('gasWaitStartedAt', new Date(now).toISOString())
 			await h.commit('scalars')
 		}
 		const startedMs = Date.parse(h.scalar('gasWaitStartedAt') as string)
@@ -1356,7 +1374,8 @@ async function labPayoutTick(): Promise<void> {
 		const provider = createLabRpcProvider()
 		const readContract = new ethers.Contract(redeemAddr, READ_ABI, provider)
 
-		const h: LabHandle = labWalSession ? labWalSession.handle : legacyStore.newHandle(getLabSessionState())
+		const decoupled = labDecoupled() && labWalSession !== undefined
+		const h: LabHandle = decoupled ? labWalSession!.hub.actor('scan') : labWalSession ? labWalSession.handle : legacyStore.newHandle(getLabSessionState())
 		tickHandle = h
 		h.enterTick()
 		const liveHead = Number(await provider.getBlockNumber())
@@ -1451,9 +1470,10 @@ async function labPayoutTick(): Promise<void> {
 			)
 		)
 
-		await flushPendingLabBatches(provider, readContract, redeemAddr, h)
+		if (!decoupled) await flushPendingLabBatches(provider, readContract, redeemAddr, h)
 		tryPersistListeningCheckpoint(h, liveHead)
 		await h.commit('scalars')
+		if (decoupled) wakePayWorker() // what this tick queued is committed: the payer may look now
 	} catch (e: unknown) {
 		logger(Colors.red(`[labMiningPoolClPayout] tick error: ${(e as Error)?.message ?? e}`))
 	} finally {
@@ -1471,6 +1491,70 @@ function scheduleNextLabTick(): void {
 	}, resolveTickMs())
 }
 
+/**
+ * One payment pass of the decoupled worker: the same flush the coupled tick ran after its scan, on its own actor handle (it sees only committed pending entries). Returns true when a batch settled
+ * (more work may be waiting: the worker continues at once), false otherwise (idle, gas wait, held entries, a fault: it waits PAY_IDLE_MS or a wake-up).
+ */
+async function labPayTick(): Promise<boolean> {
+	if (labPayInFlight) return false
+	if (labGate.tripped) {
+		logger(Colors.red(`[labMiningPoolClPayout] ALERT pay tick skipped: fail-closed (${labGate.tripReason})`))
+		return false
+	}
+	const session = labWalSession
+	if (!session) return false
+	labPayInFlight = true
+	let h: LabHandle | undefined
+	try {
+		if (!loadManifestIfNeeded()) return false
+		const redeemAddr = resolveLabRedeemAddress()
+		const provider = createLabRpcProvider()
+		const readContract = new ethers.Contract(redeemAddr, READ_ABI, provider)
+		h = session.hub.actor('pay')
+		h.enterTick()
+		const settledBefore = labSettledEntriesTotal
+		await flushPendingLabBatches(provider, readContract, redeemAddr, h)
+		await h.commit('scalars')
+		return labSettledEntriesTotal > settledBefore
+	} catch (e: unknown) {
+		logger(Colors.red(`[labMiningPoolClPayout] pay tick error: ${(e as Error)?.message ?? e}`))
+		return false
+	} finally {
+		h?.exitTick()
+		labPayInFlight = false
+		session.scheduler.poke()
+	}
+}
+
+/** Runs the payment worker once now (a scan commit or the idle timer asked for it); at most one pass at a time; continues at once after a pass that settled something. */
+function wakePayWorker(): void {
+	if (!labStarted || !labDecoupled()) return
+	if (labPayRunning) {
+		labPayWakeQueued = true // the running pass will look again when it ends
+		return
+	}
+	if (labPayTimer !== undefined) {
+		clearTimeout(labPayTimer)
+		labPayTimer = undefined
+	}
+	labPayRunning = true
+	void (async () => {
+		try {
+			let again = true
+			while (again && labStarted) {
+				labPayWakeQueued = false
+				const progressed = await labPayTick()
+				again = progressed || labPayWakeQueued
+				if (again) await new Promise((r) => setImmediate(r))
+			}
+		} finally {
+			labPayRunning = false
+			// a tripped fail-closed gate is not worth looking at every few seconds (one ALERT per minute, like the scan tick)
+			if (labStarted) labPayTimer = setTimeout(() => wakePayWorker(), labGate.tripped ? Math.max(60_000, resolvePayIdleMs()) : resolvePayIdleMs())
+		}
+	})()
+}
+
 export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	if (labStarted || labWalStarting) return
 	labStopRequested = false
@@ -1478,6 +1562,7 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 		logger(Colors.yellow('[labMiningPoolClPayout] disabled (set CONET_LAB_MINING_POOL_CL_PAYOUT=1)'))
 		return
 	}
+	if (labDecoupled() && !labWalMode()) throw new Error('[labMiningPoolClPayout] CONET_LAB_MINING_POOL_CL_PAYOUT_DECOUPLED=1 needs WAL mode (CONET_LAB_MINING_POOL_CL_PAYOUT_WAL=1): the decoupled actors share the log')
 	if (!loadManifestIfNeeded(true)) return
 	// Refuses to start when another live process holds the state dir (throws, daemon exits).
 	assertPinnedRedeem(process.env.CONET_VALIDATOR_DEPOSIT_REDEEM, CONET_VALIDATOR_DEPOSIT_REDEEM)
@@ -1563,10 +1648,12 @@ async function startWalMode(): Promise<void> {
 				`[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=${labPubkeySet.size} tick=${resolveTickMs()}ms ` +
 					`${startupConfigLine()} ` +
 					`realtimeReserved=${resolveRealtimeReservedBatches()} ` +
-					`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} txWaitTimeoutMs=${resolveTxWaitTimeoutMs()} pendingPool=on`
+					`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} txWaitTimeoutMs=${resolveTxWaitTimeoutMs()} pendingPool=on` +
+					(labDecoupled() ? ` decoupled=on payIdleMs=${resolvePayIdleMs()}` : '')
 			)
 		)
 		void labPayoutTick().finally(() => scheduleNextLabTick())
+		if (labDecoupled()) wakePayWorker()
 	} catch (e: unknown) {
 		logger(Colors.red(`[labMiningPoolClPayout] WAL start refused: ${(e as Error)?.message ?? e}`))
 		process.exit(1)
@@ -1583,13 +1670,17 @@ export function stopValidatorLabMiningPoolClPayoutReporter(): void {
 		clearTimeout(labTimer)
 		labTimer = undefined
 	}
+	if (labPayTimer !== undefined) {
+		clearTimeout(labPayTimer)
+		labPayTimer = undefined
+	}
 }
 
 /** Persist listening checkpoint before process exit (next restart backfills from lastListeningEndBlock+1). */
 export async function flushLabMiningPoolListeningCheckpoint(opts: { tickIdle?: boolean } = {}): Promise<number> {
 	if (labWalSession) {
 		const s = labWalSession
-		const tickIdle = opts.tickIdle ?? !labInFlight
+		const tickIdle = opts.tickIdle ?? (!labInFlight && !labPayInFlight)
 		try {
 			if (tickIdle) {
 				s.handle.requireIdle() // a tick that is still running means no write in parallel with it
@@ -1619,9 +1710,9 @@ export async function flushLabMiningPoolListeningCheckpoint(opts: { tickIdle?: b
 }
 
 /** Bounded idle wait so SIGTERM cannot hang forever behind a stuck tx.wait. */
-export async function waitForLabMiningPoolClPayoutIdle(maxWaitMs = 90_000): Promise<boolean> {
+export async function waitForLabMiningPoolClPayoutIdle(maxWaitMs = 90_000, opts: { exceptPay?: boolean } = {}): Promise<boolean> {
 	const started = Date.now()
-	while (labInFlight) {
+	while (labInFlight || (!opts.exceptPay && (labPayInFlight || labPayRunning))) {
 		if (Date.now() - started >= maxWaitMs) {
 			logger(
 				Colors.red(

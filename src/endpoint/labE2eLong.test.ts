@@ -49,13 +49,13 @@ function buildWorld(ctx: Ctx, seed: number): World {
 type Faults = { acksLostTotal: number; acksLostAfterRun2: number; emptyReceiptsAfterRun3: number; emptyReceiptsTotal: number; duplicateSends: number; getTransactionCalls: number }
 type Outcome = { result: ScenarioResult; world: World; finalLogical: ReturnType<typeof digestLogical>; faults: Faults }
 
-async function runMode(seed: number, walMode: boolean, invariantC: boolean): Promise<Outcome> {
+async function runMode(seed: number, walMode: boolean, invariantC: boolean, decoupled = false): Promise<Outcome> {
 	let world!: World
 	let finalLogical: ReturnType<typeof digestLogical> = null
 	let faults: Faults = { acksLostTotal: 0, acksLostAfterRun2: 0, emptyReceiptsAfterRun3: 0, emptyReceiptsTotal: 0, duplicateSends: 0, getTransactionCalls: 0 }
 	const heads = [400, 460, 520, 580, 640, 700, 700, 700, 700, 700, 700, 700, 700, 700, 700, 700]
 	const s: Scenario = {
-		name: `long_${seed}_${walMode ? 'wal' : 'legacy'}${invariantC ? '_c' : ''}`,
+		name: `long_${seed}_${walMode ? 'wal' : 'legacy'}${decoupled ? '_dec' : ''}${invariantC ? '_c' : ''}`,
 		env: {
 			CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_BATCH_ENTRIES: '20',
 			CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_MAX_BATCHES: '3',
@@ -133,7 +133,7 @@ async function runMode(seed: number, walMode: boolean, invariantC: boolean): Pro
 			finalLogical = digestLogical(ctx.stateDir)
 		},
 	}
-	const result = await runScenario(s, undefined, { walMode })
+	const result = await runScenario(s, undefined, { walMode, decoupled })
 	return { result, world, finalLogical, faults }
 }
 
@@ -178,5 +178,28 @@ for (const [seed, invC] of [[4242, false], [4343, true]] as const) {
 		assert.deepEqual(new Set(wal.finalLogical!.consumed), new Set(legacy.finalLogical!.consumed), 'the same consumed set')
 		assert.deepEqual(stripUpdatedAt(wal.finalLogical!.scalars), stripUpdatedAt(legacy.finalLogical!.scalars))
 		assert.deepEqual(wal.result.layout, { manifestVersion: 2, walSegments: 0 })
+	})
+}
+
+// P3 A2: the decoupled payment worker (own actor handle, own clock) against the coupled WAL mode on the same long world, same fault script. The batches may be grouped differently (the worker looks at what is
+// committed when it looks, not at the end of a tick), so the comparison is per key: the same keys paid once each, the same amounts to the wei, the same final consumed/pending/exited sets and cursors.
+for (const [seed, invC] of [[4242, false], [4343, true]] as const) {
+	test(`long scenario seed ${seed}${invC ? ' (invariant C on)' : ''}: the decoupled payment worker reconciles and agrees with the coupled WAL mode per key`, { timeout: 590_000 }, async () => {
+		const coupled = await runMode(seed, true, invC)
+		reconcile(coupled, 'wal-coupled')
+		const dec = await runMode(seed, true, invC, true)
+		reconcile(dec, 'wal-decoupled')
+		assert.deepEqual(dec.result.paymentsPerEventKey, coupled.result.paymentsPerEventKey, 'the same keys, each paid once')
+		const wei = (o: Outcome): bigint => o.result.chainSent.reduce((a, t) => a + BigInt(t.amountWei), 0n)
+		assert.equal(wei(dec), wei(coupled), 'the same total to the wei')
+		assert.deepEqual(dec.finalLogical!.pending, coupled.finalLogical!.pending)
+		assert.deepEqual(dec.finalLogical!.exited, coupled.finalLogical!.exited)
+		assert.deepEqual(new Set(dec.finalLogical!.consumed), new Set(coupled.finalLogical!.consumed), 'the same consumed set')
+		const sc = (o: Outcome): Record<string, unknown> => o.finalLogical!.scalars as Record<string, unknown>
+		for (const k of ['historyCursor', 'realtimeCursor', 'lastBackfillProcessedBlock', 'lastListeningEndBlock', 'lastLiveHeadScanned']) assert.equal(sc(dec)[k], sc(coupled)[k], `cursor ${k}`)
+		assert.equal(sc(dec).inFlightWithdraw, undefined)
+		// the settled count is the number of batches this mode really sent and settled
+		assert.equal(sc(dec).settledBatchCount, dec.result.chainSent.filter((t) => t.mined).length, 'settledBatchCount equals the mined batches')
+		process.stderr.write(`decoupled vs coupled: ${dec.result.chainSent.length} vs ${coupled.result.chainSent.length} transactions, same ${Object.keys(dec.result.paymentsPerEventKey).length} keys\n`)
 	})
 }

@@ -194,13 +194,13 @@ function childEnv(ctx: Pick<Ctx, 'root' | 'dir' | 'stateFile' | 'stateDir' | 'ch
 	}
 }
 
-export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_ROOT ?? DEFAULT_ROOT, opts: { walMode?: boolean } = {}): Promise<ScenarioResult> {
+export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_ROOT ?? DEFAULT_ROOT, opts: { walMode?: boolean; decoupled?: boolean } = {}): Promise<ScenarioResult> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `labe2e-${s.name.replace(/[^a-z0-9]+/gi, '_').slice(0, 24)}-`))
 	const chain = new FakeChain()
 	const beacon = new FakeBeacon()
 	const signer = new FakeSigner(chain)
 	const labPubkeys: string[] = []
-	const baseEnv: Record<string, string> = { ...(s.env ?? {}), ...(opts.walMode ? { CONET_LAB_MINING_POOL_CL_PAYOUT_WAL: '1' } : {}) }
+	const baseEnv: Record<string, string> = { ...(s.env ?? {}), ...(opts.walMode ? { CONET_LAB_MINING_POOL_CL_PAYOUT_WAL: '1' } : {}), ...(opts.decoupled ? { CONET_LAB_MINING_POOL_CL_PAYOUT_DECOUPLED: '1', CONET_LAB_MINING_POOL_CL_PAYOUT_PAY_IDLE_MS: '50', E2E_DRAIN_PENDING: '1' } : {}) }
 	for (let i = 0; i < 6; i++) labPubkeys.push(ethers.hexlify(ethers.concat([ethers.keccak256(ethers.toUtf8Bytes(`lab-pubkey-${i}`)), ethers.dataSlice(ethers.keccak256(ethers.toUtf8Bytes(`lab-pubkey-b-${i}`)), 0, 16)])).toLowerCase())
 	try {
 		await chain.start()

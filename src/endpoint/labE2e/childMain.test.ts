@@ -44,6 +44,22 @@ async function main(): Promise<void> {
 		if (shuttingDown) return
 		shuttingDown = true
 		console.log(`[e2e-child] ${signal}; draining`)
+		// decoupled mode (test only): the payment worker runs on its own clock, so after the last scan tick give it time to pay what the scan queued (state read through the same recovery the daemon uses; bounded)
+		if (process.env.E2E_DRAIN_PENDING && signal === 'E2E_DONE') {
+			const rcv = await import(pathToFileURL(path.join(root!, 'src/endpoint/labPayoutRecovery.ts')).href)
+			const stateDir = String(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_STATE_FILE).replace(/\.json$/, '.v2')
+			const t0 = Date.now()
+			let quiet = 0
+			while (Date.now() - t0 < 45_000 && quiet < 3) {
+				await new Promise((r) => realSetTimeout(r, 150))
+				try {
+					const c = rcv.recoverPayoutState(stateDir, { readOnly: true }).core
+					quiet = c.pendingSize === 0 && c.getInFlight() === null ? quiet + 1 : 0
+				} catch {
+					quiet = 0
+				}
+			}
+		}
 		if (process.env.E2E_TRACE_GC) console.log(`E2E_MEM maxRssBytes=${process.resourceUsage().maxRSS * 1024} heapLimit=${v8.getHeapStatistics().heap_size_limit}`)
 		console.log(`[e2e-child] compressed=${scheduledTicks} requested=${ticks}`)
 		let code = 0
