@@ -202,7 +202,7 @@ export async function gracefulStopToV2(core: LabPayoutStateCore, wal: WalWriter,
 		throw new Error(`labPayoutRecovery: memory is at seq ${core.lastAppliedSeq} but the log is at ${wal.lastSeq}; stop producing events before the graceful stop`)
 	}
 	// P4: a version 2 snapshot cannot carry per-wallet slots (an old build would ignore them and could pay a batch twice): refuse, keep the log, which an old build then refuses to start from
-	if (core.slotCount > 0) throw new Error(`labPayoutRecovery: ${core.slotCount} wallet slot(s) still hold an in-flight batch; no version 2 downgrade snapshot is possible (settle or resolve them first: labWalResolveInFlight); the log is kept`)
+	if (core.slotCount > 0) throw new Error(`labPayoutRecovery: ${core.slotCount} wallet slot(s) still hold an in-flight batch; no version 2 downgrade snapshot is possible (settle them, or resolve them with the offline in-flight resolver, first); the log is kept`)
 	await wal.whenDurable(wal.lastSeq) // drain: every event is fsynced before the final snapshot
 	const src = core.freezeForSnapshot()
 	let res

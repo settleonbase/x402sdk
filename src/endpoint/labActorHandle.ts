@@ -49,6 +49,7 @@ export class ActorHub<E extends PendingLike, S extends object> {
 	readonly slotWriter = new Map<string, string>()
 	/** P4: keys a wallet has claimed in a synchronous block but whose intent is not committed yet (invisible to the log, visible to every other claimer). */
 	private readonly claimOwner = new Map<string, string>()
+	private readonly claimAmount = new Map<string, bigint>()
 	/** True when the key is in a committed slot or in a claim that has not reached the log yet. */
 	isReserved(key: string): boolean {
 		return this.d.core.slotOwnerOfKey(key) !== undefined || this.claimOwner.has(key)
@@ -61,17 +62,29 @@ export class ActorHub<E extends PendingLike, S extends object> {
 	 * Reserves keys for a wallet IN ONE SYNCHRONOUS BLOCK (no await between the check by the caller and this call): from now on no other claimer picks them and a rescan does not re-add them.
 	 * Returns false (and reserves nothing) when any key is already reserved by someone else.
 	 */
-	claim(wallet: string, keys: string[]): boolean {
+	claim(wallet: string, keys: string[], amountWei = 0n): boolean {
 		for (const k of keys) {
 			const o = this.reservedBy(k)
 			if (o !== undefined && o !== wallet) return false
 		}
 		for (const k of keys) this.claimOwner.set(k, wallet)
+		this.claimAmount.set(wallet, (this.claimAmount.get(wallet) ?? 0n) + amountWei)
 		return true
 	}
 	/** Drops the wallet's pending claim (after its slot is committed the committed slot is the reservation; after an abort nothing is). */
 	releaseClaim(wallet: string, keys?: string[]): void {
 		for (const [k, w] of [...this.claimOwner]) if (w === wallet && (keys === undefined || keys.includes(k))) this.claimOwner.delete(k)
+		if (keys === undefined || this.claimedKeysOf(wallet).length === 0) this.claimAmount.delete(wallet)
+	}
+	/** Money claimed by wallets other than `except` whose slot is not committed yet. */
+	claimedAmountExcept(except: string): bigint {
+		let n = 0n
+		for (const [w, a] of this.claimAmount) if (w !== except) n += a
+		return n
+	}
+	/** Number of wallets holding an uncommitted claim. */
+	get claimCount(): number {
+		return this.claimAmount.size
 	}
 	claimedKeysOf(wallet: string): string[] {
 		return [...this.claimOwner].filter(([, w]) => w === wallet).map(([k]) => k)
