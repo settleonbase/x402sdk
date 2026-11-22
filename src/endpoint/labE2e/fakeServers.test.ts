@@ -269,9 +269,16 @@ export class FakeSigner {
 	private server?: http.Server
 	private counter = 0
 	socketPath = ''
+	/** The address this signer answers to signer_getAddress (P4 pools: one signer per wallet). */
+	address = SIGNER_ADDRESS
+	/** Highest number of sends this signer had in progress at the same time (counted here, on the signer side). */
+	maxConcurrentSends = 0
+	private sendsInProgress = 0
+	/** Artificial latency of a send (ms), to model signing/confirmation time of a real signer. */
+	sendDelayMs = 0
 	constructor(private readonly chain: FakeChain) {}
-	async start(dir: string): Promise<void> {
-		this.socketPath = path.join(dir, 'signer.sock')
+	async start(dir: string, name = 'signer'): Promise<void> {
+		this.socketPath = path.join(dir, `${name}.sock`)
 		try {
 			fs.rmSync(this.socketPath, { force: true })
 		} catch {
@@ -292,7 +299,7 @@ export class FakeSigner {
 				req.socket.destroy()
 				return
 			}
-			if (body.method === 'signer_getAddress') return reply(SIGNER_ADDRESS)
+			if (body.method === 'signer_getAddress') return reply(this.address)
 			if (body.method === 'signer_getTransaction') {
 				this.getTransactionCalls++
 				const key = String((body.params as { idempotencyKey?: string }).idempotencyKey)
@@ -300,6 +307,10 @@ export class FakeSigner {
 				return reply(row ? { hash: row.hash, status: this.chain.sent.get(row.hash)?.mined ? 'mined' : 'sent' } : null)
 			}
 			if (body.method === 'signer_sendTransaction') {
+				this.sendsInProgress++
+				this.maxConcurrentSends = Math.max(this.maxConcurrentSends, this.sendsInProgress)
+				res.on('close', () => void this.sendsInProgress--)
+				if (this.sendDelayMs > 0) await new Promise((r) => setTimeout(r, this.sendDelayMs))
 				const tx = body.params
 				const key = String(tx.idempotencyKey)
 				const fingerprint = hash32(JSON.stringify([tx.keyArray, tx.chainId, tx.to, tx.data, tx.value, tx.gasLimit]))

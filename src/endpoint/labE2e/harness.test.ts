@@ -46,6 +46,8 @@ export type Ctx = {
 	/** The child that is running right now (fault hooks use it to kill it at an exact point). */
 	currentChild?: ChildProcess
 	run(o: RunOpts): Promise<RunResult>
+	/** P4 pool runs: the fake signer of every wallet (id → signer), in the pool file's order. */
+	poolSigners: Map<string, FakeSigner>
 	/** Write an initial v2 state (a state the daemon found on disk, e.g. after a rollback or an earlier run). */
 	seedState(state: Record<string, unknown>): void
 	/** Change scalars of the state BETWEEN runs, whichever layout it has: a whole-state rewrite for a version 2 state, one appended log event for a WAL state. */
@@ -194,34 +196,60 @@ function childEnv(ctx: Pick<Ctx, 'root' | 'dir' | 'stateFile' | 'stateDir' | 'ch
 	}
 }
 
-export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_ROOT ?? DEFAULT_ROOT, opts: { walMode?: boolean; decoupled?: boolean } = {}): Promise<ScenarioResult> {
+export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_ROOT ?? DEFAULT_ROOT, opts: { walMode?: boolean; decoupled?: boolean; pools?: { realtime: number; history: number; sendDelayMs?: number } } = {}): Promise<ScenarioResult> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `labe2e-${s.name.replace(/[^a-z0-9]+/gi, '_').slice(0, 24)}-`))
 	const chain = new FakeChain()
 	const beacon = new FakeBeacon()
 	const signer = new FakeSigner(chain)
 	const labPubkeys: string[] = []
+	const poolSigners = new Map<string, FakeSigner>()
 	const baseEnv: Record<string, string> = { ...(s.env ?? {}), ...(opts.walMode ? { CONET_LAB_MINING_POOL_CL_PAYOUT_WAL: '1' } : {}), ...(opts.decoupled ? { CONET_LAB_MINING_POOL_CL_PAYOUT_DECOUPLED: '1', CONET_LAB_MINING_POOL_CL_PAYOUT_PAY_IDLE_MS: '50', E2E_DRAIN_PENDING: '1' } : {}) }
 	for (let i = 0; i < 6; i++) labPubkeys.push(ethers.hexlify(ethers.concat([ethers.keccak256(ethers.toUtf8Bytes(`lab-pubkey-${i}`)), ethers.dataSlice(ethers.keccak256(ethers.toUtf8Bytes(`lab-pubkey-b-${i}`)), 0, 16)])).toLowerCase())
 	try {
 		await chain.start()
 		await beacon.start()
 		await signer.start(dir)
+		let poolsFile: string | undefined
+		if (opts.pools) {
+			const mk = (line: 'realtime' | 'history', n: number, base: number): Record<string, string>[] =>
+				Array.from({ length: n }, (_, i) => ({ id: `${line === 'realtime' ? 'rt' : 'hi'}${i + 1}`, socket: '', keyArray: `lab_e2e_${line}_${i + 1}`, address: `0x${(base + i).toString(16).padStart(40, '0')}`, state: 'active' }))
+			const lists = { realtime: mk('realtime', opts.pools.realtime, 0x1000), history: mk('history', opts.pools.history, 0x2000) }
+			for (const w of [...lists.realtime, ...lists.history]) {
+				const sg = new FakeSigner(chain)
+				sg.address = w.address!
+				sg.sendDelayMs = opts.pools.sendDelayMs ?? 0
+				await sg.start(dir, `sg-${w.id}`)
+				w.socket = sg.socketPath
+				poolSigners.set(w.id!, sg)
+			}
+			poolsFile = path.join(dir, 'pools.json')
+			fs.writeFileSync(poolsFile, JSON.stringify(lists))
+			baseEnv.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_FILE = poolsFile
+			baseEnv.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_MIN_ACTIVE = '1'
+			baseEnv.CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI = '0'
+			baseEnv.CONET_LAB_MINING_POOL_CL_PAYOUT_WAL = '1'
+			baseEnv.CONET_LAB_MINING_POOL_CL_PAYOUT_DECOUPLED = '1'
+			baseEnv.CONET_LAB_MINING_POOL_CL_PAYOUT_PAY_IDLE_MS = baseEnv.CONET_LAB_MINING_POOL_CL_PAYOUT_PAY_IDLE_MS ?? '50'
+			baseEnv.E2E_DRAIN_PENDING = '1'
+		}
 		fs.writeFileSync(path.join(dir, 'pubkeys.json'), JSON.stringify({ miningPool: POOL, pubkeys: labPubkeys }))
 		fs.writeFileSync(path.join(dir, 'deny.json'), JSON.stringify({ addresses: [], sockets: [], keyArrays: [] }))
 		const stateFile = path.join(dir, 'state.json')
 		const stateDir = path.join(dir, 'state.v2')
 		const runs: RunResult[] = []
-		signer.eventKeysOf = (idem) => {
+		const eventKeysOf = (idem: string): string[] => {
 			for (let attempt = 0; attempt < 5; attempt++) {
 				try {
-					const rec = readInFlightRecord(stateDir)
-					if (rec && rec.idempotencyKey === idem && Array.isArray(rec.eventKeys)) return [...rec.eventKeys].sort()
+					const rec = readInFlightRecords(stateDir).find((r) => r.idempotencyKey === idem)
+					if (rec && Array.isArray(rec.eventKeys)) return [...rec.eventKeys].sort()
 				} catch {
 					/* a generation was being replaced or a log frame was being written: read again */
 				}
 			}
 			return []
 		}
+		signer.eventKeysOf = eventKeysOf
+		for (const sg of poolSigners.values()) sg.eventKeysOf = eventKeysOf
 		const ctx: Ctx = {
 			root,
 			dir,
@@ -232,6 +260,7 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 			signer,
 			labPubkeys,
 			runs,
+			poolSigners,
 			seedState: (state) => void writeSegmentedState(stateDir, state),
 			patchScalars: async (patch) => {
 				const walPresent = (() => {
@@ -329,6 +358,7 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 		}
 	} finally {
 		await signer.stop()
+		for (const sg of poolSigners.values()) await sg.stop()
 		await beacon.stop()
 		await chain.stop()
 		if (!process.env.E2E_KEEP) fs.rmSync(dir, { recursive: true, force: true })
@@ -340,6 +370,19 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
  * The in-flight withdrawal record as the daemon has persisted it (review G2): from a version 2 state through the plain reader, and - when a WAL exists (wal/ not empty) or the manifest is
  * version 3 - through the WAL-aware read-only recovery, because the plain reader refuses a version 3 manifest and the intent event is in the log, not in a snapshot.
  */
+/** Every in-flight record the daemon has persisted: the single record and, in pool mode, each wallet's slot. */
+export function readInFlightRecords(stateDir: string): { idempotencyKey?: string; eventKeys?: string[] }[] {
+	const single = readInFlightRecord(stateDir)
+	const out = single ? [single] : []
+	try {
+		const core = recoverPayoutState(stateDir, { readOnly: true }).core
+		for (const [, r] of core.slotEntries()) out.push(r as { idempotencyKey?: string; eventKeys?: string[] })
+	} catch {
+		/* a version 2 directory without a log has no slots */
+	}
+	return out
+}
+
 export function readInFlightRecord(stateDir: string): { idempotencyKey?: string; eventKeys?: string[] } | null {
 	const walDir = path.join(stateDir, 'wal')
 	let walPresent = false
