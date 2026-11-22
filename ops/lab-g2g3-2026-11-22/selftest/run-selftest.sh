@@ -57,7 +57,46 @@ FAKE
 chmod +x "$T/bin/journalctl"
 # ---- B3/B4 static assertions on the script text (the dynamic failure branches are run by the independent reviewer in a fake-systemctl sandbox, and by the field's rehearsal)
 C="$OPS/lab-g3-cutover.sh"
+HASHFN=$(sed -n '/^state_tree_hashes()/,/^}/p' "$C")
+[ -n "$HASHFN" ] && eval "$HASHFN" && ok "G3 hash function is present for isolated acceptance cases" || bad "G3 hash function is missing"
+HT="$T/state hash fixture"; mkdir -p "$HT/source/gen-current/sub" "$HT/copy/gen-current/sub"
+printf '%s\n' '{"version":2}' > "$HT/source/manifest.json"
+printf '%s\n' 'first payload' > "$HT/source/gen-current/sub/a.json"
+printf '%s\n' 'second payload' > "$HT/source/gen-current/sub/b.json"
+cp -a "$HT/source/." "$HT/copy/"
+SUDO="$T/bin/sudo -n"
+if state_tree_hashes sudo "$HT/source" gen-current "" > "$HT/source.sha256" 2> "$HT/source.err" && state_tree_hashes user "$HT/copy" gen-current "" > "$HT/copy.sha256" 2> "$HT/copy.err" && [ -s "$HT/source.sha256" ] && [ "$(wc -l < "$HT/source.sha256" | tr -d ' ')" = 3 ] && cmp -s "$HT/source.sha256" "$HT/copy.sha256"; then
+  ok "G3 canonical hashes pass with a space-containing root path and identical relative paths"
+else
+  bad "G3 canonical source/copy hashes ($?)"
+fi
+rm "$HT/copy/gen-current/sub/b.json"
+state_tree_hashes user "$HT/copy" gen-current "" > "$HT/missing.sha256" 2> "$HT/missing.err"; missing_rc=$?
+diff -u "$HT/source.sha256" "$HT/missing.sha256" > "$HT/missing.diff"; missing_diff_rc=$?
+if [ "$missing_rc" -eq 0 ] && [ "$missing_diff_rc" -eq 1 ] && [ -s "$HT/missing.diff" ]; then ok "G3 missing copied file produces a nonempty diff (generator rc=0, compare rc=1)"; else bad "G3 missing-file copy case (generator rc=$missing_rc, diff rc=$missing_diff_rc)"; fi
+cp "$HT/source/gen-current/sub/b.json" "$HT/copy/gen-current/sub/b.json"
+printf '%s\n' 'modified payload' > "$HT/copy/gen-current/sub/b.json"
+state_tree_hashes user "$HT/copy" gen-current "" > "$HT/mismatch.sha256" 2> "$HT/mismatch.err"; mismatch_rc=$?
+diff -u "$HT/source.sha256" "$HT/mismatch.sha256" > "$HT/mismatch.diff"; mismatch_diff_rc=$?
+if [ "$mismatch_rc" -eq 0 ] && [ "$mismatch_diff_rc" -eq 1 ] && [ -s "$HT/mismatch.diff" ]; then ok "G3 copied-content mismatch produces a nonempty diff (generator rc=0, compare rc=1)"; else bad "G3 content-mismatch case (generator rc=$mismatch_rc, diff rc=$mismatch_diff_rc)"; fi
+mkdir -p "$HT/empty/gen-empty"
+printf '%s\n' '{}' > "$HT/empty/manifest.json"
+state_tree_hashes user "$HT/empty" gen-empty "" > "$HT/empty.sha256" 2> "$HT/empty.err"; empty_rc=$?
+if [ "$empty_rc" -ne 0 ] && grep -q 'generation directory has no regular files' "$HT/empty.err"; then ok "G3 incomplete empty generation fails explicitly"; else bad "G3 empty generation case (rc=$empty_rc)"; fi
+if [ "$(id -u)" -ne 0 ]; then
+  chmod 000 "$HT/source"
+  state_tree_hashes user "$HT/source" gen-current "" > "$HT/denied.sha256" 2> "$HT/denied.err"; denied_rc=$?
+  chmod 700 "$HT/source"
+  if [ "$denied_rc" -ne 0 ] && grep -q 'cannot enter state directory' "$HT/denied.err"; then ok "G3 genuine operator EACCES is nonzero and explicit"; else bad "G3 permission-denied case (rc=$denied_rc)"; fi
+else
+  bad "G3 permission-denied case cannot run as uid 0; run acceptance as the operation account"
+fi
 n=$(grep -c 'systemctl start' "$C"); [ "$n" = 2 ] && ok "B4 exactly two 'systemctl start' in cutover (rollback_plain and swap-start)" || bad "B4 systemctl start count ($n)"
+awk '/^static_checks\(\)/,/^}/' "$C" | grep -q 'preflight_state_hash' && ok "G3 operation-account source hash probe is inside static checks before any stop" || bad "G3 pre-stop source hash probe is missing"
+for step in 'install -d -m 0700' 'chown -R' 'chmod -R go-rwx' 'chmod -R a-w'; do
+  grep -F "$step" "$C" | grep -q '|| fail_after_stop' && ok "G3 pre-WAL copy $step failure stops the phase" || bad "G3 pre-WAL copy $step failure is unchecked"
+done
+grep -q 'pre-WAL copy hash/list is empty' "$C" && grep -q 'pre-WAL source hash/list is empty' "$C" && ok "G3 empty source or copy hash list is refused" || bad "G3 empty hash list could pass"
 awk '/^rollback_plain\(\)/,/^}/' "$C" | grep -q 'systemctl start' && ok "B4 one of them is inside rollback_plain" || bad "B4 rollback_plain start"
 awk '/^rollback_plain\(\)/,/^}/' "$C" | grep -q 'plain_v2_ok || in_place' && ok "B4 rollback_plain refuses unless plain_v2_ok" || bad "B4 plain_v2_ok guard"
 STOPBLK=$(sed -n '/^stop)/,/^swap-start)/p' "$C"); [ "$(printf '%s\n' "$STOPBLK" | wc -l)" -gt 20 ] && printf '%s\n' "$STOPBLK" | grep -q 'in_place' && ok "B4 control: the stop block was extracted ($(printf '%s\n' "$STOPBLK" | wc -l) lines, in_place present)" || bad "B4 stop block empty (the checks below would be vacuous)"

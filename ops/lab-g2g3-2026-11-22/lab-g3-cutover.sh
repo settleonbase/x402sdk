@@ -59,8 +59,55 @@ fail_after_stop(){ if [ "${CONVERT_STARTED:-0}" -eq 0 ]; then rollback_plain "$*
   if { [ "$(systemctl is-active $DUNIT)" = inactive ] || [ "$(systemctl is-active $DUNIT)" = failed ]; } && [ "$(mf "$mj" version 2>/dev/null)" = 2 ] && [ "$(mf "$mj" wal 2>/dev/null)" = False ]; then rollback_plain "start failed before any conversion: $*"; fi
   in_place "$*"; }
 
+# Build a canonical, relative-path SHA256 list for manifest.json plus the two
+# manifest-selected generations.  The source variant enters the 0700 state
+# directory only after sudo; all paths cross the privilege boundary as argv,
+# never interpolated into the elevated shell program.  Both variants share the
+# same implementation so their path normalization and sort order are identical.
+state_tree_hashes(){
+  local mode=$1 root=$2 generation=$3 previous=$4 body
+  body='set -euo pipefail
+root=$1; generation=$2; previous=$3
+fail(){ printf "STATE_HASH_ERROR: %s\n" "$*" >&2; exit 1; }
+cd -- "$root" || fail "cannot enter state directory"
+[[ -f manifest.json && ! -L manifest.json ]] || fail "manifest.json is missing or not a regular file"
+for tree in "$generation" "${previous:+$previous}"; do
+  [[ -n "$tree" ]] || continue
+  [[ "$tree" =~ ^[A-Za-z0-9._-]+$ && "$tree" != . && "$tree" != .. ]] || fail "invalid generation path"
+  [[ -d "$tree" && ! -L "$tree" ]] || fail "generation directory is missing or not a real directory"
+  first=$(find "$tree" -type f -print -quit) || fail "cannot enumerate generation files"
+  [[ -n "$first" ]] || fail "generation directory has no regular files"
+  unsupported=$(find "$tree" ! -type d ! -type f -print -quit) || fail "cannot validate generation entry types"
+  [[ -z "$unsupported" ]] || fail "generation contains a non-file, non-directory entry"
+done
+{ printf "manifest.json\0"; find "$generation" -type f -print0; if [[ -n "$previous" ]]; then find "$previous" -type f -print0; fi; } | LC_ALL=C sort -z | xargs -0 sha256sum | LC_ALL=C sort -k2'
+  if [ "$mode" = sudo ]; then
+    $SUDO bash -c "$body" state-tree-hash "$root" "$generation" "$previous"
+  elif [ "$mode" = user ]; then
+    bash -c "$body" state-tree-hash "$root" "$generation" "$previous"
+  else
+    echo "STATE_HASH_ERROR: invalid execution mode" >&2; return 2
+  fi
+}
+
+preflight_state_hash(){
+  local mj generation previous out="$W/pre-wal-source-preflight.sha256" err="$W/pre-wal-source-preflight.err" lines
+  mj=$(manifest_json) || die_pre "pre-WAL source hash probe cannot read the manifest"
+  [ "$(mf "$mj" version)" = 2 ] && [ "$(mf "$mj" wal)" = False ] || die_pre "pre-WAL source hash probe requires manifest version 2 with wal:false"
+  generation=$(mf "$mj" generation); previous=$(mf "$mj" previousGeneration)
+  [ -n "$generation" ] && [ "$generation" != null ] || die_pre "pre-WAL source hash probe has no generation"
+  if ! state_tree_hashes sudo "$SD" "$generation" "$previous" > "$out" 2> "$err"; then
+    die_pre "pre-WAL source permission/hash probe failed: $(tail -3 "$err" | tr '\n' ' ')"
+  fi
+  [ -s "$out" ] || die_pre "pre-WAL source hash probe produced an empty manifest"
+  lines=$(wc -l < "$out" | tr -d ' ')
+  [ "$lines" -ge 2 ] || die_pre "pre-WAL source hash probe returned fewer than two files"
+  log "pre-WAL source permission/hash probe passed: files=$lines manifest_sha256=$(sha256sum "$out" | cut -c1-64)"
+}
+
 static_checks(){
   HV=$(helpers_verify) || die_pre "helper scripts are not the pinned reviewed ones: $HV"
+  preflight_state_hash
   [ "$($SUDO sha256sum /etc/systemd/system/$DUNIT | cut -c1-64)" = "$UNIT_SHA" ] || die_pre "base unit hash"
   [ "$($SUDO sha256sum $OLD_DROP | cut -c1-64)" = "$OLD_DROP_SHA" ] || die_pre "df78e6b drop-in hash"
   [ "$($SUDO sha256sum $D6ENV | cut -c1-64)" = "$ENV_SHA" ] || die_pre "Lab env file hash"
@@ -163,12 +210,22 @@ swap-start)
     [ -n "${COPY_APPROVAL_ID:-}" ] || in_place "COPY_APPROVED=yes without COPY_APPROVAL_ID"
     T0=$(date +%s); CP=/var/tmp/lab-v2-pre-wal-$(date -u +%Y%m%dT%H%M%SZ); log "pre-WAL copy approved by: $COPY_APPROVAL_ID -> $CP"
     GEN=$(mf "$M_STOP" generation); PREV=$(mf "$M_STOP" previousGeneration)
-    $SUDO install -d -m 0700 -o "$OPERATOR_USER" -g "$OPERATOR_USER" $CP
-    $SUDO cp -a $SD/manifest.json $CP/ && $SUDO cp -a $SD/$GEN $CP/ && { [ -z "$PREV" ] || $SUDO cp -a $SD/$PREV $CP/; } || fail_after_stop "pre-WAL copy failed"
-    $SUDO chown -R "$OPERATOR_USER:$OPERATOR_USER" $CP; chmod -R go-rwx $CP; chmod -R a-w $CP
-    (cd $CP && find . -type f | LC_ALL=C sort | xargs sha256sum | sed 's#  \./#  #') > "$W/pre-wal-copy.sha256"
-    (cd $SD && $SUDO sh -c "sha256sum manifest.json $GEN/* ${PREV:+$PREV/*}") | LC_ALL=C sort -k2 > "$W/pre-wal-source.sha256"
-    LC_ALL=C sort -k2 "$W/pre-wal-copy.sha256" | diff - "$W/pre-wal-source.sha256" > "$W/pre-wal-diff.txt" || fail_after_stop "pre-WAL copy differs from the source (see pre-wal-diff.txt)"
+    $SUDO install -d -m 0700 -o "$OPERATOR_USER" -g "$OPERATOR_USER" "$CP" || fail_after_stop "cannot create the pre-WAL copy directory"
+    $SUDO cp -a "$SD/manifest.json" "$CP/" && $SUDO cp -a "$SD/$GEN" "$CP/" && { [ -z "$PREV" ] || $SUDO cp -a "$SD/$PREV" "$CP/"; } || fail_after_stop "pre-WAL copy failed"
+    $SUDO chown -R "$OPERATOR_USER:$OPERATOR_USER" "$CP" || fail_after_stop "cannot assign the pre-WAL copy to the operator"
+    chmod -R go-rwx "$CP" || fail_after_stop "cannot restrict the pre-WAL copy permissions to the operator"
+    chmod -R a-w "$CP" || fail_after_stop "cannot make the pre-WAL copy read-only"
+    if ! state_tree_hashes user "$CP" "$GEN" "$PREV" > "$W/pre-wal-copy.sha256" 2> "$W/pre-wal-copy-hash.err"; then
+      fail_after_stop "pre-WAL copy hash/list failed: $(tail -3 "$W/pre-wal-copy-hash.err" | tr '\n' ' ')"
+    fi
+    [ -s "$W/pre-wal-copy.sha256" ] || fail_after_stop "pre-WAL copy hash/list is empty"
+    if ! state_tree_hashes sudo "$SD" "$GEN" "$PREV" > "$W/pre-wal-source.sha256" 2> "$W/pre-wal-source-hash.err"; then
+      fail_after_stop "pre-WAL source hash/list failed: $(tail -3 "$W/pre-wal-source-hash.err" | tr '\n' ' ')"
+    fi
+    [ -s "$W/pre-wal-source.sha256" ] || fail_after_stop "pre-WAL source hash/list is empty"
+    if ! diff -u "$W/pre-wal-copy.sha256" "$W/pre-wal-source.sha256" > "$W/pre-wal-diff.txt"; then
+      fail_after_stop "pre-WAL copy differs from the source or comparison failed (see pre-wal-diff.txt)"
+    fi
     $SUDO /usr/bin/python3 -I "$HELPER_DIR/verify-state-digests-ro.py" $CP > "$W/digests-copy.txt" 2>&1; grep -qx 'RESULT ALL_DIGESTS_OK' "$W/digests-copy.txt" || fail_after_stop "verify-state-digests-ro on the copy is not ALL_DIGESTS_OK"
     log "pre-WAL copy done: files=$(wc -l < "$W/pre-wal-copy.sha256") bytes=$(du -sb $CP | cut -f1)"; seg copy $T0
   else log "pre-WAL copy SKIPPED (COPY_APPROVED not set to yes): rollback relies on the graceful downgrade and the offline tool only"; fi
