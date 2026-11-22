@@ -60,6 +60,9 @@ export class FakeChain {
 	rpcLog: string[] = []
 	/** Highest number of JSON-RPC requests being handled at the same moment (counted here, on the chain side). */
 	maxConcurrentRpc = 0
+	/** Withdrawals for a block that has none in the explicit map (deterministic synthetic load, P4 measurements). */
+	withdrawalGen?: (n: number) => Withdrawal[]
+	private autoHeadTimer?: ReturnType<typeof setInterval>
 	private rpcInProgress = 0
 	unknownMethods: string[] = []
 	/** Called on every request (fault injection: delay, kill, 5xx). Return a status to short-circuit. */
@@ -74,7 +77,7 @@ export class FakeChain {
 		return hash32(`block:${n}`)
 	}
 	private blockObj(n: number): Record<string, unknown> {
-		const w = this.withdrawals.get(n) ?? []
+		const w = this.withdrawals.get(n) ?? this.withdrawalGen?.(n) ?? []
 		return {
 			number: hex(n),
 			hash: this.blockHash(n),
@@ -205,7 +208,12 @@ export class FakeChain {
 		await new Promise<void>((r) => this.server!.listen(0, '127.0.0.1', r))
 		this.url = `http://127.0.0.1:${(this.server!.address() as net.AddressInfo).port}`
 	}
+	/** The head grows by one block every intervalMs of real time (a chain that keeps producing while the daemon works). */
+	startAutoHead(intervalMs: number): void {
+		this.autoHeadTimer = setInterval(() => void this.head++, intervalMs)
+	}
 	async stop(): Promise<void> {
+		if (this.autoHeadTimer) clearInterval(this.autoHeadTimer)
 		await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()))
 	}
 	/** Add a withdrawal to the proxy address in block n. */
@@ -282,6 +290,8 @@ export class FakeSigner {
 	private sendsInProgress = 0
 	/** Artificial latency of a send (ms), to model signing/confirmation time of a real signer. */
 	sendDelayMs = 0
+	/** Every send this signer accepted: when (ms, monotonic) and how many event keys it carried (counted on the signer side). */
+	sends: { tMs: number; n: number }[] = []
 	constructor(private readonly chain: FakeChain) {}
 	async start(dir: string, name = 'signer'): Promise<void> {
 		this.socketPath = path.join(dir, `${name}.sock`)
@@ -333,6 +343,7 @@ export class FakeSigner {
 				const dec = WITHDRAW_NATIVE_IFACE.decodeFunctionData('withdrawNative', String(tx.data))
 				this.chain.sent.set(hash.toLowerCase(), { eventKeys: this.eventKeysOf?.(key) ?? [], hash, idempotencyKey: key, to: String(tx.to), data: String(tx.data), value: String(tx.value), gasLimit: String(tx.gasLimit), keyArray: String(tx.keyArray), chainId: Number(tx.chainId), amountWei: BigInt(dec[1]), status: null, mined: false })
 				this.afterRecord?.(tx, hash)
+				this.sends.push({ tMs: Number(process.hrtime.bigint() / 1_000_000n), n: this.chain.sent.get(hash.toLowerCase())?.eventKeys.length ?? 0 })
 				if (this.mode === 'lose-ack') {
 					this.acksLost++
 					req.socket.destroy()
