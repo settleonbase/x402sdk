@@ -13,7 +13,7 @@ import v8 from 'node:v8'
 import { test } from 'node:test'
 import { gracefulStopToV2, recoverPayoutState } from '../labPayoutRecovery'
 import { gracefulStopWalSession, openWalSession } from '../labWalSession'
-import { logicalDigest } from '../labWalRollback'
+import { digestPartsOfCore } from '../labWalRollback'
 
 const MIB = 1024 * 1024
 declare const gc: undefined | (() => void)
@@ -50,7 +50,7 @@ async function main(): Promise<void> {
 	if (mode === 'digest') {
 		const t0 = Date.now()
 		const rec = recoverPayoutState(dir, { readOnly: true })
-		const d = crypto.createHash('sha256').update(logicalDigest(rec.core)).digest('hex')
+		const d = digestPartsOfCore(rec.core).full // streaming: the same value as sha256(logicalDigest), also where the old string would exceed V8's string limit (B2)
 		// the parts, so a difference can be located (scalars are cursors and counters only; the lists are hashed, never printed)
 		const sc = rec.core.scalarsCopy() as Record<string, unknown>
 		delete sc.walSeq
