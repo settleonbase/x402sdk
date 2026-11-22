@@ -12,15 +12,18 @@ const read = (f: string): string => fs.readFileSync(path.join(__dirname, f), 'ut
 
 test('C4: ticks cannot overlap - the guard is set before the first await and released in finally; the next tick is armed only after the previous one finished', () => {
 	const src = read('validatorLabMiningPoolClPayoutReporter.ts')
-	const tick = src.slice(src.indexOf('async function labPayoutTick()'), src.indexOf('function scheduleNextLabTick()'))
-	assert.match(tick, /if \(labInFlight\) return/)
+	// since the tick-loop patch the tick body is labPayoutTickBody (labPayoutTick wraps it in the RPC source tag) and it returns an outcome
+	const tick = src.slice(src.indexOf('async function labPayoutTickBody()'), src.indexOf('One payment pass of the decoupled worker'))
+	assert.match(tick, /if \(labInFlight\) return 'skipped'/)
 	const guardAt = tick.indexOf('labInFlight = true')
 	const firstAwait = tick.indexOf('await ')
 	assert.ok(guardAt > 0 && guardAt < firstAwait, 'the in-flight guard is set before the first await')
 	assert.match(tick, /finally \{\s*tickHandle\?\.exitTick\(\)\s*labInFlight = false\s*labWalSession\?\.scheduler\.poke\(\)\s*\}/, 'the guard is released first, then the snapshot scheduler is poked (it never throws)')
-	const sched = src.slice(src.indexOf('function scheduleNextLabTick()'), src.indexOf('export function startValidatorLabMiningPoolClPayoutReporter'))
-	assert.match(sched, /await labPayoutTick\(\)\s*\n\s*scheduleNextLabTick\(\)/, 'the next timer is armed after the tick returned')
-	assert.match(src, /void labPayoutTick\(\)\.finally\(\(\) => scheduleNextLabTick\(\)\)/, 'the first tick re-arms only when it finished')
+	// the next tick is armed by LabTickLoop only after the previous tick function returned (labTickLoop.test.ts proves it behaviourally); the reporter starts it once per start path
+	const loop = read('labTickLoop.ts')
+	assert.ok(loop.indexOf('outcome = await this.d.tick()') > 0 && loop.indexOf('outcome = await this.d.tick()') < loop.indexOf('this.arm(gen, outcome)'), 'the loop awaits the tick before it arms the next one')
+	assert.equal([...src.matchAll(/labLoop\.start\(\)/g)].length, 2, 'both start paths (plain and WAL) start the loop')
+	assert.equal(src.includes('scheduleNextLabTick'), false, 'no fixed-interval re-arm is left')
 })
 
 test('C4: every state commit in the reporter is awaited; the only synchronous flush is the halt path before process.exit', () => {

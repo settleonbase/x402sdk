@@ -122,7 +122,7 @@ test('explicit rule: a bootstrap marker next to manifest.json or a staged manife
 
 test('the start race is closed in the source: stop sets the request flag, the WAL start checks it after the session opened and does not tick, the shutdown awaits a start that is still opening', () => {
 	const r = fs.readFileSync(path.join(__dirname, 'validatorLabMiningPoolClPayoutReporter.ts'), 'utf8')
-	assert.match(r, /export function stopValidatorLabMiningPoolClPayoutReporter\(\): void \{\s*\n\s*labStopRequested = true/)
+	assert.match(r, /export function stopValidatorLabMiningPoolClPayoutReporter\(\): void \{\s*\n(?:\s*\/\/[^\n]*\n)?\s*labLoop\.stop\(\)\s*\n\s*labStopRequested = true/, 'stop first makes the loop non-re-arming, then sets the request flag')
 	assert.match(r, /labWalSession = await openWalSession\([\s\S]*?if \(labStopRequested\) \{[\s\S]*?return\s*\n\s*\}[\s\S]*?labStarted = true/, 'checked after the open, before labStarted/ticks')
 	assert.match(r, /if \(labWalStarting\) await labWalStarting\.catch/, 'the shutdown waits for a start that is still opening')
 	assert.match(r, /if \(labStarted \|\| labWalStarting\) return/, 'a second start while opening is ignored')

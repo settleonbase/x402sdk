@@ -62,6 +62,8 @@ export function normalizeLine(raw: string): string {
 		.replace(ANSI, '')
 		.replace(/^\[(?:master|worker-[^ ]+) INFO \d+:\d+:\d+:\d+\]\s*/, '')
 		.replace(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z/g, '<ts>')
+		// the cancel-the-fixed-wait patch reworded the start line: `tick=15000ms` became `tickMode=continuous idleBackoffMs=15000 (TICK_MS: ...)`; the golden fixtures keep the old wording, so the new wording maps back to it (nothing else is relaxed)
+		.replace(/tickMode=continuous idleBackoffMs=(\d+) \(TICK_MS: [^)]*\)/, 'tick=$1ms')
 		.replace(/\b\d+s\/\d+s\b/g, '<dur>')
 		.replace(/force in \d+s/g, 'force in <dur>')
 		.replace(/gas wait \d+s ≥ \d+s/g, 'gas wait <dur> ≥ <dur>')
