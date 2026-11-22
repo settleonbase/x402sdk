@@ -1985,7 +1985,7 @@ async function setupPools(session: NonNullable<typeof labWalSession>, plan: Pool
 		logger(Colors.cyan(`[labMiningPoolClPayout] migrated the legacy in-flight record ${String(migrate.legacy.idempotencyKey)} into the slot of wallet ${migrate.wallet.id}`))
 	}
 	labPool = { cfg, wallets: cfg.wallets.map((w) => ({ w, running: false, wakeQueued: false, passes: 0, settledBatches: 0 })) }
-	logger(Colors.cyan(`[labMiningPoolClPayout] pools: ${cfg.wallets.map((w) => `${w.id}(${w.line},${w.state})`).join(' ')} file sha256=${cfg.sha256}`))
+	logger(Colors.cyan(`[labMiningPoolClPayout] pools: ${cfg.wallets.map((w) => `${w.id}(${w.line},${w.state})`).join(' ')} file sha256=${cfg.sha256} minVdrBalanceReserveWei=${resolveMinVdrBalanceReserveWei()}`))
 }
 
 /** WAL-mode start: recover (or bootstrap) the state, then the same start check and first tick as the legacy path. A failure refuses to start (exit 1). */

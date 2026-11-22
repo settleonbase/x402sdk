@@ -370,3 +370,56 @@ test('a wallet that is never an admin never reaches its signer: zero requests on
 	})
 	reconcile(r.res, r.world, r.end, 'admin never')
 })
+
+// ---------------------------------------------------------------- the money rule with MIN_VDR_BALANCE_RESERVE_WEI = 0
+test('reserve 0: the daemon starts (the start-up line reads back minVdrBalanceReserveWei=0) and, with a balance of 40% of what is owed, never pays more than the contract holds - concurrent wallets share the balance; topping up later lets the rest be paid; every key once', { timeout: 300_000 }, async () => {
+	let initialBalance = 0n
+	let topUp = 0n
+	const r = await run('pf_balance_limit', POOL(2, 1), async (ctx, w) => {
+		const total = BigInt(w.totalGwei) * 1_000_000_000n
+		initialBalance = (total * 40n) / 100n
+		ctx.chain.balanceWei = initialBalance
+		let minBalanceSeen = initialBalance
+		const orig = ctx.chain.onRequest
+		void orig
+		ctx.chain.onRequest = async () => {
+			if (ctx.chain.balanceWei < minBalanceSeen) minBalanceSeen = ctx.chain.balanceWei
+			await new Promise((res) => setTimeout(res, 1))
+		}
+		await ctx.run({ ticks: 12, timeoutMs: 200_000 })
+		const paidFirst = [...ctx.chain.sent.values()].filter((t) => t.mined).reduce((a, t) => a + t.amountWei, 0n)
+		assert.ok(paidFirst <= initialBalance, `paid ${paidFirst} wei with a balance of ${initialBalance}`)
+		assert.ok(ctx.chain.balanceWei >= 0n, 'the contract balance never went negative')
+		assert.ok(minBalanceSeen >= 0n)
+		assert.ok(paidFirst > 0n && paidFirst > (initialBalance * 80n) / 100n, `the balance was used (paid ${paidFirst} of ${initialBalance})`)
+		const pendingMid = recoverPayoutState(ctx.stateDir, { readOnly: true }).core.pendingSize
+		assert.ok(pendingMid > 0, 'what the balance could not cover is still pending')
+		// the VDR is topped up (outside the daemon): the rest is paid, nothing twice
+		topUp = total
+		ctx.chain.balanceWei += topUp
+		await ctx.run({ ticks: 14, timeoutMs: 200_000 })
+	})
+	assert.ok(r.res.logs.flat().some((l) => l.includes('minVdrBalanceReserveWei=0')), 'the effective configuration is read back at start-up')
+	reconcile(r.res, r.world, r.end, 'balance limit')
+	assert.ok(initialBalance > 0n && topUp > 0n)
+})
+
+test('reserve 0: a balance read that fails means NO claim and no send (zero signer requests), and the first pass after the read works again pays everything once', { timeout: 300_000 }, async () => {
+	let failing = true
+	const r = await run('pf_balance_readfail', POOL(2, 1), async (ctx) => {
+		let blocked = 0
+		ctx.chain.onRequest = async (m) => {
+			if (m === 'eth_getBalance' && failing) {
+				blocked++
+				return { status: 500 }
+			}
+		}
+		await ctx.run({ ticks: 12, timeoutMs: 200_000 }) // the whole first run with a balance that cannot be read
+		const sendsWhileFailing = [...ctx.poolSigners.values()].reduce((a, sg) => a + sg.requests.filter((q) => q.method === 'signer_sendTransaction').length, 0)
+		assert.equal(sendsWhileFailing, 0, `no send while the balance cannot be read (${blocked} failed reads)`)
+		assert.ok(blocked >= 1, 'the balance read really failed')
+		failing = false
+		await ctx.run({ ticks: 12, timeoutMs: 200_000 })
+	})
+	reconcile(r.res, r.world, r.end, 'balance read failure')
+})

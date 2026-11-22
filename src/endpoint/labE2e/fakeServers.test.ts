@@ -65,6 +65,7 @@ export class FakeChain {
 	adminAddrs?: Set<string>
 	/** Number of admins(address) reads answered (counted on the chain side: one per wallet pass). */
 	adminReads = 0
+	private readonly deducted = new Set<string>()
 	/** Withdrawals for a block that has none in the explicit map (deterministic synthetic load, P4 measurements). */
 	withdrawalGen?: (n: number) => Withdrawal[]
 	private autoHeadTimer?: ReturnType<typeof setInterval>
@@ -174,6 +175,11 @@ export class FakeChain {
 				const status: 0 | 1 = rule === 'reverted' ? 0 : 1
 				tx.status = status
 				tx.mined = true
+				// like the real chain: a mined withdrawNative leaves the contract's balance (once per transaction)
+				if (status === 1 && !this.deducted.has(tx.hash)) {
+					this.deducted.add(tx.hash)
+					this.balanceWei -= tx.amountWei
+				}
 				return this.receiptObj(tx, status)
 			}
 			default:
