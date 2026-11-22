@@ -50,18 +50,11 @@ async function main(): Promise<void> {
 	if (mode === 'digest') {
 		const t0 = Date.now()
 		const rec = recoverPayoutState(dir, { readOnly: true })
-		const d = digestPartsOfCore(rec.core).full // streaming: the same value as sha256(logicalDigest), also where the old string would exceed V8's string limit (B2)
-		// the parts, so a difference can be located (scalars are cursors and counters only; the lists are hashed, never printed)
+		const dp = digestPartsOfCore(rec.core) // streaming: also where JSON.stringify of the whole list would exceed V8's string limit (B2)
+		const d = dp.full
 		const sc = rec.core.scalarsCopy() as Record<string, unknown>
 		delete sc.walSeq
-		const h = (x: unknown): string => crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex')
-		const parts = {
-			scalars: sc,
-			inFlight: h(rec.core.getInFlight()),
-			pending: h([...rec.core.pendingEntries()].map((e) => ({ ...e })).sort((a, b) => (a.eventKey < b.eventKey ? -1 : 1))),
-			consumed: h([...rec.core.consumedKeys()]),
-			exited: h([...rec.core.exited.keys()].sort()),
-		}
+		const parts = { scalars: sc, inFlight: dp.inFlight, pending: dp.pendingEntries, consumed: dp.consumedOrder, exited: dp.exited }
 		fs.writeFileSync(a3!, JSON.stringify({ mode, ms: Date.now() - t0, pending: rec.core.pendingSize, consumed: rec.core.consumedSize, slotCount: rec.core.slotCount, logicalSha256: d, parts }, null, 1))
 		return
 	}
