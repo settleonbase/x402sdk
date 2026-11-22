@@ -76,6 +76,8 @@ export type WalOp =
 	/** Delete scalars (JSON drops undefined, and the daemon deletes e.g. gasWaitStartedAt): an explicit op so a replay cannot resurrect them. Idempotent. */
 	| { op: 'scalarsDel'; names: string[] }
 	| { op: 'inFlightSet'; record: Record<string, unknown> | null }
+	/** P4: the in-flight batch of ONE wallet (its slot); null clears it. Idempotent (a slot is replaced as a whole). */
+	| { op: 'slotSet'; wallet: string; record: Record<string, unknown> | null }
 
 export type WalEvent = { v: 1; seq: number; ts: string; t: string; ops: WalOp[] }
 
@@ -621,6 +623,8 @@ export interface WalApplyTarget {
 	setScalar(name: string, value: unknown): void
 	deleteScalar(name: string): void
 	setInFlight(record: Record<string, unknown> | null): void
+	/** P4 per-wallet slots; absent on targets that predate pools (an event with a slotSet op then fails loudly in applyOps). */
+	setSlot?(wallet: string, record: Record<string, unknown> | null): void
 }
 
 /** Apply one event's ops. Every op is idempotent; applying an event twice leaves the state unchanged. */
@@ -652,6 +656,10 @@ export function applyOps(target: WalApplyTarget, ops: readonly WalOp[]): void {
 				break
 			case 'inFlightSet':
 				target.setInFlight(op.record)
+				break
+			case 'slotSet':
+				if (!target.setSlot) throw new WalCorruptError('labWal: a slotSet event on a target without per-wallet slots')
+				target.setSlot(op.wallet, op.record)
 				break
 			default: {
 				const never: never = op

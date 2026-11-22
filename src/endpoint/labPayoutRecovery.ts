@@ -35,7 +35,15 @@ export type RecoveryResult = {
 	durationMs: number
 }
 
-const NOT_SCALARS: ReadonlySet<string> = new Set(['pending', 'consumedEventKeys', 'exitedPubkeys', 'inFlightWithdraw'])
+const NOT_SCALARS: ReadonlySet<string> = new Set(['pending', 'consumedEventKeys', 'exitedPubkeys', 'inFlightWithdraw', 'inFlightByWallet'])
+
+/** The per-wallet slots stored in a snapshot's scalars (P4); anything that is not an object of objects is ignored (a snapshot without pools has none). */
+function slotsOf(v: unknown): Record<string, Record<string, unknown>> | undefined {
+	if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined
+	const out: Record<string, Record<string, unknown>> = {}
+	for (const [w, r] of Object.entries(v as Record<string, unknown>)) if (r && typeof r === 'object') out[w] = r as Record<string, unknown>
+	return out
+}
 
 export function recoverPayoutState(
 	stateDir: string,
@@ -75,6 +83,7 @@ export function recoverPayoutState(
 				exited: Object.keys(state.exitedPubkeys),
 				scalars,
 				inFlight: rec && typeof rec === 'object' ? (rec as Record<string, unknown>) : null,
+				slots: slotsOf((state as Record<string, unknown>).inFlightByWallet),
 				lastAppliedSeq: snapshotSeq,
 			},
 			{ onDrift: opts.onDrift }
@@ -89,7 +98,7 @@ export function recoverPayoutState(
 				delete scalars.walSeq
 				const rec = all.inFlightWithdraw
 				// the snapshot seq is known from the manifest before the entries are read
-				c = new LabPayoutStateCore({ scalars, inFlight: rec && typeof rec === 'object' ? (rec as Record<string, unknown>) : null, lastAppliedSeq: seq }, { onDrift: opts.onDrift })
+				c = new LabPayoutStateCore({ scalars, inFlight: rec && typeof rec === 'object' ? (rec as Record<string, unknown>) : null, slots: slotsOf(all.inFlightByWallet), lastAppliedSeq: seq }, { onDrift: opts.onDrift })
 			},
 			pending: (rec) => c!.pendingSet(rec as unknown as PendingEntry),
 			consumed: (k) => {
@@ -192,6 +201,8 @@ export async function gracefulStopToV2(core: LabPayoutStateCore, wal: WalWriter,
 	if (core.lastAppliedSeq !== wal.lastSeq) {
 		throw new Error(`labPayoutRecovery: memory is at seq ${core.lastAppliedSeq} but the log is at ${wal.lastSeq}; stop producing events before the graceful stop`)
 	}
+	// P4: a version 2 snapshot cannot carry per-wallet slots (an old build would ignore them and could pay a batch twice): refuse, keep the log, which an old build then refuses to start from
+	if (core.slotCount > 0) throw new Error(`labPayoutRecovery: ${core.slotCount} wallet slot(s) still hold an in-flight batch; no version 2 downgrade snapshot is possible (settle or resolve them first: labWalResolveInFlight); the log is kept`)
 	await wal.whenDurable(wal.lastSeq) // drain: every event is fsynced before the final snapshot
 	const src = core.freezeForSnapshot()
 	let res

@@ -45,6 +45,37 @@ export class ActorHub<E extends PendingLike, S extends object> {
 	stats = { commits: 0, emptyCommits: 0, droppedConsumedAdds: 0, droppedReservedAdds: 0, discardedOps: 0 }
 	/** The one actor allowed to write the single in-flight slot (F-A0-4). */
 	inFlightWriter: string | undefined
+	/** P4: the one actor allowed to write a wallet's slot. */
+	readonly slotWriter = new Map<string, string>()
+	/** P4: keys a wallet has claimed in a synchronous block but whose intent is not committed yet (invisible to the log, visible to every other claimer). */
+	private readonly claimOwner = new Map<string, string>()
+	/** True when the key is in a committed slot or in a claim that has not reached the log yet. */
+	isReserved(key: string): boolean {
+		return this.d.core.slotOwnerOfKey(key) !== undefined || this.claimOwner.has(key)
+	}
+	/** Who holds the key (committed slot first, then pending claim). */
+	reservedBy(key: string): string | undefined {
+		return this.d.core.slotOwnerOfKey(key) ?? this.claimOwner.get(key)
+	}
+	/**
+	 * Reserves keys for a wallet IN ONE SYNCHRONOUS BLOCK (no await between the check by the caller and this call): from now on no other claimer picks them and a rescan does not re-add them.
+	 * Returns false (and reserves nothing) when any key is already reserved by someone else.
+	 */
+	claim(wallet: string, keys: string[]): boolean {
+		for (const k of keys) {
+			const o = this.reservedBy(k)
+			if (o !== undefined && o !== wallet) return false
+		}
+		for (const k of keys) this.claimOwner.set(k, wallet)
+		return true
+	}
+	/** Drops the wallet's pending claim (after its slot is committed the committed slot is the reservation; after an abort nothing is). */
+	releaseClaim(wallet: string, keys?: string[]): void {
+		for (const [k, w] of [...this.claimOwner]) if (w === wallet && (keys === undefined || keys.includes(k))) this.claimOwner.delete(k)
+	}
+	claimedKeysOf(wallet: string): string[] {
+		return [...this.claimOwner].filter(([, w]) => w === wallet).map(([k]) => k)
+	}
 	constructor(readonly d: ActorHubDeps) {
 		this.onFatal =
 			d.onFatal ??
@@ -88,6 +119,8 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 	private sc = new Map<string, ScalarWrite>()
 	/** undefined = not read yet; null = no record; object = the live mutable copy of the in-flight record. */
 	private live: Record<string, unknown> | null | undefined = undefined
+	/** P4: live mutable copies of wallet slots this actor has read or written (null = cleared). */
+	private liveSlots = new Map<string, Record<string, unknown> | null>()
 
 	constructor(
 		private readonly hub: ActorHub<E, S>,
@@ -106,8 +139,32 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 		this.hub.inFlightWriter = this.name
 	}
 
+	private liveSlotChanges(): number {
+		let n = 0
+		for (const [w, rec] of this.liveSlots) if (JSON.stringify(rec) !== JSON.stringify(this.core.getSlot(w))) n++
+		return n
+	}
+
+	// ---- P4 per-wallet slots: the same live-copy semantics as the single in-flight record, one per wallet; exactly one actor may write a given wallet's slot
+	/** The wallet's in-flight record as this actor sees it (a live mutable copy: the lifecycle changes it in place), or null. */
+	slot(wallet: string): Record<string, unknown> | null {
+		let v = this.liveSlots.get(wallet)
+		if (v === undefined) {
+			const cur = this.core.getSlot(wallet)
+			v = cur ? clone(cur as Record<string, unknown>) : null
+			this.liveSlots.set(wallet, v)
+		}
+		return v
+	}
+	setSlot(wallet: string, record: Record<string, unknown> | null): void {
+		const w = this.hub.slotWriter.get(wallet)
+		if (w !== undefined && w !== this.name) throw new Error(`labActorHandle: actor ${this.name} wrote the slot of wallet ${wallet} that actor ${w} owns`)
+		this.hub.slotWriter.set(wallet, this.name)
+		this.liveSlots.set(wallet, record)
+	}
+
 	overlayCount(): number {
-		return this.ops.length + this.sc.size + (this.live !== undefined && JSON.stringify(this.live) !== JSON.stringify(this.core.getInFlight()) ? 1 : 0)
+		return this.ops.length + this.sc.size + this.liveSlotChanges() + (this.live !== undefined && JSON.stringify(this.live) !== JSON.stringify(this.core.getInFlight()) ? 1 : 0)
 	}
 
 	// ------------------------------------------------------------------ reads: the core plus this actor's own overlay
@@ -265,7 +322,7 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 					this.hub.stats.droppedConsumedAdds++
 					continue
 				}
-				if (this.hub.d.reserved?.(k)) {
+				if (this.hub.isReserved(k) || this.hub.d.reserved?.(k)) {
 					this.hub.stats.droppedReservedAdds++
 					continue
 				}
@@ -285,6 +342,7 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 			const cur = this.core.getInFlight()
 			if (JSON.stringify(this.live) !== JSON.stringify(cur)) out.push({ op: 'inFlightSet', record: this.live === null ? null : clone(this.live) })
 		}
+		for (const [w, rec] of this.liveSlots) if (JSON.stringify(rec) !== JSON.stringify(this.core.getSlot(w))) out.push({ op: 'slotSet', wallet: w, record: rec === null ? null : clone(rec) })
 		// the persisted cursor high-water follows the cursors (what the legacy write did on every persist), computed from the committed values
 		const hw = (this.core.getScalar('cursorHighWater') ?? {}) as { backfill?: number; listen?: number }
 		const num = (v: unknown): number => (typeof v === 'number' ? v : -1)
@@ -303,6 +361,7 @@ export class ActorView<E extends PendingLike, S extends object> extends HandleGu
 		this.ovExited = new Set()
 		this.sc = new Map()
 		this.live = undefined
+		this.liveSlots = new Map()
 	}
 
 	async commit(label: StateCommitLabel): Promise<void> {

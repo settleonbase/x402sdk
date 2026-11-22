@@ -20,7 +20,7 @@ export type PendingEntry = Readonly<{ eventKey: string } & Record<string, unknow
 export type InFlightRecord = Readonly<Record<string, unknown>>
 
 /** Scalar names that belong to the collections or to the in-flight record, never to the plain scalars. */
-const RESERVED_SCALARS: ReadonlySet<string> = new Set(['pending', 'consumedEventKeys', 'exitedPubkeys', 'inFlightWithdraw', '__proto__'])
+const RESERVED_SCALARS: ReadonlySet<string> = new Set(['pending', 'consumedEventKeys', 'exitedPubkeys', 'inFlightWithdraw', 'inFlightByWallet', '__proto__'])
 
 export function deepFreeze<T>(v: T): T {
 	if (v === null || typeof v !== 'object' || Object.isFrozen(v)) return v
@@ -34,6 +34,8 @@ function jsonClone<T>(v: T): T {
 }
 
 export type CoreInit = {
+	/** P4: the per-wallet in-flight slots of the loaded snapshot. */
+	slots?: Record<string, InFlightRecord>
 	pending?: Iterable<PendingEntry>
 	/** In insertion (oldest first) order: that is the prune order. */
 	consumed?: Iterable<string>
@@ -73,6 +75,9 @@ export class LabPayoutStateCore implements WalApplyTarget {
 	readonly counts: HistoryBlockCounts
 	private scalars: Record<string, unknown> = {}
 	private inFlight: InFlightRecord | null = null
+	/** P4: one in-flight batch per wallet, and the owner of every event key that is in one (the reserved set). */
+	private readonly slots = new Map<string, InFlightRecord>()
+	private readonly slotKeyOwner = new Map<string, string>()
 	private appliedSeq = 0
 	private snap: SnapshotSource | null = null
 	/** Snapshot statistics for the journal. */
@@ -85,6 +90,7 @@ export class LabPayoutStateCore implements WalApplyTarget {
 		for (const k of init.exited ?? []) this.exited.add(k)
 		for (const [k, v] of Object.entries(init.scalars ?? {})) this.setScalar(k, v)
 		this.inFlight = init.inFlight ? deepFreeze(init.inFlight) : null
+		for (const [w, rec] of Object.entries(init.slots ?? {})) this.setSlot(w, rec)
 		this.appliedSeq = init.lastAppliedSeq ?? 0
 		this.rebuildCounts()
 	}
@@ -128,6 +134,26 @@ export class LabPayoutStateCore implements WalApplyTarget {
 	}
 	getInFlight(): InFlightRecord | null {
 		return this.inFlight
+	}
+	// ---- P4 per-wallet slots
+	getSlot(wallet: string): InFlightRecord | null {
+		return this.slots.get(wallet) ?? null
+	}
+	get slotCount(): number {
+		return this.slots.size
+	}
+	slotEntries(): IterableIterator<[string, InFlightRecord]> {
+		return this.slots.entries()
+	}
+	/** The wallet whose in-flight batch holds this event key (reserved: no other wallet may claim it, a rescan must not re-add it), or undefined. */
+	slotOwnerOfKey(key: string): string | undefined {
+		return this.slotKeyOwner.get(key)
+	}
+	/** Sum of the amounts (wei) of all slots: money that is out of the redeem contract's balance but not yet settled. */
+	slotsAmountWei(): bigint {
+		let n = 0n
+		for (const r of this.slots.values()) n += BigInt(String((r as Record<string, unknown>).amountWei ?? '0'))
+		return n
 	}
 	/** An independent copy of the plain scalars (not the in-flight record). */
 	scalarsCopy(): Record<string, unknown> {
@@ -202,6 +228,17 @@ export class LabPayoutStateCore implements WalApplyTarget {
 	setInFlight(record: Record<string, unknown> | null): void {
 		this.inFlight = record === null ? null : deepFreeze(jsonClone(record))
 	}
+	setSlot(wallet: string, record: Record<string, unknown> | null): void {
+		const old = this.slots.get(wallet)
+		if (old) for (const k of ((old as Record<string, unknown>).eventKeys as string[] | undefined) ?? []) if (this.slotKeyOwner.get(k) === wallet) this.slotKeyOwner.delete(k)
+		if (record === null) {
+			this.slots.delete(wallet)
+			return
+		}
+		const frozen = deepFreeze(jsonClone(record))
+		this.slots.set(wallet, frozen)
+		for (const k of ((frozen as Record<string, unknown>).eventKeys as string[] | undefined) ?? []) this.slotKeyOwner.set(k, wallet)
+	}
 
 	/** Replay: apply one event read from the log. Events at or below the loaded snapshot are filtered by the scan (afterSeq), not here. */
 	applyEvent(ev: WalEvent): void {
@@ -227,6 +264,7 @@ export class LabPayoutStateCore implements WalApplyTarget {
 		if (this.snap) throw new Error('labPayoutStateCore: a snapshot is already in flight')
 		const scalars = this.scalarsCopy()
 		if (this.inFlight) scalars.inFlightWithdraw = jsonClone(this.inFlight)
+		if (this.slots.size > 0) scalars.inFlightByWallet = Object.fromEntries([...this.slots.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([w, r]) => [w, jsonClone(r)]))
 		const pending = this.pending.freeze()
 		let consumed: FreezeHandle<string, true>
 		let exited: FreezeHandle<string, true>
