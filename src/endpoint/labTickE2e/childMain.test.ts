@@ -15,9 +15,31 @@ const root = process.env.E2E_REPORTER_ROOT
 if (!root) throw new Error('E2E_REPORTER_ROOT is required')
 const t0 = process.hrtime.bigint()
 const now = (): number => Number((process.hrtime.bigint() - t0) / 1_000n) / 1000
-const ev = (s: string): void => console.log(`E2E_EV ${s} t=${now().toFixed(3)}`)
+const origLog = console.log.bind(console)
+const ev = (s: string): void => origLog(`E2E_EV ${s} t=${now().toFixed(3)}`)
 const realSetTimeout = global.setTimeout
+const ANSI_RE = /\u001b\[[0-9;]*m/g
+// phase marks (observation only): the reporter's own progress lines are timestamped here, in the child's clock, so a tick can be split into its phases (see the E2E_EV mark lines)
+console.log = (...a: unknown[]): void => {
+	const text = a.map((x) => String(x)).join(' ').replace(ANSI_RE, '')
+	let kind: string | undefined
+	let extra = ''
+	if (text.includes('scan-summary line=realtime')) {
+		kind = 'rt'
+		extra = ` n=${/ n=(\d+)/.exec(text)?.[1] ?? '?'}`
+	} else if (text.includes('scan-summary line=history')) {
+		kind = 'hist'
+		extra = ` n=${/ n=(\d+)/.exec(text)?.[1] ?? '?'}`
+	} else if (text.includes('progress hist remaining=')) {
+		kind = 'prog'
+		extra = ` tipGap=${/rt tipGap=(\d+)/.exec(text)?.[1] ?? '?'} pending=${/pending=(\d+)/.exec(text)?.[1] ?? '?'}`
+	} else if (text.includes('flush-summary')) kind = 'flush'
+	else if (text.includes('flush inspect=')) kind = 'flush-inspect'
+	if (kind) ev(`mark kind=${kind}${extra} ${ioStr()}`)
+	origLog(...a)
+}
 // persistence evidence (observation only): the state store writes through fs.writeSync / fs.fsyncSync / fs.renameSync of the default fs object; bytes, calls and time are counted here, the reporter is not touched.
+const ioStr = (): string => `io_wb=${io.writeBytes} io_wms=${io.writeMs.toFixed(1)} io_fms=${io.fsyncMs.toFixed(1)} io_mc=${io.manifestCommits}`
 const io = { writeBytes: 0, writeCalls: 0, writeMs: 0, fsyncCalls: 0, fsyncMs: 0, manifestCommits: 0 }
 {
 	const w0 = fs.writeSync
@@ -50,9 +72,9 @@ let waits = 0
 	if (typeof ms === 'number' && ms === Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MS) && (stack.includes('scheduleNextLabTick') || stack.includes('LabTickLoop'))) {
 		waits++
 		const used = waitMsRaw === 'real' ? ms : Number(waitMsRaw)
-		ev(`wait-set requested=${ms} used=${used}`)
+		ev(`wait-set requested=${ms} used=${used} ${ioStr()}`)
 		return realSetTimeout(() => {
-			ev('wait-fired')
+			ev(`wait-fired ${ioStr()}`)
 			fn(...a)
 		}, used)
 	}
@@ -85,10 +107,10 @@ async function main(): Promise<void> {
 					const n = ++ticks
 					running++
 					maxRunning = Math.max(maxRunning, running)
-					ev(`tick-start n=${n} running=${running}`)
+					ev(`tick-start n=${n} running=${running} ${ioStr()}`)
 					try {
 						const r = await inner()
-						ev(`tick-end n=${n} outcome=${r}`)
+						ev(`tick-end n=${n} outcome=${r} ${ioStr()}`)
 						return r
 					} finally {
 						running--
@@ -116,7 +138,7 @@ async function main(): Promise<void> {
 	}
 	process.on('SIGTERM', () => void shutdown('SIGTERM'))
 	if (process.env.E2E_RUN_MS) realSetTimeout(() => void shutdown('E2E_RUN_MS'), Number(process.env.E2E_RUN_MS))
-	ev('start')
+	ev(`start ${ioStr()}`)
 	rep.startValidatorLabMiningPoolClPayoutReporter()
 	if (process.env.E2E_STOP_START_AT_MS) {
 		realSetTimeout(() => {
