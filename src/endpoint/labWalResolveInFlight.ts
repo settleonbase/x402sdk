@@ -91,6 +91,8 @@ export type ResolveOptions = {
 	runId: string
 	approval: string
 	expectIdempotencyKey: string
+	/** P4: resolve the in-flight slot of this wallet instead of the single in-flight record. */
+	wallet?: string
 	readers: InFlightReaders
 	allowRelease?: boolean
 	dryRun?: boolean
@@ -132,8 +134,8 @@ async function resolveLocked(opts: ResolveOptions): Promise<ResolveResult> {
 	}
 	if (rec.scan.truncatedBytes > 0) throw new Error(`labWalResolveInFlight: the log ends in a torn tail (${rec.scan.truncatedBytes} bytes); repair first. Nothing was changed`)
 	const core = rec.core
-	const rec1 = core.getInFlight()
-	if (!rec1) throw new Error('labWalResolveInFlight: there is no in-flight record; nothing to resolve. Nothing was changed')
+	const rec1 = opts.wallet ? core.getSlot(opts.wallet) : core.getInFlight()
+	if (!rec1) throw new Error(opts.wallet ? `labWalResolveInFlight: wallet ${opts.wallet} holds no in-flight slot; nothing to resolve. Nothing was changed` : 'labWalResolveInFlight: there is no in-flight record; nothing to resolve. Nothing was changed')
 	const idem = typeof rec1.idempotencyKey === 'string' ? rec1.idempotencyKey : ''
 	if (idem !== opts.expectIdempotencyKey) throw new Error(`labWalResolveInFlight: the in-flight record's idempotency key (${idem}) is not the expected one (${opts.expectIdempotencyKey}). Nothing was changed`)
 	const keys = (Array.isArray(rec1.eventKeys) ? (rec1.eventKeys as unknown[]) : []).filter((k): k is string => typeof k === 'string')
@@ -215,11 +217,11 @@ async function resolveLocked(opts: ResolveOptions): Promise<ResolveResult> {
 	const ops: WalOp[] = []
 	if (decision === 'settled') {
 		for (const k of keys) ops.push({ op: 'consumedAdd', key: k }, { op: 'pendingDel', key: k })
-		ops.push({ op: 'inFlightSet', record: null })
+		ops.push(opts.wallet ? { op: 'slotSet', wallet: opts.wallet, record: null } : { op: 'inFlightSet', record: null })
 		const patch: Record<string, unknown> = { settledBatchCount: before + 1 }
 		if (maxPaid !== null) patch.maxPaidHistoryBlock = maxPaid
 		ops.push({ op: 'scalarsSet', patch })
-	} else if (decision === 'released') ops.push({ op: 'inFlightSet', record: null })
+	} else if (decision === 'released') ops.push(opts.wallet ? { op: 'slotSet', wallet: opts.wallet, record: null } : { op: 'inFlightSet', record: null })
 
 	const audit: ResolveAudit = {
 		runId: opts.runId,
@@ -316,7 +318,7 @@ if (require.main === module) {
 	void (async () => {
 		try {
 			const argv = process.argv.slice(2)
-			const valueFlags = ['--state-dir', '--audit-dir', '--run-id', '--approval', '--idempotency-key', '--signer-socket', '--rpc-url']
+			const valueFlags = ['--state-dir', '--audit-dir', '--run-id', '--approval', '--idempotency-key', '--signer-socket', '--rpc-url', '--wallet']
 			const boolFlags = ['--allow-release', '--dry-run']
 			const values: Record<string, string> = {}
 			const bools = new Set<string>()
@@ -337,6 +339,7 @@ if (require.main === module) {
 				runId: values['--run-id'] ?? '',
 				approval: values['--approval'] ?? '',
 				expectIdempotencyKey: values['--idempotency-key'] ?? '',
+				...(values['--wallet'] ? { wallet: values['--wallet'] } : {}),
 				readers: defaultReaders({ signerSocket: values['--signer-socket'] ?? '', rpcUrl: values['--rpc-url'] ?? '' }),
 				allowRelease: bools.has('--allow-release'),
 				dryRun: bools.has('--dry-run'),

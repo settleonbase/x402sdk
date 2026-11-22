@@ -222,6 +222,7 @@ async function reconcileLocked(opts: { stateDir: string; auditDir: string; runId
 	const nonces = [...new Set(keys.filter((k) => k.nonce !== undefined).map((k) => k.nonce as number))].sort((a, b) => a - b)
 	const inFlight = core.getInFlight()
 	const inFlightKeys = new Set<string>(inFlight && Array.isArray(inFlight.eventKeys) ? (inFlight.eventKeys as string[]) : [])
+	for (const [, slot] of core.slotEntries()) for (const k of ((slot as Record<string, unknown>).eventKeys as string[] | undefined) ?? []) inFlightKeys.add(k) // P4: the keys of every wallet's slot are in flight too
 	const overlap = keys.filter((k) => inFlightKeys.has(k.eventKey)).map((k) => k.eventKey)
 	// the high-water the lost settle would have carried: max block of the reconciled HISTORY keys that are still pending (blocks <= freezeH)
 	const fh = core.freezeHeight()

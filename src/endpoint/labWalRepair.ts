@@ -225,7 +225,7 @@ function summarize(ev: WalEvent, offset: number): DroppedFrame {
 	const intents: DroppedFrame['intents'] = []
 	let settled = 0
 	for (const op of ev.ops) {
-		if (op.op === 'inFlightSet' && op.record) {
+		if ((op.op === 'inFlightSet' || op.op === 'slotSet') && op.record) {
 			const r = op.record as Record<string, unknown>
 			const keys = Array.isArray(r.eventKeys) ? (r.eventKeys as unknown[]).length : undefined
 			intents.push({

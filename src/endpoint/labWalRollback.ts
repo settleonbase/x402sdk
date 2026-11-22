@@ -127,6 +127,7 @@ async function rollbackLocked(opts: RollbackOptions): Promise<RollbackResult> {
 	if (rec.scan.truncatedBytes > 0) throw new Error(`labWalRollback: the log ends in a torn tail (${rec.scan.truncatedBytes} bytes); repair first. Nothing was changed`)
 	if (rec.warnings.length > 0) throw new Error(`labWalRollback: recovery reported warnings (${rec.warnings.join('; ')}); resolve them first. Nothing was changed`)
 	const core = rec.core
+	if (core.slotCount > 0) throw new Error(`labWalRollback: ${core.slotCount} wallet slot(s) (${[...core.slotEntries()].map(([w]) => w).join(',')}) hold in-flight batches; a version 2 state cannot carry them and an old build would ignore them. Resolve each with the offline in-flight resolver (--wallet <id>) first. Nothing was changed`)
 	const before = logicalDigest(core)
 	const inFlight = core.getInFlight() as Record<string, unknown> | null
 	const audit: RollbackAudit = {
