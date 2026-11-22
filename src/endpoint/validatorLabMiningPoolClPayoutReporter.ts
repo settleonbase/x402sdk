@@ -93,6 +93,8 @@ import {
 import { partitionByGuardianBeneficiary } from './labFlushGuardian'
 import { mapWithConcurrency, resolveReadConcurrency, settle } from './labParallel'
 import { loadPoolConfig, type PoolConfig, type PoolWallet } from './labPoolConfig'
+import { batchFits, parseReserveWei, poolAvailableWei, readBalanceStrict, RESERVE_ENV } from './labPoolMoney'
+import { GasAlertTracker } from './labPoolGasAlert'
 import { BudgetedJsonRpcProvider, RpcBudget, rpcSource } from './labRpcBudget'
 import { selectFlushCandidates } from './labFlushSelect'
 import { segmentedDirForLegacy } from './labClPayoutStateStore'
@@ -257,7 +259,7 @@ let labPayRunning = false
 let labPayWakeQueued = false
 /** P4 wallet pools (decoupled mode only): one payment loop per wallet. */
 type PoolActor = ActorView<SkimEntry, LabClPayoutState>
-type PoolWalletState = { w: PoolWallet; running: boolean; wakeQueued: boolean; timer?: ReturnType<typeof setTimeout>; isolated?: string; passes: number; settledBatches: number; lastAdminAlertAt?: number }
+type PoolWalletState = { w: PoolWallet; running: boolean; wakeQueued: boolean; timer?: ReturnType<typeof setTimeout>; isolated?: string; passes: number; settledBatches: number; lastAdminAlertAt?: number; gasAlert: GasAlertTracker; lastSendError?: string }
 let labPool: { cfg: PoolConfig; wallets: PoolWalletState[] } | undefined
 /** Serial tick loop (labTickLoop.ts): working ticks continue at once, idle/fault/skipped ticks wait resolveTickMs(). Used by EVERY mode: the coupled tick, the decoupled scan tick and the pool's scan tick; the payment loops (wakePayWorker / wakePoolWallet) are separate and wait PAY_IDLE_MS, not TICK_MS. */
 const labLoop = new LabTickLoop({ tick: () => labPayoutTick(), backoffMs: () => resolveTickMs() })
@@ -873,15 +875,26 @@ function makeLabLifecycleDeps(
 		halt: (code, reason) => (pool ? isolatePoolWallet(pool.ws, code, reason) : haltDaemon(h, code, reason)),
 		send: async (rec) => {
 			// One send. No recovery and no retry here: the lifecycle holds an unknown outcome (B-2).
-			const sent = await sendConfiguredLabWithdrawNative({
-				redeem: rec.redeem,
-				pool: rec.pool,
-				amount: BigInt(rec.amountWei),
-				eventKeys: rec.eventKeys,
-				gasLimit: resolvePayoutGasLimit(),
-				expectedIdempotencyKey: rec.idempotencyKey,
-				...(env ? { env } : {}),
-			})
+			let sent: Awaited<ReturnType<typeof sendConfiguredLabWithdrawNative>>
+			try {
+				sent = await sendConfiguredLabWithdrawNative({
+					redeem: rec.redeem,
+					pool: rec.pool,
+					amount: BigInt(rec.amountWei),
+					eventKeys: rec.eventKeys,
+					gasLimit: resolvePayoutGasLimit(),
+					expectedIdempotencyKey: rec.idempotencyKey,
+					...(env ? { env } : {}),
+				})
+			} catch (e: unknown) {
+				// pool mode: the per-wallet gas-shortage alarm (no isolation, no hand-over; the batch stays in this wallet's slot and the next pass retries it)
+				if (pool) {
+					const a = pool.ws.gasAlert.onSendFailure(errMessage(e), Date.now())
+					if (a) logger(Colors.red(`[labMiningPoolClPayout] ALERT wallet ${pool.ws.w.id} (${pool.ws.w.address}) ${a.text}; check the wallet's CNET balance; the batch stays in its slot, no isolation, no hand-over`))
+				}
+				throw e
+			}
+			if (pool) pool.ws.gasAlert.onOk()
 			logger(
 				Colors.cyan(
 					`[labMiningPoolClPayout] withdrawNative sent via signer tx=${sent.hash} line=${rec.line} ` +
@@ -1601,12 +1614,7 @@ function isolatePoolWallet(ws: PoolWalletState, code: number, reason: string): v
 }
 
 /** The VDR balance the pool never touches (wei). Required, no default; `0` is a valid value; anything that is not a plain non-negative decimal integer (negative, fractional, hex, text) refuses the start. */
-const resolveMinVdrBalanceReserveWei = (): bigint => {
-	const raw = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI?.trim()
-	if (raw === undefined || raw === '') throw new Error('[labMiningPoolClPayout] pool mode needs CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI (no default)')
-	if (!/^\d+$/.test(raw)) throw new Error(`[labMiningPoolClPayout] CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI must be a non-negative integer in wei (digits only, 0 is valid); got "${raw.slice(0, 40)}"`)
-	return BigInt(raw)
-}
+const resolveMinVdrBalanceReserveWei = (): bigint => parseReserveWei(process.env[RESERVE_ENV])
 
 /**
  * Poison-batch quarantine (review F-B2): keys of a batch that came back with receipt status 0, or that were refused / failed twice, are not offered to the next wallet of the line (it would burn wallet
@@ -1614,6 +1622,7 @@ const resolveMinVdrBalanceReserveWei = (): bigint => {
  */
 const labQuarantine = new Set<string>()
 const labFailStreak = new Map<string, number>()
+const errMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 function quarantineKeys(wallet: string, keys: string[], why: string): void {
 	for (const k of keys) labQuarantine.add(k)
 	logger(Colors.red(`[labMiningPoolClPayout] ALERT quarantined ${keys.length} event key(s) after ${why} (wallet ${wallet}); no wallet will claim them until a restart; first key ${keys[0]}`))
@@ -1747,12 +1756,13 @@ async function poolWalletPassBody(ws: PoolWalletState): Promise<boolean> {
 			live = guardian.keep
 			if (live.length === 0) return false
 			// the money this wallet may spend: balance - reserve - what every other wallet holds in flight or has claimed
-			const balance = await provider.getBalance(redeemAddr)
-			const others = session.core.slotsAmountWei() + hub.claimedAmountExcept(w.id)
-			const reserve = resolveMinVdrBalanceReserveWei()
-			const available = balance > reserve + others ? balance - reserve - others : 0n
+			const balance = await readBalanceStrict(() => provider.getBalance(redeemAddr))
+			const slotsWei = session.core.slotsAmountWei()
+			const claimsWei = hub.claimedAmountExcept(w.id)
+			const others = slotsWei + claimsWei
+			const available = poolAvailableWei(balance, resolveMinVdrBalanceReserveWei(), slotsWei, claimsWei)
 			const liveTotal = live.reduce((a, e) => a + BigInt(e.amount), 0n)
-			if (liveTotal > available) {
+			if (!batchFits(liveTotal, available)) {
 				logger(Colors.red(`[labMiningPoolClPayout] wallet ${w.id}: refuse batch total=${ethers.formatEther(liveTotal)} > available=${ethers.formatEther(available)} (balance=${ethers.formatEther(balance)} others=${ethers.formatEther(others)})`))
 				return false
 			}
@@ -1954,7 +1964,7 @@ function planPools(core: LabPayoutStateCore): PoolPlan | undefined {
 	if (!legacy) return { cfg }
 	const addr = (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_ADDRESS ?? '').trim().toLowerCase()
 	const oldKeyArray = (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_KEY_ARRAY ?? '').trim()
-	// the record's idempotency key was derived from the old key array: only the wallet with the SAME address and key array can resume it (any other would refuse the resume before any send)
+	// conservative match: only the wallet of the SAME line with the SAME address and key array takes over the legacy record (the idempotency key itself depends only on redeem, pool, amount and event keys, so this is stricter than the signer needs, on purpose)
 	const cands = cfg.wallets.filter((w) => w.line === legacy.line && w.address.toLowerCase() === addr && w.keyArray === oldKeyArray)
 	if (cands.length !== 1) {
 		throw new Error(
@@ -1986,7 +1996,7 @@ async function setupPools(session: NonNullable<typeof labWalSession>, plan: Pool
 		}
 		logger(Colors.cyan(`[labMiningPoolClPayout] migrated the legacy in-flight record ${String(migrate.legacy.idempotencyKey)} into the slot of wallet ${migrate.wallet.id}`))
 	}
-	labPool = { cfg, wallets: cfg.wallets.map((w) => ({ w, running: false, wakeQueued: false, passes: 0, settledBatches: 0 })) }
+	labPool = { cfg, wallets: cfg.wallets.map((w) => ({ w, running: false, wakeQueued: false, passes: 0, settledBatches: 0, gasAlert: new GasAlertTracker() })) }
 	logger(Colors.cyan(`[labMiningPoolClPayout] pools: ${cfg.wallets.map((w) => `${w.id}(${w.line},${w.state})`).join(' ')} file sha256=${cfg.sha256}`))
 	// one machine-readable line for the health check read-back (+2/+10/+30 minutes): the EFFECTIVE value
 	logger(Colors.cyan(`[labMiningPoolClPayout] config minVdrBalanceReserveWei=${resolveMinVdrBalanceReserveWei()}`))

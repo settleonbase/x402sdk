@@ -5,6 +5,9 @@
  *      isolated, the keys the balance cannot cover stay pending, every key at most once to the wei
  *   B  balance read failing for a whole run: zero signer requests, no slot; after the read works again everything is paid once
  *   C  the realtime and the history wallet race for a balance that covers exactly one batch: exactly one batch is paid, the other wallet refuses, total <= balance, nothing isolated
+ *   C2 deterministic version of C: the first two balance reads are held until both wallets are inside the claim window; only the claims of the others can keep them from both sending
+ *   E  boundary: a balance exactly equal to one batch pays it
+ *   GAS1/GAS2 the per-wallet gas-shortage alarm (immediate on an 'insufficient funds' text, from the third failed pass otherwise; no isolation, no hand-over)
  *   D  with a low balance, kill -9 after a send, a lost ACK and a late receipt: no key twice, total <= balance
  *   input: negative, fractional, hex or text values refuse the start (exit 1, nothing converted); 0 starts and is read back in `config minVdrBalanceReserveWei=0`
  */
@@ -185,6 +188,136 @@ test('C: the realtime wallet and the history wallet race for a balance that cove
 	assert.ok(!res.logs.flat().some((l) => /wallet \S+ isolated/.test(l)))
 	for (const [, n] of Object.entries(res.paymentsPerEventKey)) assert.equal(n, 1)
 	assert.equal(res.exits[res.exits.length - 1]!.code, 0)
+})
+
+test('C2 (deterministic): both wallets have CLAIMED and are blocked inside the balance read when it is released together: the claims of the others alone must keep both from sending - at most one batch is paid, total <= balance', { timeout: 300_000 }, async () => {
+	// Review r3: C alone depends on natural scheduling. Here the balance read of the first two asks is held until both are pending, so both wallets are inside the claim window at the same instant
+	// (slots are still empty: only the other wallet's CLAIM can tell them apart). Without the claims term both would read the full balance and both would send.
+	let paid = 0n
+	let initial = 0n
+	let batches = 0
+	let barrierBothArrived = false
+	let sendsWhileHeld = -1
+	const s: Scenario = {
+		name: 'pm_c2',
+		env: { ...BASE_ENV },
+		body: async (ctx) => {
+			seedValidators(ctx)
+			headPlan(ctx, [300, 300, 300, 300, 300, 300, 300, 300])
+			ctx.chain.head = 300
+			const amount = 5_000_000_000_000_000n
+			const mk = (i: number, block: number): Record<string, unknown> => ({ eventKey: ethers.keccak256(ethers.toUtf8Bytes(`pm-c2-${i}`)), amount: amount.toString(), blockNumber: block, withdrawalIndex: i, pubkey: ctx.labPubkeys[0] })
+			ctx.seedState({
+				lastBackfillProcessedBlock: 300,
+				historyCursor: 300,
+				realtimeCursor: 300,
+				lastLiveHeadScanned: 300,
+				freezeH: { height: 300, hash: ctx.chain.blockHash(300), frozenAt: new Date().toISOString() },
+				pending: [...Array.from({ length: 12 }, (_, i) => mk(i, 200 + i)), ...Array.from({ length: 12 }, (_, i) => mk(100 + i, 310 + i))],
+				consumedEventKeys: {},
+				exitedPubkeys: {},
+			})
+			initial = 12n * amount + 1_000_000_000_000_000n
+			ctx.chain.balanceWei = initial
+			let arrived = 0
+			let released = false
+			ctx.chain.onRequest = async (m) => {
+				if (m !== 'eth_getBalance' || released) return
+				arrived++
+				if (arrived > 2) return
+				const t0 = Date.now()
+				while (arrived < 2 && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 5))
+				if (arrived >= 2 && !released) {
+					barrierBothArrived = true
+					sendsWhileHeld = [...ctx.poolSigners.values()].reduce((a, sg) => a + sg.requests.filter((q) => q.method === 'signer_sendTransaction').length, 0)
+					released = true
+				}
+			}
+			await ctx.run({ ticks: 8, timeoutMs: 200_000 })
+			paid = minedTotal(ctx)
+			batches = ctx.chain.sent.size
+		},
+	}
+	const res = await runScenario(s, undefined, { walMode: true, decoupled: true, pools: { realtime: 1, history: 1, sendDelayMs: 15 } })
+	assert.ok(barrierBothArrived, 'both wallets were inside the balance read at the same time (the test is valid)')
+	assert.equal(sendsWhileHeld, 0, 'nothing was sent before the reads were released')
+	assert.equal(batches, 1, `exactly one batch is paid, ${batches} were sent (without the other wallets' claims both read the full balance)`)
+	assert.ok(paid <= initial, `paid ${paid} > balance ${initial}`)
+	assert.ok(res.logs.flat().some((l) => l.includes('refuse batch') && /others=0\.0[0-9]/.test(l)), 'a wallet refused because the OTHER wallet\'s claim was subtracted (others > 0 in the line)')
+	for (const [, n] of Object.entries(res.paymentsPerEventKey)) assert.equal(n, 1)
+	assert.ok(!res.logs.flat().some((l) => /wallet \S+ isolated/.test(l)))
+})
+
+test('E (boundary): a balance EXACTLY equal to one batch pays it (one wei less would not); the other wallet refuses', { timeout: 300_000 }, async () => {
+	let paid = 0n
+	let initial = 0n
+	let batches = 0
+	const s: Scenario = {
+		name: 'pm_e',
+		env: { ...BASE_ENV },
+		body: async (ctx) => {
+			seedValidators(ctx)
+			headPlan(ctx, [300, 300, 300, 300, 300, 300, 300, 300])
+			ctx.chain.head = 300
+			const amount = 5_000_000_000_000_000n
+			const mk = (i: number, block: number): Record<string, unknown> => ({ eventKey: ethers.keccak256(ethers.toUtf8Bytes(`pm-e-${i}`)), amount: amount.toString(), blockNumber: block, withdrawalIndex: i, pubkey: ctx.labPubkeys[0] })
+			ctx.seedState({
+				lastBackfillProcessedBlock: 300,
+				historyCursor: 300,
+				realtimeCursor: 300,
+				lastLiveHeadScanned: 300,
+				freezeH: { height: 300, hash: ctx.chain.blockHash(300), frozenAt: new Date().toISOString() },
+				pending: [...Array.from({ length: 12 }, (_, i) => mk(i, 200 + i)), ...Array.from({ length: 12 }, (_, i) => mk(100 + i, 310 + i))],
+				consumedEventKeys: {},
+				exitedPubkeys: {},
+			})
+			initial = 12n * amount // exactly one batch of 12, nothing to spare
+			ctx.chain.balanceWei = initial
+			await ctx.run({ ticks: 8, timeoutMs: 200_000 })
+			paid = minedTotal(ctx)
+			batches = ctx.chain.sent.size
+		},
+	}
+	const res = await runScenario(s, undefined, { walMode: true, decoupled: true, pools: { realtime: 1, history: 1, sendDelayMs: 15 } })
+	assert.equal(batches, 1, `exactly one batch is paid (${batches})`)
+	assert.equal(paid, initial, 'the balance was paid out to the wei')
+	assert.ok(res.logs.flat().some((l) => l.includes('refuse batch')), 'the other wallet refused')
+	for (const [, n] of Object.entries(res.paymentsPerEventKey)) assert.equal(n, 1)
+})
+
+test('GAS1: a wallet whose signer answers "insufficient funds" alerts at once, holds its batch in its slot, is not isolated, does not hand the batch over; the healthy wallet keeps paying', { timeout: 300_000 }, async () => {
+	let alerts: string[] = []
+	let slotsAtEnd = -1
+	let rt2Sends = -1
+	const r = await run('pm_gas1', 2, 1, async (ctx) => {
+		ctx.poolSigners.get('rt2')!.mode = 'nogas'
+		await ctx.run({ ticks: 14, timeoutMs: 120_000 })
+		slotsAtEnd = recoverPayoutState(ctx.stateDir, { readOnly: true }).core.slotCount
+		rt2Sends = ctx.poolSigners.get('rt2')!.requests.filter((q) => q.method === 'signer_sendTransaction').length
+	})
+	alerts = r.res.logs.flat().filter((l) => l.includes('ALERT wallet rt2') && l.includes('balance shortage'))
+	assert.ok(alerts.length >= 1, 'an ALERT naming wallet rt2 and the balance shortage')
+	assert.ok(alerts.length <= 2, `at most one alert per minute per wallet (${alerts.length} in a run of seconds)`)
+	assert.ok(rt2Sends >= 1, 'rt2 did try to send')
+	assert.ok(!r.res.logs.flat().some((l) => /wallet rt2 isolated/.test(l)), 'not isolated')
+	assert.ok(r.res.logs.flat().every((l) => !(l.includes('ALERT wallet rt1') && l.includes('send failed'))), 'the healthy wallet raised no gas alert')
+	assert.ok(slotsAtEnd >= 1, 'rt2 still holds its batch')
+	assert.ok(Object.keys(r.res.paymentsPerEventKey).length > 0, 'the healthy wallet paid')
+	atMostOnce(r.res, r.world, 'GAS1')
+})
+
+test('GAS2: a non-gas send failure alerts only from the THIRD failed pass in a row', { timeout: 300_000 }, async () => {
+	const r = await run('pm_gas2', 2, 1, async (ctx) => {
+		ctx.poolSigners.get('rt2')!.mode = 'flaky'
+		await ctx.run({ ticks: 14, timeoutMs: 120_000 })
+	})
+	const lines = r.res.logs.flat()
+	const firstAlert = lines.findIndex((l) => l.includes('ALERT wallet rt2') && l.includes('send failed'))
+	assert.ok(firstAlert >= 0, 'rt2 alerted after repeated failures')
+	const unresolvedBefore = lines.slice(0, firstAlert).filter((l) => l.includes('withdrawNative send unresolved') && l.includes('in-flight batch kept')).length
+	assert.ok(unresolvedBefore >= 2, `the alert came after at least two failed passes (${unresolvedBefore})`)
+	assert.ok(!lines.some((l) => l.includes('balance shortage')), 'a non-gas error is not called a balance shortage')
+	assert.ok(!lines.some((l) => /wallet rt2 isolated/.test(l)))
 })
 
 test('D1: low balance and kill -9 right after a send: the restart resumes, no key twice, total <= balance', { timeout: 300_000 }, async () => {

@@ -282,7 +282,7 @@ export class FakeSigner {
 	requests: SignerRequest[] = []
 	byKey = new Map<string, { fingerprint: string; hash: string }>()
 	/** 'ok', 'reject' (never broadcast, signer refuses), 'lose-ack' (records the tx, then drops the connection without answering), 'down'. */
-	mode: 'ok' | 'reject' | 'lose-ack' | 'down' = 'ok'
+	mode: 'ok' | 'reject' | 'lose-ack' | 'down' | 'nogas' | 'flaky' = 'ok'
 	/** How many times a connection was REALLY dropped without an answer in 'lose-ack' mode (a hook that sets the mode too late or resets it too early shows up as 0). */
 	acksLost = 0
 	/** Counted on the signer side: a send repeated with an idempotency key it already recorded (answered with the original hash), and signer_getTransaction lookups. */
@@ -350,6 +350,8 @@ export class FakeSigner {
 					return reply({ hash: prior.hash, duplicate: true })
 				}
 				if (this.mode === 'reject') return fail('POLICY_DENIED: rejected by the fake signer')
+				if (this.mode === 'nogas') return fail('insufficient funds for gas * price + value: address has no CNET')
+				if (this.mode === 'flaky') return fail('upstream hiccup: please retry')
 				this.beforeRecord?.(tx)
 				const hash = hash32(`tx:${++this.counter}:${key}`)
 				this.byKey.set(key, { fingerprint, hash })
