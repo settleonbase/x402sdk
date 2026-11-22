@@ -84,6 +84,86 @@ export function logicalDigest(core: LabPayoutStateCore): string {
 	})
 }
 
+/**
+ * Streaming sha256 of the SAME byte sequence `canonicalJson` would produce (F1 of the clone drill: logicalDigest materialised every pending entry, sorted copies and built one giant string, twice;
+ * on a production-size ledger that needed a 4 GB heap). The strings go into the hash in chunks of about 1 MiB, nothing is kept.
+ */
+class HashSink {
+	private readonly h = createHash('sha256')
+	private buf: string[] = []
+	private n = 0
+	write(s: string): void {
+		this.buf.push(s)
+		this.n += s.length
+		if (this.n >= 1 << 20) this.flush()
+	}
+	private flush(): void {
+		if (this.buf.length === 0) return
+		this.h.update(this.buf.join(''), 'utf8')
+		this.buf = []
+		this.n = 0
+	}
+	digest(): string {
+		this.flush()
+		return this.h.digest('hex')
+	}
+}
+
+/** Writes `[` + canonicalJson(item) joined by `,` + `]` to every sink - exactly canonicalJson(array). */
+function writeArray(sinks: HashSink[], items: Iterable<unknown>): void {
+	for (const k of sinks) k.write('[')
+	let first = true
+	for (const it of items) {
+		const j = canonicalJson(it)
+		for (const k of sinks) k.write(first ? j : ',' + j)
+		first = false
+	}
+	for (const k of sinks) k.write(']')
+}
+
+export type DigestParts = { full: string; pendingKeys: string; pendingEntries: string; consumedOrder: string; exited: string; inFlight: string }
+
+/**
+ * The logical state in one pass. `full` is sha256 of exactly the string logicalDigest() returns (keys in canonical order: consumed, exited, inFlight, pending, scalars; pending sorted by event key;
+ * consumed in insertion order; exited sorted); the other parts are the hashes of the canonical JSON of each list, used to compare a plain version 2 read with the recovered state without
+ * holding both in memory.
+ */
+export function digestParts(src: { scalars: Record<string, unknown>; inFlight: unknown; pending: Iterable<{ eventKey: string }>; consumed: Iterable<string>; exited: Iterable<string> }): DigestParts {
+	const full = new HashSink()
+	const consumedOnly = new HashSink()
+	const exitedOnly = new HashSink()
+	const inFlightOnly = new HashSink()
+	const pendingKeysOnly = new HashSink()
+	const pendingEntriesOnly = new HashSink()
+	const scalars = { ...src.scalars }
+	delete scalars.walSeq
+	full.write('{"consumed":')
+	writeArray([full, consumedOnly], src.consumed)
+	full.write(',"exited":')
+	writeArray([full, exitedOnly], [...src.exited].sort())
+	full.write(',"inFlight":')
+	const inF = canonicalJson(src.inFlight ?? null)
+	full.write(inF)
+	inFlightOnly.write(inF)
+	full.write(',"pending":')
+	const sorted = [...src.pending].sort((a, b) => (a.eventKey < b.eventKey ? -1 : 1))
+	writeArray([full, pendingEntriesOnly], sorted)
+	writeArray([pendingKeysOnly], sorted.map((e) => e.eventKey))
+	full.write(',"scalars":')
+	full.write(canonicalJson(scalars))
+	full.write('}')
+	return { full: full.digest(), pendingKeys: pendingKeysOnly.digest(), pendingEntries: pendingEntriesOnly.digest(), consumedOrder: consumedOnly.digest(), exited: exitedOnly.digest(), inFlight: inFlightOnly.digest() }
+}
+
+export function digestPartsOfCore(core: LabPayoutStateCore): DigestParts {
+	return digestParts({ scalars: core.scalarsCopy(), inFlight: core.getInFlight(), pending: core.pendingEntries(), consumed: core.consumedKeys(), exited: core.exited.keys() })
+}
+
+/** sha256 of exactly the string logicalDigest(core) returns, without building it. */
+export function logicalDigestSha256(core: LabPayoutStateCore): string {
+	return digestPartsOfCore(core).full
+}
+
 export async function rollbackToV2(opts: RollbackOptions): Promise<RollbackResult> {
 	if (!opts.runId || !RUN_ID_RE.test(opts.runId)) throw new Error('labWalRollback: a run id is required (letters, digits, . _ -, 8 to 64 characters)')
 	if (!opts.approval || opts.approval.trim().length < 3) throw new Error('labWalRollback: the approval reference (the written release) is required')
@@ -117,7 +197,7 @@ async function rollbackLocked(opts: RollbackOptions): Promise<RollbackResult> {
 	const segs = listSegments(walDir)
 	if (manifest.version === 2 && segs.length === 0) return { status: 'nothing-to-do', reason: 'the state is already a plain version 2 state with no log; an older build can start from it' }
 
-	let rec
+	let rec: ReturnType<typeof recoverPayoutState> | undefined
 	try {
 		rec = recoverPayoutState(opts.stateDir, { readOnly: true })
 	} catch (e) {
@@ -126,9 +206,10 @@ async function rollbackLocked(opts: RollbackOptions): Promise<RollbackResult> {
 	}
 	if (rec.scan.truncatedBytes > 0) throw new Error(`labWalRollback: the log ends in a torn tail (${rec.scan.truncatedBytes} bytes); repair first. Nothing was changed`)
 	if (rec.warnings.length > 0) throw new Error(`labWalRollback: recovery reported warnings (${rec.warnings.join('; ')}); resolve them first. Nothing was changed`)
-	const core = rec.core
+	let core: LabPayoutStateCore | undefined = rec.core
 	if (core.slotCount > 0) throw new Error(`labWalRollback: ${core.slotCount} wallet slot(s) (${[...core.slotEntries()].map(([w]) => w).join(',')}) hold in-flight batches; a version 2 state cannot carry them and an old build would ignore them. Resolve each with the offline in-flight resolver (--wallet <id>) first. Nothing was changed`)
-	const before = logicalDigest(core)
+	const before = digestPartsOfCore(core)
+	const beforeCounts = { pending: core.pendingSize, consumed: core.consumedSize, exited: core.exitedSize }
 	const inFlight = core.getInFlight() as Record<string, unknown> | null
 	const audit: RollbackAudit = {
 		runId: opts.runId,
@@ -179,30 +260,32 @@ async function rollbackLocked(opts: RollbackOptions): Promise<RollbackResult> {
 
 	const wal = new WalWriter({ stateDir: opts.stateDir, lastSeq: rec.writerLastSeq, onFatal: (e) => { throw e } })
 	const stop = await gracefulStopToV2(core, wal, opts.stateDir, { beforeRemoveSegments: opts.hooks?.beforeRemoveSegments })
+	// the recovered state is no longer needed: only its digests are compared from here on, so the heap holds one state at a time (the verification below recovers and reads the converted directory)
+	core = undefined
+	rec = undefined
 
 	opts.hooks?.beforeVerify?.()
 	// verification against the state before
 	const checks: Record<string, boolean | string | number> = {}
-	const after = recoverPayoutState(opts.stateDir, { readOnly: true })
+	{
+		const after = recoverPayoutState(opts.stateDir, { readOnly: true })
+		checks.logicalStateIdentical = digestPartsOfCore(after.core).full === before.full
+	}
 	checks.manifestVersion = readManifest(opts.stateDir).version
 	checks.logSegmentsLeft = listSegments(walDir).length
-	checks.logicalStateIdentical = logicalDigest(after.core) === before
 	// K2: what an older build reads with the PLAIN version 2 reader must equal the recovered state in full, not just in count: the pending key set, the consumed keys IN ORDER, the exited keys,
-	// the in-flight record as a whole, and every pending entry
+	// the in-flight record as a whole, and every pending entry (compared by hashes of the canonical lists, so the recovered state and the plain read are never in memory together)
 	let plainReaderOk = false
 	try {
 		const plain = (opts.hooks?.plainReader ?? readSegmentedState)(opts.stateDir) as { pending?: ({ eventKey: string } & Record<string, unknown>)[]; consumedEventKeys?: Record<string, true>; exitedPubkeys?: Record<string, true>; inFlightWithdraw?: unknown }
-		const pendingNow = [...core.pendingEntries()].map((e) => e.eventKey).sort()
-		const plainPending = (plain.pending ?? []).map((e) => e.eventKey).sort()
-		const plainConsumed = Object.keys(plain.consumedEventKeys ?? {})
-		const plainExited = Object.keys(plain.exitedPubkeys ?? {}).sort()
-		checks.plainPendingKeysEqual = canonicalJson(plainPending) === canonicalJson(pendingNow)
-		checks.plainConsumedOrderEqual = canonicalJson(plainConsumed) === canonicalJson([...core.consumedKeys()])
-		checks.plainExitedEqual = canonicalJson(plainExited) === canonicalJson([...core.exited.keys()].sort())
-		checks.plainInFlightEqual = canonicalJson(plain.inFlightWithdraw ?? null) === canonicalJson(core.getInFlight())
-		const entriesNow = new Map([...core.pendingEntries()].map((e) => [e.eventKey, canonicalJson({ ...e })]))
-		checks.plainPendingEntriesEqual = (plain.pending ?? []).every((e) => entriesNow.get(e.eventKey) === canonicalJson({ ...e }))
-		checks.plainReaderConsumed = plainConsumed.length
+		const consumedKeys = Object.keys(plain.consumedEventKeys ?? {})
+		const p = digestParts({ scalars: {}, inFlight: plain.inFlightWithdraw ?? null, pending: plain.pending ?? [], consumed: consumedKeys, exited: Object.keys(plain.exitedPubkeys ?? {}) })
+		checks.plainPendingKeysEqual = p.pendingKeys === before.pendingKeys
+		checks.plainConsumedOrderEqual = p.consumedOrder === before.consumedOrder
+		checks.plainExitedEqual = p.exited === before.exited
+		checks.plainInFlightEqual = p.inFlight === before.inFlight
+		checks.plainPendingEntriesEqual = p.pendingEntries === before.pendingEntries
+		checks.plainReaderConsumed = consumedKeys.length
 		plainReaderOk = checks.plainPendingKeysEqual === true && checks.plainConsumedOrderEqual === true && checks.plainExitedEqual === true && checks.plainInFlightEqual === true && checks.plainPendingEntriesEqual === true
 	} catch (e) {
 		checks.plainReaderError = e instanceof Error ? e.message : String(e)
@@ -215,9 +298,9 @@ async function rollbackLocked(opts: RollbackOptions): Promise<RollbackResult> {
 		guard = `refused: ${e instanceof Error ? e.message : String(e)}`
 	}
 	checks.p1GuardStatus = guard
-	const ok = checks.manifestVersion === 2 && checks.logSegmentsLeft === 0 && checks.logicalStateIdentical === true && plainReaderOk && (guard === 'absent' || guard === 'empty') && checks.plainReaderConsumed === core.consumedSize
+	const ok = checks.manifestVersion === 2 && checks.logSegmentsLeft === 0 && checks.logicalStateIdentical === true && plainReaderOk && (guard === 'absent' || guard === 'empty') && checks.plainReaderConsumed === beforeCounts.consumed
 	if (!ok) throw new Error(`labWalRollback: the converted directory did not verify (${JSON.stringify(checks)}); the audit is at ${auditFile}. Do not start any build before checking it`)
-	const done = { runId: opts.runId, walSeq: stop.walSeq, removedSegments: stop.removedSegments, checks, logicalStateSha256: createHash('sha256').update(before).digest('hex') }
+	const done = { runId: opts.runId, walSeq: stop.walSeq, removedSegments: stop.removedSegments, checks, logicalStateSha256: before.full }
 	const doneFile = writeExclusive(`wal-rollback-${opts.runId}.done.json`, JSON.stringify(done, null, 2) + '\n')
 	return { status: 'converted', audit, auditFile, doneFile, walSeq: stop.walSeq, removedSegments: stop.removedSegments, checks }
 }
