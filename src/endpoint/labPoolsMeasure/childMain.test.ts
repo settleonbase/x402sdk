@@ -34,7 +34,7 @@ console.log = (...a: unknown[]): void => {
 	origLog(...a)
 }
 ;(global as unknown as { setTimeout: unknown }).setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...a: unknown[]) => {
-	if (typeof ms === 'number' && ms === Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MS) && String(new Error().stack).includes('scheduleNextLabTick')) {
+	if (typeof ms === 'number' && ms === Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_TICK_MS) && /scheduleNextLabTick|LabTickLoop/.test(String(new Error().stack))) {
 		const used = waitMsRaw === 'real' ? ms : Number(waitMsRaw)
 		ev(`wait-set requested=${ms} used=${used}`)
 		return realSetTimeout(() => {

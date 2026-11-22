@@ -63,6 +63,8 @@ export class FakeChain {
 	maxConcurrentRpc = 0
 	/** P4: addresses the fake VDR answers admins(address)=true for. undefined = everyone (tests that do not care); a Set = only those (lower-case). */
 	adminAddrs?: Set<string>
+	/** Number of admins(address) reads answered (counted on the chain side: one per wallet pass). */
+	adminReads = 0
 	/** Withdrawals for a block that has none in the explicit map (deterministic synthetic load, P4 measurements). */
 	withdrawalGen?: (n: number) => Withdrawal[]
 	private autoHeadTimer?: ReturnType<typeof setInterval>
@@ -153,6 +155,7 @@ export class FakeChain {
 				const parsed = VDR_IFACE.parseTransaction({ data })
 				if (!parsed) throw new Error(`eth_call: unknown selector ${sel}`)
 				if (parsed.name === 'getNodeByValidatorPubkeyHash') return VDR_IFACE.encodeFunctionResult('getNodeByValidatorPubkeyHash', [this.guardianOf.get(String(parsed.args[0]).toLowerCase()) ?? 0n])
+				if (parsed.name === 'admins') this.adminReads++
 				if (parsed.name === 'admins') return VDR_IFACE.encodeFunctionResult('admins', [this.adminAddrs ? this.adminAddrs.has(String(parsed.args[0]).toLowerCase()) : true])
 				if (parsed.name === 'guardianIdBeneficiary') return VDR_IFACE.encodeFunctionResult('guardianIdBeneficiary', [this.beneficiaryOf.get(String(parsed.args[0])) ?? ethers.ZeroAddress])
 				return VDR_IFACE.encodeFunctionResult('consumedRewardEventKey', [this.consumedOnChain.has(String(parsed.args[0]).toLowerCase())])

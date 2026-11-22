@@ -97,6 +97,8 @@ export type CurveResult = {
 	duplicatePaid: number
 	cpuMs: number | null
 	exit: number | null
+	/** Scan ticks seen (progress lines), scan waits (TICK_MS timers armed) and wallet passes (admins reads on the chain side). */
+	counts: { scanTicks: number; scanWaits: number; walletPasses: number }
 	/** Machine 1-minute load average sampled every 5 s during the run (min / mean / max): other work on the machine stretches the timings. */
 	load: { samples: number; min: number; mean: number; max: number }
 }
@@ -283,6 +285,7 @@ export async function runCurve(o: Opts): Promise<CurveResult> {
 			duplicatePaid: dup,
 			cpuMs: cpu ? Number(cpu.attrs.cpuUserMs) + Number(cpu.attrs.cpuSysMs) : null,
 			exit,
+			counts: { scanTicks: prog.length, scanWaits: evs.filter((e) => e.kind === 'wait-set').length, walletPasses: chain.adminReads },
 			load: { samples: loadSamples.length, min: Math.min(...loadSamples), mean: loadSamples.reduce((a, b) => a + b, 0) / loadSamples.length, max: Math.max(...loadSamples) },
 		}
 		if (o.outDir) {
