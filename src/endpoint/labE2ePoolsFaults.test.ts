@@ -128,12 +128,16 @@ test('late receipt in-process: the receipt shows after several empty asks (count
 		'pf_late',
 		POOL(),
 		async (ctx) => {
-			let asks = 0
-			ctx.chain.receiptRule = () => (++asks <= 6 ? 'none' : 'mined')
+			let slow: string | undefined
+			// the FIRST transaction's receipt stays empty for its first 12 asks (its wallet's 15 s wait ends empty: halt 4, slot kept), then it shows; every other transaction is mined at once
+			ctx.chain.receiptRule = (tx, ask) => {
+				slow ??= tx.idempotencyKey
+				return tx.idempotencyKey === slow && ask <= 12 ? 'none' : 'mined'
+			}
 			await ctx.run({ ticks: 10, timeoutMs: 180_000 })
 			assert.ok(ctx.chain.emptyReceipts >= 1, `a receipt was really withheld (${ctx.chain.emptyReceipts})`)
 		},
-		{ CONET_LAB_MINING_POOL_CL_PAYOUT_TX_WAIT_MS: '2500' }
+		{ CONET_LAB_MINING_POOL_CL_PAYOUT_TX_WAIT_MS: '15000' }
 	)
 	reconcile(r.res, r.world, r.end, 'late receipt')
 	assert.ok(r.res.logs.some((l) => l.some((x) => x.includes('the slot stays and the next pass resumes it'))), 'the wallet-level halt(4) path ran')
@@ -159,9 +163,15 @@ test('a status-0 receipt isolates ONE wallet (ALERT), its batch is quarantined, 
 	assert.ok(logs.some((l) => l.includes('wallet rt1 isolated')), 'wallet rt1 isolated')
 	assert.ok(logs.some((l) => l.includes('ALERT quarantined')), 'the poison batch was quarantined')
 	assert.ok(!logs.some((l) => l.includes('wallet rt2 isolated')), 'only the wallet that saw the revert is isolated')
-	reconcile(r.res, r.world, { ...r.end }, 'status 0', { except: new Set(revertedKeys) })
-	// the reverted tx was NOT counted as paid (its keys stay pending, quarantined)
-	assert.ok(r.end.pending >= revertedKeys.length)
+	// the reverted transaction carries its keys once (no retry by another wallet: quarantined); every other payable key was paid by exactly one MINED transaction
+	const rev = new Set(revertedKeys)
+	assert.deepEqual(Object.keys(r.res.paymentsPerEventKey).sort(), [...r.world.expected.keys()].sort(), 'every payable key appears in exactly one transaction (the reverted batch included)')
+	for (const [k, n] of Object.entries(r.res.paymentsPerEventKey)) assert.equal(n, 1, `key ${k} in ${n} transactions`)
+	const mined = r.res.chainSent.filter((t) => t.mined)
+	assert.equal(r.res.chainSent.length - mined.length, 0, 'every transaction got a receipt')
+	assert.equal(r.end.slots, 0, 'no slot held')
+	assert.equal(r.end.pending, rev.size, 'exactly the quarantined batch is still pending')
+	assert.equal(r.res.exits[r.res.exits.length - 1]!.code, 0)
 })
 
 test('SIGTERM while a wallet is paying: the stop waits for the pass, the exit is clean or keeps the log (never loses a send), a restart finishes: every key once', { timeout: 300_000 }, async () => {
@@ -231,7 +241,7 @@ async function legacyInFlightRun(label: string, afterFirst: (ctx: Ctx, world: Wo
 			void manifestVersionAfterRefusal
 		},
 	}
-	const res = await runScenario(s, undefined, { walMode: true, decoupled: true, pools: { realtime: 2, history: 1, sendDelayMs: 20, legacyMatch: true, ...poolOpts } })
+	const res = await runScenario(s, undefined, { walMode: true, decoupled: true, pools: { realtime: 2, history: 1, sendDelayMs: 20, legacyMatch: true, legacyWallet: 'hi1', ...poolOpts } })
 	return { res, world, end, manifestVersionAfterRefusal }
 }
 
@@ -240,7 +250,7 @@ test('migration, one matching wallet: the legacy in-flight record moves into the
 		await ctx.run({ ticks: 10, timeoutMs: 180_000 }) // pool mode
 	}, {})
 	assert.equal(r.res.exits[0]!.signal, 'SIGKILL')
-	assert.ok(r.res.logs[1]!.some((l) => l.includes('migrated the legacy in-flight record')), 'migrated')
+	assert.ok(r.res.logs[1]!.some((l) => l.includes('migrated the legacy in-flight record')), `migrated; run 2 lines: ${JSON.stringify(r.res.logs[1]!.slice(0, 14))} stray: ${JSON.stringify(r.res.strayOutput.slice(0, 6))} exits ${JSON.stringify(r.res.exits)}`)
 	reconcile(r.res, r.world, r.end, 'migration match')
 })
 
@@ -253,9 +263,73 @@ test('migration, no matching wallet: the start is refused (exit 1) BEFORE the ve
 		assert.ok(refused.lines.some((l) => l.includes('matches 0 wallet(s)') && l.includes('refusing to start')), 'the refusal names the record')
 		versionAfter = (JSON.parse(fs.readFileSync(path.join(ctx.stateDir, 'manifest.json'), 'utf8')) as { version: number }).version
 		inFlightAfter = Boolean((readSegmentedState(ctx.stateDir) as { inFlightWithdraw?: unknown }).inFlightWithdraw)
-		await ctx.run({ ticks: 10, timeoutMs: 180_000, env: PLAIN_ENV }) // the plain daemon still starts from it
+		await ctx.run({ ticks: 60, timeoutMs: 280_000, env: PLAIN_ENV }) // the plain daemon still starts from it (two small batches per tick: many ticks)
 	}, { keyArrayOfRt1: 'some_other_key_array' })
 	assert.equal(versionAfter, 2, 'a refused pool start leaves the version 2 manifest alone')
 	assert.equal(inFlightAfter, true, 'and the in-flight record')
 	reconcile(r.res, r.world, r.end, 'migration refused, then the plain daemon')
+})
+
+// ---------------------------------------------------------------- adding and removing wallets across restarts
+test('pool changes across restarts: a wallet that holds a slot cannot be removed (refused, nothing converted or lost), a draining wallet finishes its slot and claims nothing new, a wallet added later takes work; every key once', { timeout: 400_000 }, async () => {
+	let slotAfterKill = ''
+	let rt2SendsBefore = 0
+	const r = await run('pf_pool_changes', POOL(3, 1), async (ctx) => {
+		const poolsFile = path.join(ctx.dir, 'pools.json')
+		const full = JSON.parse(fs.readFileSync(poolsFile, 'utf8')) as { realtime: { id: string; state: string }[]; history: unknown[] }
+		const without = (ids: string[]) => ({ ...full, realtime: full.realtime.filter((w) => !ids.includes(w.id)) })
+		const write = (v: unknown): void => fs.writeFileSync(poolsFile, JSON.stringify(v))
+		// run 1: wallets rt1 and rt2 only; killed when rt2's send is recorded (its slot is committed, the ACK never arrives)
+		write(without(['rt3']))
+		const rt2 = ctx.poolSigners.get('rt2')!
+		let fired = 0
+		rt2.afterRecord = () => {
+			if (fired++ === 0) ctx.currentChild?.kill('SIGKILL')
+		}
+		await ctx.run({ ticks: 10, timeoutMs: 120_000 })
+		rt2.afterRecord = undefined
+		const slots = [...recoverPayoutState(ctx.stateDir, { readOnly: true }).core.slotEntries()].map(([w]) => w)
+		slotAfterKill = slots.join(',')
+		assert.ok(slots.includes('rt2'), `rt2 holds a slot after the kill (${slots.join(',')})`)
+		rt2SendsBefore = rt2.sends.length
+		// run 2: rt2 removed from the file while it holds a slot -> refused, state untouched
+		write(without(['rt2', 'rt3']))
+		const refused = await ctx.run({ ticks: 4, timeoutMs: 60_000 })
+		assert.equal(refused.code, 1)
+		assert.ok(refused.lines.some((l) => l.includes('holds an in-flight slot of wallet rt2') && l.includes('refusing to start')), 'the refusal names the wallet')
+		assert.deepEqual([...recoverPayoutState(ctx.stateDir, { readOnly: true }).core.slotEntries()].map(([w]) => w).sort(), slots.sort(), 'the slots are untouched by the refused start')
+		// run 3: rt2 draining (finishes its slot, claims nothing new), rt3 added
+		const drain = JSON.parse(JSON.stringify(full)) as typeof full
+		drain.realtime.find((w) => w.id === 'rt2')!.state = 'draining'
+		write(drain)
+		await ctx.run({ ticks: 10, timeoutMs: 180_000 })
+		const rt3 = ctx.poolSigners.get('rt3')!
+		assert.ok(rt3.sends.length >= 1, `the added wallet rt3 paid (${rt3.sends.length})`)
+		// a draining wallet may re-send its recorded batch (idempotent, same key) but claims no new one: at most ONE new send request keys from rt2 after the restart
+		const newSends = rt2.sends.length - rt2SendsBefore
+		assert.ok(newSends <= 1, `draining wallet rt2 made ${newSends} sends after the restart (only the resumed batch is allowed)`)
+		process.stderr.write(`pf pool changes: slots after kill ${slotAfterKill}; rt2 sends after restart ${newSends}; rt3 sends ${rt3.sends.length}\n`)
+	})
+	reconcile(r.res, r.world, r.end, 'pool changes')
+})
+
+test('migration, crash between its two commits (the slot of the wallet was committed, the legacy record not yet cleared): the next start repairs it - the record exists once (in the slot), the batch is resumed, every key once', { timeout: 300_000 }, async () => {
+	const r = await legacyInFlightRun('pf_mig_between', async (ctx) => {
+		// the state the first commit of the migration leaves behind, built exactly as the daemon would: convert the v2 directory, commit the slot, leave the legacy scalar in place, stop
+		const legacy = (readSegmentedState(ctx.stateDir) as { inFlightWithdraw?: Record<string, unknown> }).inFlightWithdraw
+		assert.ok(legacy && legacy.line === 'history', 'the plain daemon left a history in-flight record')
+		const session = await openWalSession({ stateDir: ctx.stateDir, legacyStateFile: ctx.stateFile, scanFloor: 100, log: () => undefined })
+		const h = session.hub.actor('pay:hi1')
+		h.setSlot('hi1', legacy!)
+		await h.commit('intent')
+		await session.scheduler.stop()
+		await session.wal.close()
+		const core = recoverPayoutState(ctx.stateDir, { readOnly: true }).core
+		assert.ok(core.getSlot('hi1') && core.getInFlight(), 'both the slot and the legacy record exist now (the crash window)')
+		await ctx.run({ ticks: 10, timeoutMs: 180_000 }) // pool mode
+		const after = recoverPayoutState(ctx.stateDir, { readOnly: true }).core
+		assert.equal(after.getInFlight(), null, 'the legacy record is gone')
+	}, {})
+	assert.ok(r.res.logs[1]!.some((l) => l.includes('migrated the legacy in-flight record')), 'the repair ran')
+	reconcile(r.res, r.world, r.end, 'migration between commits')
 })

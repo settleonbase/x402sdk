@@ -198,7 +198,7 @@ function childEnv(ctx: Pick<Ctx, 'root' | 'dir' | 'stateFile' | 'stateDir' | 'ch
 	}
 }
 
-export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_ROOT ?? DEFAULT_ROOT, opts: { walMode?: boolean; decoupled?: boolean; pools?: { realtime: number; history: number; sendDelayMs?: number; legacyMatch?: boolean; keyArrayOfRt1?: string } } = {}): Promise<ScenarioResult> {
+export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_ROOT ?? DEFAULT_ROOT, opts: { walMode?: boolean; decoupled?: boolean; pools?: { realtime: number; history: number; sendDelayMs?: number; legacyMatch?: boolean; /** the wallet that is the old single wallet (default rt1) */ legacyWallet?: 'rt1' | 'hi1'; keyArrayOfRt1?: string } } = {}): Promise<ScenarioResult> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `labe2e-${s.name.replace(/[^a-z0-9]+/gi, '_').slice(0, 24)}-`))
 	const chain = new FakeChain()
 	const beacon = new FakeBeacon()
@@ -218,8 +218,9 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 			const lists = { realtime: mk('realtime', opts.pools.realtime, 0x1000), history: mk('history', opts.pools.history, 0x2000) }
 			if (opts.pools.legacyMatch) {
 				// wallet rt1 is the old single wallet: same address and key array as the plain daemon used (its in-flight record can move into rt1's slot)
-				lists.realtime[0]!.address = SIGNER_ADDRESS
-				lists.realtime[0]!.keyArray = opts.pools.keyArrayOfRt1 ?? KEY_ARRAY
+				const target = opts.pools.legacyWallet === 'hi1' ? lists.history[0]! : lists.realtime[0]!
+				target.address = SIGNER_ADDRESS
+				target.keyArray = opts.pools.keyArrayOfRt1 ?? KEY_ARRAY
 			}
 			for (const w of [...lists.realtime, ...lists.history]) {
 				const sg = new FakeSigner(chain)
@@ -228,7 +229,7 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 				await sg.start(dir, `sg-${w.id}`)
 				w.socket = sg.socketPath
 				poolSigners.set(w.id!, sg)
-				if (opts.pools.legacyMatch && w.id === 'rt1') sg.byKey = signer.byKey // the old wallet's signer journal is the same one (idempotency across the switch)
+				if (opts.pools.legacyMatch && w.id === (opts.pools.legacyWallet ?? 'rt1')) sg.byKey = signer.byKey // the old wallet's signer journal is the same one (idempotency across the switch)
 			}
 			poolsFile = path.join(dir, 'pools.json')
 			fs.writeFileSync(poolsFile, JSON.stringify(lists))
