@@ -1,0 +1,6 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["./*.ts", "../labTickLoop.test.ts"],
+  "exclude": []
+}
