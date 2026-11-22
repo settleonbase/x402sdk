@@ -118,6 +118,15 @@ export async function openWalSession(opts: {
 	const rec = recoverOrRefuse(opts.stateDir, { log: opts.log, onDrift: (what) => opts.log(`[labMiningPoolClPayout] ALERT history-block count drift: ${what}`) })
 	for (const w of rec.warnings) opts.log(`[labMiningPoolClPayout] ALERT WAL recovery warning: ${w}`)
 	if (rec.warnings.length > 0) throw new Error('[labMiningPoolClPayout] WAL recovery reported warnings; refusing to start (operator check required)')
+	// F-B1-1: a state that is still a version 2 snapshot (the first WAL start after a plain daemon, or after a graceful stop) becomes a version 3 snapshot BEFORE the first event is written. Until the
+	// manifest says version 3 an old build reads the directory without complaint and ignores the log, so no event may exist while the manifest is still version 2. The step is atomic (new generation, then
+	// the manifest commit); a crash before it leaves the plain version 2 state and no log.
+	if (rec.manifestVersion === 2) {
+		const src = rec.core.freezeForSnapshot()
+		const up = await writeSnapshotCooperative(src, { dir: opts.stateDir, mode: 'wal' })
+		rec.core.finishSnapshot(src, { committed: true, prunedKeys: [], frozenHistCounts: up.frozenHistCounts })
+		opts.log('[labMiningPoolClPayout] WAL mode: the version 2 snapshot was converted to a version 3 snapshot before the first event (an old build now refuses this directory)')
+	}
 	const wal = new WalWriter({ stateDir: opts.stateDir, lastSeq: rec.writerLastSeq, segmentBytes: opts.segmentBytes, maxFrameBytes: opts.maxFrameBytes })
 	const handle = new WalStateHandle<SkimEntry, LabClPayoutState>({ core: rec.core, wal, log: opts.log })
 	opts.log(`[labMiningPoolClPayout] WAL mode: snapshotSeq=${rec.snapshotSeq} replayed=${rec.replayed} pending=${rec.core.pendingSize} consumed=${rec.core.consumedSize} nextSeq=${rec.writerLastSeq + 1} snapshotEveryMs=${opts.snapshot?.intervalMs ?? 'default(600000)'} walMaxBytes=${opts.snapshot?.walMaxBytes ?? 'default(268435456)'} consumedCap=${opts.snapshot?.consumedCap ?? 'none'}`)
