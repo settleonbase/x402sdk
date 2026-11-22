@@ -58,6 +58,9 @@ export class FakeChain {
 	/** Counted on the chain side (not by a test hook): receipt asks answered with "no receipt yet". */
 	emptyReceipts = 0
 	rpcLog: string[] = []
+	/** Highest number of JSON-RPC requests being handled at the same moment (counted here, on the chain side). */
+	maxConcurrentRpc = 0
+	private rpcInProgress = 0
 	unknownMethods: string[] = []
 	/** Called on every request (fault injection: delay, kill, 5xx). Return a status to short-circuit. */
 	onRequest?: (method: string, params: unknown[]) => Promise<void | { status: number }>
@@ -170,6 +173,9 @@ export class FakeChain {
 	}
 	async start(): Promise<void> {
 		this.server = http.createServer(async (req, res) => {
+			this.rpcInProgress++
+			this.maxConcurrentRpc = Math.max(this.maxConcurrentRpc, this.rpcInProgress)
+			res.on('close', () => void this.rpcInProgress--)
 			if ((req.url ?? '').startsWith('/e2e/tick')) {
 				this.tickIndex++
 				if (this.tickHeads.length > 0) this.head = this.tickHeads[Math.min(this.tickIndex, this.tickHeads.length - 1)]!

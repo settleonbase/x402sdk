@@ -93,6 +93,7 @@ import {
 import { partitionByGuardianBeneficiary } from './labFlushGuardian'
 import { mapWithConcurrency, resolveReadConcurrency, settle } from './labParallel'
 import { loadPoolConfig, type PoolConfig, type PoolWallet } from './labPoolConfig'
+import { BudgetedJsonRpcProvider, RpcBudget, rpcSource } from './labRpcBudget'
 import { selectFlushCandidates } from './labFlushSelect'
 import { segmentedDirForLegacy } from './labClPayoutStateStore'
 import {
@@ -144,12 +145,28 @@ function resolveTxWaitTimeoutMs(): number {
 	return Number.isFinite(n) && n >= 15_000 ? Math.min(600_000, Math.floor(n)) : 120_000
 }
 
+/**
+ * Global RPC budget (P3): off by default (the coupled and the single-wallet decoupled paths read as before); the pool mode turns it on (total 16, 2 guaranteed per source: scan, pay-rt, pay-hist),
+ * CONET_LAB_MINING_POOL_CL_PAYOUT_RPC_BUDGET_TOTAL / _MIN set it explicitly (a total of 0 switches it off). Every read goes through createLabRpcProvider's provider, so every read takes a slot.
+ */
+let labRpcBudget: RpcBudget | undefined
+function resolveRpcBudget(): RpcBudget | undefined {
+	if (labRpcBudget) return labRpcBudget
+	const raw = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_RPC_BUDGET_TOTAL?.trim()
+	const pools = Boolean(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_FILE?.trim())
+	const total = raw !== undefined && raw !== '' ? Number(raw) : pools ? 16 : 0
+	if (!Number.isInteger(total) || total < 1) return undefined
+	const minRaw = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_RPC_BUDGET_MIN)
+	labRpcBudget = new RpcBudget(total, Number.isInteger(minRaw) && minRaw >= 0 ? minRaw : 2)
+	return labRpcBudget
+}
+
 function createLabRpcProvider(): ethers.JsonRpcProvider {
 	const url = resolveLabRpcUrl()
 	const req = new ethers.FetchRequest(url)
 	req.timeout = resolveRpcHttpTimeoutMs()
-	// Avoid HTTP batching quirks on local geth; one method per request.
-	return new ethers.JsonRpcProvider(req, undefined, { staticNetwork: true, batchMaxCount: 1 })
+	// Avoid HTTP batching quirks on local geth; one method per request. The ONLY provider the daemon creates: every request takes a slot from the global budget (labRpcBudget.ts).
+	return new BudgetedJsonRpcProvider(req, undefined, { staticNetwork: true, batchMaxCount: 1 }, resolveRpcBudget())
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -1370,6 +1387,10 @@ function logScanSummary(line: LabScanLine, counters: LabScanCounters): void {
 }
 
 async function labPayoutTick(): Promise<void> {
+	return rpcSource.run('scan', () => labPayoutTickBody())
+}
+
+async function labPayoutTickBody(): Promise<void> {
 	if (labInFlight) return
 	if (labGate.tripped) {
 		logger(Colors.red(`[labMiningPoolClPayout] ALERT tick skipped: fail-closed (${labGate.tripReason})`))
@@ -1506,6 +1527,10 @@ function scheduleNextLabTick(): void {
  * (more work may be waiting: the worker continues at once), false otherwise (idle, gas wait, held entries, a fault: it waits PAY_IDLE_MS or a wake-up).
  */
 async function labPayTick(): Promise<boolean> {
+	return rpcSource.run('pay', () => labPayTickBody())
+}
+
+async function labPayTickBody(): Promise<boolean> {
 	if (labPayInFlight) return false
 	if (labGate.tripped) {
 		logger(Colors.red(`[labMiningPoolClPayout] ALERT pay tick skipped: fail-closed (${labGate.tripReason})`))
@@ -1597,6 +1622,10 @@ function selectForWallet(h: PoolActor, ws: PoolWalletState, hubIsReserved: (k: s
  * lifecycle on the wallet's own lane with the wallet's own signer. Returns true when a batch settled.
  */
 async function poolWalletPass(ws: PoolWalletState): Promise<boolean> {
+	return rpcSource.run(ws.w.line === 'realtime' ? 'pay-rt' : 'pay-hist', () => poolWalletPassBody(ws))
+}
+
+async function poolWalletPassBody(ws: PoolWalletState): Promise<boolean> {
 	const w = ws.w
 	if (ws.isolated) return false
 	if (labGate.tripped) {
@@ -1948,6 +1977,7 @@ export function stopValidatorLabMiningPoolClPayoutReporter(): void {
 
 /** Persist listening checkpoint before process exit (next restart backfills from lastListeningEndBlock+1). */
 export async function flushLabMiningPoolListeningCheckpoint(opts: { tickIdle?: boolean } = {}): Promise<number> {
+	if (labRpcBudget) logger(Colors.cyan(`[labMiningPoolClPayout] rpc budget total=${labRpcBudget.total} min=${labRpcBudget.minPerSource} ${JSON.stringify(labRpcBudget.stats())}`))
 	if (labWalSession) {
 		const s = labWalSession
 		const tickIdle = opts.tickIdle ?? (!labInFlight && !labPayInFlight && !(labPool?.wallets.some((w) => w.running) ?? false))

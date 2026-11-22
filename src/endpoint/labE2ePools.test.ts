@@ -44,6 +44,7 @@ async function poolRun(rt: number, hist: number, seed: number) {
 	let slotCount = -1
 	let pendingLeft = -1
 	let perWallet: Record<string, { txs: number; maxConcurrentSends: number }> = {}
+	let maxConcurrentRpc = 0
 	const s: Scenario = {
 		name: `pools_${rt}x${hist}_${seed}`,
 		env: {
@@ -54,6 +55,7 @@ async function poolRun(rt: number, hist: number, seed: number) {
 		body: async (ctx) => {
 			seedValidators(ctx)
 			world = buildWorld(ctx, seed)
+			ctx.chain.onRequest = async () => void (await new Promise((r) => setTimeout(r, 4))) // some latency, so that concurrent requests really overlap on the chain side
 			headPlan(ctx, [400, 460, 520, 580, 640, 700, 700, 700, 700, 700, 700, 700])
 			await ctx.run({ ticks: 10, timeoutMs: 240_000 })
 			const rec = recoverPayoutState(ctx.stateDir, { readOnly: true })
@@ -62,10 +64,11 @@ async function poolRun(rt: number, hist: number, seed: number) {
 			const byWallet: Record<string, { txs: number; maxConcurrentSends: number }> = {}
 			for (const [id, sg] of ctx.poolSigners) byWallet[id] = { txs: sg.requests.filter((r) => r.method === 'signer_sendTransaction').length, maxConcurrentSends: sg.maxConcurrentSends }
 			perWallet = byWallet
+			maxConcurrentRpc = ctx.chain.maxConcurrentRpc
 		},
 	}
 	const result = await runScenario(s, undefined, { walMode: true, decoupled: true, pools: { realtime: rt, history: hist, sendDelayMs: 30 } })
-	return { result, world, slotCount, pendingLeft, perWallet }
+	return { result, world, slotCount, pendingLeft, perWallet, maxConcurrentRpc }
 }
 
 for (const [rt, hist] of [[1, 1], [2, 2]] as const) {
@@ -83,6 +86,9 @@ for (const [rt, hist] of [[1, 1], [2, 2]] as const) {
 			assert.ok(w.txs >= 1, `wallet ${id} paid at least one batch (${w.txs})`)
 			assert.equal(w.maxConcurrentSends, 1, `wallet ${id}: never two sends in progress`)
 		}
-		process.stderr.write(`pools ${rt}x${hist}: ${r.world.expected.size} keys, ${r.result.chainSent.length} txs, per wallet ${JSON.stringify(r.perWallet)}\n`)
+		assert.ok(r.maxConcurrentRpc >= 2, `the requests really overlapped on the chain side (${r.maxConcurrentRpc})`)
+		assert.ok(r.maxConcurrentRpc <= 16, `chain-side concurrent RPC ${r.maxConcurrentRpc} must not exceed the budget total 16`)
+		assert.ok(r.result.logs.some((l) => l.some((x) => x.includes('rpc budget total=16 min=2'))), 'the budget was on and reported its stats')
+		process.stderr.write(`pools ${rt}x${hist}: ${r.world.expected.size} keys, ${r.result.chainSent.length} txs, per wallet ${JSON.stringify(r.perWallet)}, chain-side max concurrent RPC ${r.maxConcurrentRpc}\n`)
 	})
 }
