@@ -463,7 +463,8 @@ test('R5 F1: the bound address is read before the intent is persisted, on every 
 	const intentAt = lifecycle.indexOf('deps.setInFlight(rec)')
 	assert.ok(confirmAt > 0, 'the lifecycle calls the confirmation')
 	assert.ok(intentAt > confirmAt, 'the confirmation comes before the intent is written')
-	assert.match(reporter, /confirmBeforeSend: async \(\) => \{\n\t\t\tawait verifyLabSignerBoundAddress\(process\.env\)/)
+	// pool mode (P4): the confirmation reads the WALLET's own signer environment (walletEnv), the single-wallet paths still read process.env; either way it is read on every composition
+	assert.match(reporter, /confirmBeforeSend: async \(\) => \{\n\t\t\tawait verifyLabSignerBoundAddress\(env \?\? process\.env\)/)
 	assert.equal(reporter.includes('labSignerBoundConfirmed'), false, 'no per-process cache of the confirmation')
 })
 
