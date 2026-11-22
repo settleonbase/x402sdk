@@ -132,6 +132,14 @@ export class WalStateHandle<E extends PendingLike, S extends object> extends Han
 		this.d.core.deleteScalar(n)
 	}
 
+	incScalar<K extends keyof S>(name: K, delta: number): void {
+		const cur = this.d.core.getScalar(name as string)
+		this.setScalar(name, ((typeof cur === 'number' ? cur : 0) + delta) as unknown as S[K])
+	}
+	setScalarIfUnset<K extends keyof S>(name: K, value: S[K]): void {
+		if (this.d.core.getScalar(name as string) === undefined) this.setScalar(name, value)
+	}
+
 	/**
 	 * S3: leaving a scope with uncommitted writes keeps them (they are already applied to the core, so dropping them would put memory ahead of the log); the next commit of any label carries them
 	 * into its event, and says so in the log.

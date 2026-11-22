@@ -83,6 +83,13 @@ export interface LabStateHandle<E extends PendingLike, S extends object> {
 	exitedAdd(pubkey: string): void
 	setScalar<K extends keyof S>(name: K, value: S[K]): void
 	delScalar(name: keyof S): void
+	/**
+	 * Concurrent-actor-safe writes (P3): the NEW value is computed from the committed value in the synchronous block of the commit, not from what this actor read earlier, so two actors that
+	 * both read 5 and add 1 end at 7, not 6. A single-actor handle applies them at once (read, add, set): same result.
+	 */
+	incScalar<K extends keyof S>(name: K, delta: number): void
+	/** Sets the scalar only when it has no value at commit time (e.g. gasWaitStartedAt: the first actor to see the wait starts the clock). */
+	setScalarIfUnset<K extends keyof S>(name: K, value: S[K]): void
 	// ---- durability
 	commit(label: StateCommitLabel): Promise<void>
 	/**
@@ -159,6 +166,13 @@ export class LegacyStateHandle<E extends PendingLike, S extends object> extends 
 	}
 	delScalar(name: keyof S): void {
 		delete (this.d.state as unknown as S)[name]
+	}
+	incScalar<K extends keyof S>(name: K, delta: number): void {
+		const cur = (this.d.state as unknown as Record<string, unknown>)[name as string]
+		;(this.d.state as unknown as Record<string, unknown>)[name as string] = (typeof cur === 'number' ? cur : 0) + delta
+	}
+	setScalarIfUnset<K extends keyof S>(name: K, value: S[K]): void {
+		if ((this.d.state as unknown as Record<string, unknown>)[name as string] === undefined) (this.d.state as unknown as S)[name] = value
 	}
 	haltFlush(): void {
 		this.d.persist()
