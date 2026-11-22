@@ -92,6 +92,7 @@ import {
 } from './labInvariantC'
 import { partitionByGuardianBeneficiary } from './labFlushGuardian'
 import { mapWithConcurrency, resolveReadConcurrency, settle } from './labParallel'
+import { loadPoolConfig, type PoolConfig, type PoolWallet } from './labPoolConfig'
 import { selectFlushCandidates } from './labFlushSelect'
 import { segmentedDirForLegacy } from './labClPayoutStateStore'
 import {
@@ -106,6 +107,7 @@ import { assertNoWalEvents } from './labWalGuard'
 import { gracefulStopWalSession, openWalSession, type SnapshotConfig, type WalSession } from './labWalSession'
 import { appendConsumedArchive, consumedArchiveDir } from './labConsumedPrune'
 import { LabPayoutFailClosedGate } from './labClPayoutFailClosed'
+import type { ActorView } from './labActorHandle'
 import type { LabStateHandle } from './labStateHandle'
 import { createLegacyStateStore, type LabClPayoutState, type SkimEntry, type LabPendingEntryJson } from './labLegacyState'
 import {
@@ -234,6 +236,10 @@ let labPayInFlight = false
 let labPayTimer: ReturnType<typeof setTimeout> | undefined
 let labPayRunning = false
 let labPayWakeQueued = false
+/** P4 wallet pools (decoupled mode only): one payment loop per wallet. */
+type PoolActor = ActorView<SkimEntry, LabClPayoutState>
+type PoolWalletState = { w: PoolWallet; running: boolean; wakeQueued: boolean; timer?: ReturnType<typeof setTimeout>; isolated?: string; passes: number; settledBatches: number }
+let labPool: { cfg: PoolConfig; wallets: PoolWalletState[] } | undefined
 let labPubkeySet = new Set<string>()
 let labMiningPool = ''
 let labManifestMtime = 0
@@ -816,13 +822,16 @@ export async function collectLabSkimEntriesForBlock(
 function makeLabLifecycleDeps(
 	h: LabHandle,
 	provider: ethers.JsonRpcProvider,
-	gasPriceWei: bigint
+	gasPriceWei: bigint,
+	pool?: { ws: PoolWalletState; handle: PoolActor }
 ): LabLifecycleDeps {
+	const env = pool ? walletEnv(pool.ws.w) : undefined
 	return {
 		gate: labGate,
-		getInFlight: () => h.scalar('inFlightWithdraw') ?? null,
+		getInFlight: () => (pool ? (pool.handle.slot(pool.ws.w.id) as never) : h.scalar('inFlightWithdraw')) ?? null,
 		setInFlight: (v) => {
-			if (v) h.setScalar('inFlightWithdraw', v)
+			if (pool) pool.handle.setSlot(pool.ws.w.id, (v as Record<string, unknown> | null) ?? null)
+			else if (v) h.setScalar('inFlightWithdraw', v)
 			else h.delScalar('inFlightWithdraw')
 		},
 		persist: (step) => h.commit(step),
@@ -830,7 +839,7 @@ function makeLabLifecycleDeps(
 			h.incScalar('settledBatchCount', 1)
 		},
 		stopBeforeSend: () => shouldStopAfterSettled(h.scalar('settledBatchCount') ?? 0, resolveMaxSettledBatches()),
-		halt: (code, reason) => haltDaemon(h, code, reason),
+		halt: (code, reason) => (pool ? isolatePoolWallet(pool.ws, code, reason) : haltDaemon(h, code, reason)),
 		send: async (rec) => {
 			// One send. No recovery and no retry here: the lifecycle holds an unknown outcome (B-2).
 			const sent = await sendConfiguredLabWithdrawNative({
@@ -840,6 +849,7 @@ function makeLabLifecycleDeps(
 				eventKeys: rec.eventKeys,
 				gasLimit: resolvePayoutGasLimit(),
 				expectedIdempotencyKey: rec.idempotencyKey,
+				...(env ? { env } : {}),
 			})
 			logger(
 				Colors.cyan(
@@ -851,7 +861,7 @@ function makeLabLifecycleDeps(
 		},
 		// Round-5 F1: read on every new composition, before the intent is persisted. Not cached per process.
 		confirmBeforeSend: async () => {
-			await verifyLabSignerBoundAddress(process.env)
+			await verifyLabSignerBoundAddress(env ?? process.env)
 		},
 		waitReceipt: async (hash) => {
 			try {
@@ -1526,8 +1536,215 @@ async function labPayTick(): Promise<boolean> {
 	}
 }
 
+function walletEnv(w: PoolWallet): NodeJS.ProcessEnv {
+	return {
+		...process.env,
+		CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_SOCKET: w.socket,
+		CONET_LAB_MINING_POOL_CL_PAYOUT_KEY_ARRAY: w.keyArray,
+		CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_ADDRESS: w.address,
+	}
+}
+const poolLane = (w: PoolWallet): string => `${LAB_MINING_POOL_ONCHAIN_LANE}:${w.id}`
+
+/** Wallet-level halt: receipt unknown (4) only logs - the slot stays, the next pass resumes the same hash; status 0 (3) isolates THIS wallet (its slot is released by the lifecycle, an operator looks), the others go on. */
+function isolatePoolWallet(ws: PoolWalletState, code: number, reason: string): void {
+	if (code === 4) {
+		logger(Colors.yellow(`[labMiningPoolClPayout] wallet ${ws.w.id}: ${reason}; the slot stays and the next pass resumes it`))
+		return
+	}
+	ws.isolated = `exit ${code}: ${reason}`
+	logger(Colors.red(`[labMiningPoolClPayout] ALERT wallet ${ws.w.id} isolated (${ws.isolated}); the other wallets keep paying`))
+}
+
+const resolveMinVdrBalanceReserveWei = (): bigint => {
+	const raw = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI?.trim()
+	if (raw === undefined || raw === '') throw new Error('[labMiningPoolClPayout] pool mode needs CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI (no default)')
+	return BigInt(raw)
+}
+
+/** The oldest `batchEntries` payable pending entries of the wallet's line that no wallet holds. Synchronous: the caller claims them in the same block. */
+function selectForWallet(h: PoolActor, ws: PoolWalletState, hubIsReserved: (k: string) => boolean): SkimEntry[] {
+	const freezeH = h.scalar('freezeH')?.height
+	if (freezeH == null) return []
+	const cap = resolveFlushBatchEntries()
+	const invC = resolveHistoryPayBehindCursor()
+	const holdBefore = resolveReviewHoldBeforeBlock()
+	const holdHistory = ws.w.line === 'history' && historyReviewHeld(h)
+	if (holdHistory) return []
+	const out: SkimEntry[] = []
+	const byPos = (a: SkimEntry, b: SkimEntry): number => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex
+	for (const e of h.pendingValues()) {
+		if (classifyPendingLine(e.blockNumber, freezeH) !== ws.w.line) continue
+		if (hubIsReserved(e.eventKey.toLowerCase())) continue
+		if (holdBefore != null && e.blockNumber <= holdBefore) continue
+		if (ws.w.line === 'history' && invC && (labCommittedHistoryCursor == null || e.blockNumber > labCommittedHistoryCursor)) continue
+		if (out.length >= cap && byPos(e, out[out.length - 1]!) >= 0) continue
+		let lo = 0
+		let hi = out.length
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1
+			if (byPos(out[mid]!, e) <= 0) lo = mid + 1
+			else hi = mid
+		}
+		out.splice(lo, 0, e)
+		if (out.length > cap) out.pop()
+	}
+	return out
+}
+
+/**
+ * One pass of ONE wallet (design P4): resume the wallet's committed slot, else claim a batch of its line, check it (paid-key view, guardian), check the money the wallet may spend, and run the
+ * lifecycle on the wallet's own lane with the wallet's own signer. Returns true when a batch settled.
+ */
+async function poolWalletPass(ws: PoolWalletState): Promise<boolean> {
+	const w = ws.w
+	if (ws.isolated) return false
+	if (labGate.tripped) {
+		logger(Colors.red(`[labMiningPoolClPayout] ALERT pay pass skipped (${w.id}): fail-closed (${labGate.tripReason})`))
+		return false
+	}
+	const session = labWalSession
+	if (!session || !labPool) return false
+	const hub = session.hub
+	if (!loadManifestIfNeeded()) return false
+	const redeemAddr = resolveLabRedeemAddress()
+	const provider = createLabRpcProvider()
+	const readContract = new ethers.Contract(redeemAddr, READ_ABI, provider)
+	const h = hub.actor(`pay:${w.id}`)
+	h.enterTick()
+	ws.passes++
+	const lifeDeps = (gasPrice: bigint): LabLifecycleDeps => makeLabLifecycleDeps(h, provider, gasPrice, { ws, handle: h })
+	try {
+		const gasPrice = await readGasPriceWei(provider)
+		// a committed slot (a restart, or an unknown outcome): resume it first; nothing new is composed while it is unresolved
+		if (h.slot(w.id)) {
+			const flight = await enqueueOnchainTxWork(poolLane(w), `lab withdrawNative in-flight ${w.id}`, () => resumeLabWithdrawInFlight(lifeDeps(gasPrice)), '[labMiningPoolClPayout]')
+			if (flight === 'settled') {
+				ws.settledBatches++
+				await noteSettledBatch(h)
+				return true
+			}
+			if (flight === 'pending') return false
+		}
+		if (w.state === 'draining') return false
+		// gas gate (the clock is shared: the first wallet to see the wait starts it)
+		const maxGas = resolveMaxGasPriceWei()
+		const gasDustWei = 50_000_000n
+		if (gasPrice > maxGas + gasDustWei) {
+			const now = Date.now()
+			if (!h.scalar('gasWaitStartedAt')) {
+				h.setScalarIfUnset('gasWaitStartedAt', new Date(now).toISOString())
+				await h.commit('scalars')
+			}
+			const startedMs = Date.parse(h.scalar('gasWaitStartedAt') as string)
+			const elapsedMs = Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : resolveGasWaitForceMs()
+			if (elapsedMs < resolveGasWaitForceMs()) return false
+		} else if (clearGasWait(h)) await h.commit('scalars')
+		// claim: select and reserve in ONE synchronous block
+		const picked = selectForWallet(h, ws, (k) => hub.isReserved(k))
+		if (picked.length === 0) return false
+		const total = picked.reduce((a, e) => a + BigInt(e.amount), 0n)
+		const maxK = resolveMaxSettledBatches()
+		if (maxK != null && ((h.scalar('settledBatchCount') ?? 0) + session.core.slotCount + hub.claimCount) >= maxK) return false
+		if (!hub.claim(w.id, picked.map((e) => e.eventKey.toLowerCase()), total)) return false
+		try {
+			// the paid-key view and the guardian re-check of every claimed entry (reads, in parallel)
+			const reads = await mapWithConcurrency(picked, resolveReadConcurrency(), (e) => settle((async () => Boolean(await readContract.consumedRewardEventKey!(e.eventKey)))()))
+			let live: SkimEntry[] = []
+			let dropped = 0
+			for (let i = 0; i < picked.length; i++) {
+				const e = picked[i]!
+				const r = reads[i]!
+				if (!r.ok) continue
+				if (r.value) {
+					h.consumedAdd(e.eventKey)
+					h.pendingDel(e.eventKey)
+					dropped++
+					continue
+				}
+				live.push(e)
+			}
+			if (dropped > 0) await h.commit('drop')
+			const guardian = await partitionByGuardianBeneficiary(live, defaultLabScanDeps(readContract).guardianBeneficiary)
+			live = guardian.keep
+			if (live.length === 0) return false
+			// the money this wallet may spend: balance - reserve - what every other wallet holds in flight or has claimed
+			const balance = await provider.getBalance(redeemAddr)
+			const others = session.core.slotsAmountWei() + hub.claimedAmountExcept(w.id)
+			const reserve = resolveMinVdrBalanceReserveWei()
+			const available = balance > reserve + others ? balance - reserve - others : 0n
+			const liveTotal = live.reduce((a, e) => a + BigInt(e.amount), 0n)
+			if (liveTotal > available) {
+				logger(Colors.red(`[labMiningPoolClPayout] wallet ${w.id}: refuse batch total=${ethers.formatEther(liveTotal)} > available=${ethers.formatEther(available)} (balance=${ethers.formatEther(balance)} others=${ethers.formatEther(others)})`))
+				return false
+			}
+			labGate.assertOpen('withdrawNative')
+			if (labDryRun()) return false
+			h.openScope('batch')
+			try {
+				const outcome = await enqueueOnchainTxWork(
+					poolLane(w),
+					`lab withdrawNative ${w.id} n=${live.length} line=${w.line}`,
+					() => submitWithdrawBatchDurably(lifeDeps(gasPrice), { redeem: redeemAddr, pool: labMiningPool, amount: liveTotal, eventKeys: live.map((e) => e.eventKey.toLowerCase()), line: w.line }),
+					'[labMiningPoolClPayout]'
+				)
+				if (outcome === 'settled') {
+					ws.settledBatches++
+					await noteSettledBatch(h)
+				}
+				return outcome === 'settled'
+			} catch (e: unknown) {
+				logger(Colors.red(`[labMiningPoolClPayout] wallet ${w.id}: withdrawNative failed: ${(e as Error)?.message ?? e}`))
+				return false
+			} finally {
+				h.closeScope()
+			}
+		} finally {
+			hub.releaseClaim(w.id) // a committed slot is the reservation from here on; after an abort nothing is
+		}
+	} catch (e: unknown) {
+		logger(Colors.red(`[labMiningPoolClPayout] wallet ${w.id} pass error: ${(e as Error)?.message ?? e}`))
+		return false
+	} finally {
+		h.exitTick()
+		session.scheduler.poke()
+	}
+}
+
+/** One wallet's loop: a pass, at once again after a pass that settled something or when a wake-up came meanwhile, otherwise after the idle wait. */
+function wakePoolWallet(ws: PoolWalletState): void {
+	if (!labStarted || ws.isolated) return
+	if (ws.running) {
+		ws.wakeQueued = true
+		return
+	}
+	if (ws.timer !== undefined) {
+		clearTimeout(ws.timer)
+		ws.timer = undefined
+	}
+	ws.running = true
+	void (async () => {
+		try {
+			let again = true
+			while (again && labStarted && !ws.isolated) {
+				ws.wakeQueued = false
+				const progressed = await poolWalletPass(ws)
+				again = progressed || ws.wakeQueued
+				if (again) await new Promise((r) => setImmediate(r))
+			}
+		} finally {
+			ws.running = false
+			if (labStarted && !ws.isolated) ws.timer = setTimeout(() => wakePoolWallet(ws), labGate.tripped ? Math.max(60_000, resolvePayIdleMs()) : resolvePayIdleMs())
+		}
+	})()
+}
+
 /** Runs the payment worker once now (a scan commit or the idle timer asked for it); at most one pass at a time; continues at once after a pass that settled something. */
 function wakePayWorker(): void {
+	if (labPool) {
+		for (const ws of labPool.wallets) wakePoolWallet(ws)
+		return
+	}
 	if (!labStarted || !labDecoupled()) return
 	if (labPayRunning) {
 		labPayWakeQueued = true // the running pass will look again when it ends
@@ -1562,6 +1779,7 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 		logger(Colors.yellow('[labMiningPoolClPayout] disabled (set CONET_LAB_MINING_POOL_CL_PAYOUT=1)'))
 		return
 	}
+	if (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_FILE?.trim() && !labDecoupled()) throw new Error('[labMiningPoolClPayout] CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_FILE needs CONET_LAB_MINING_POOL_CL_PAYOUT_DECOUPLED=1')
 	if (labDecoupled() && !labWalMode()) throw new Error('[labMiningPoolClPayout] CONET_LAB_MINING_POOL_CL_PAYOUT_DECOUPLED=1 needs WAL mode (CONET_LAB_MINING_POOL_CL_PAYOUT_WAL=1): the decoupled actors share the log')
 	if (!loadManifestIfNeeded(true)) return
 	// Refuses to start when another live process holds the state dir (throws, daemon exits).
@@ -1621,6 +1839,53 @@ function resolveWalMaxFrameBytes(): number | undefined {
 	return Number.isFinite(n) && n >= 256 ? Math.floor(n) : undefined
 }
 
+/**
+ * P4 start-up: load the pool file (if any), match the wallet slots in the recovered state against it and migrate a legacy single in-flight record into the slot of the wallet it belongs to
+ * (the wallet of its line whose address is the old single SIGNER_ADDRESS). A slot of a wallet that is not in the file, a legacy record without exactly one matching wallet, or slots present
+ * while no pool file is given REFUSE the start (fail-closed; nothing is guessed). The refusal names the record and points at the offline in-flight resolver.
+ */
+async function setupPools(session: NonNullable<typeof labWalSession>): Promise<void> {
+	const file = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_FILE?.trim()
+	const core = session.core
+	if (!file) {
+		if (core.slotCount > 0) throw new Error(`wallet slots hold in-flight batches (${[...core.slotEntries()].map(([w]) => w).join(',')}) but no pool file is configured; resolve them with the offline in-flight resolver or configure the pools`)
+		return
+	}
+	const minRaw = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_MIN_ACTIVE)
+	const cfg = loadPoolConfig(file, { minActive: Number.isInteger(minRaw) && minRaw >= 1 ? minRaw : 2 })
+	resolveMinVdrBalanceReserveWei() // required in pool mode, no default
+	const ids = new Set(cfg.wallets.map((w) => w.id))
+	for (const [w] of core.slotEntries()) if (!ids.has(w)) throw new Error(`the state holds an in-flight slot of wallet ${w}, which is not in the pool file (sha256 ${cfg.sha256}); refusing to start`)
+	const legacy = core.getInFlight() as Record<string, unknown> | null
+	if (legacy) {
+		const addr = (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_ADDRESS ?? '').trim().toLowerCase()
+		const cands = cfg.wallets.filter((w) => w.line === legacy.line && w.address.toLowerCase() === addr)
+		if (cands.length !== 1) {
+			throw new Error(
+				`a legacy single in-flight record (idempotencyKey ${String(legacy.idempotencyKey)}, line ${String(legacy.line)}, ${((legacy.eventKeys as unknown[]) ?? []).length} event keys) matches ${cands.length} wallet(s) of the pool file by line and the old SIGNER_ADDRESS (${addr || 'unset'}); refusing to start. Resolve it with the offline in-flight resolver first`
+			)
+		}
+		if (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_DRY_RUN === '1') {
+			logger(Colors.cyan(`[labMiningPoolClPayout] pools dry-run: the legacy in-flight record ${String(legacy.idempotencyKey)} would move into the slot of wallet ${cands[0]!.id}; nothing was changed`))
+			process.exit(0)
+		}
+		const h = session.hub.actor(`pay:${cands[0]!.id}`)
+		h.setSlot(cands[0]!.id, legacy)
+		await h.commit('intent')
+		const old = session.handle
+		old.enterTick()
+		try {
+			old.delScalar('inFlightWithdraw')
+			await old.commit('scalars')
+		} finally {
+			old.exitTick()
+		}
+		logger(Colors.cyan(`[labMiningPoolClPayout] migrated the legacy in-flight record ${String(legacy.idempotencyKey)} into the slot of wallet ${cands[0]!.id}`))
+	}
+	labPool = { cfg, wallets: cfg.wallets.map((w) => ({ w, running: false, wakeQueued: false, passes: 0, settledBatches: 0 })) }
+	logger(Colors.cyan(`[labMiningPoolClPayout] pools: ${cfg.wallets.map((w) => `${w.id}(${w.line},${w.state})`).join(' ')} file sha256=${cfg.sha256}`))
+}
+
 /** WAL-mode start: recover (or bootstrap) the state, then the same start check and first tick as the legacy path. A failure refuses to start (exit 1). */
 async function startWalMode(): Promise<void> {
 	try {
@@ -1634,6 +1899,7 @@ async function startWalMode(): Promise<void> {
 			openPauseMs: resolveWalOpenPauseMs(),
 		})
 		sessionBackfillFloor = labWalSession.sessionBackfillFloor
+		await setupPools(labWalSession)
 		if (labStopRequested) {
 			logger(Colors.yellow('[labMiningPoolClPayout] stop requested while the WAL session was opening; no tick is started (the shutdown converts the opened session)'))
 			return
@@ -1674,13 +1940,17 @@ export function stopValidatorLabMiningPoolClPayoutReporter(): void {
 		clearTimeout(labPayTimer)
 		labPayTimer = undefined
 	}
+	for (const ws of labPool?.wallets ?? []) {
+		if (ws.timer !== undefined) clearTimeout(ws.timer)
+		ws.timer = undefined
+	}
 }
 
 /** Persist listening checkpoint before process exit (next restart backfills from lastListeningEndBlock+1). */
 export async function flushLabMiningPoolListeningCheckpoint(opts: { tickIdle?: boolean } = {}): Promise<number> {
 	if (labWalSession) {
 		const s = labWalSession
-		const tickIdle = opts.tickIdle ?? (!labInFlight && !labPayInFlight)
+		const tickIdle = opts.tickIdle ?? (!labInFlight && !labPayInFlight && !(labPool?.wallets.some((w) => w.running) ?? false))
 		try {
 			if (tickIdle) {
 				s.handle.requireIdle() // a tick that is still running means no write in parallel with it
@@ -1712,7 +1982,7 @@ export async function flushLabMiningPoolListeningCheckpoint(opts: { tickIdle?: b
 /** Bounded idle wait so SIGTERM cannot hang forever behind a stuck tx.wait. */
 export async function waitForLabMiningPoolClPayoutIdle(maxWaitMs = 90_000, opts: { exceptPay?: boolean } = {}): Promise<boolean> {
 	const started = Date.now()
-	while (labInFlight || (!opts.exceptPay && (labPayInFlight || labPayRunning))) {
+	while (labInFlight || (!opts.exceptPay && (labPayInFlight || labPayRunning || (labPool?.wallets.some((w) => w.running) ?? false)))) {
 		if (Date.now() - started >= maxWaitMs) {
 			logger(
 				Colors.red(
