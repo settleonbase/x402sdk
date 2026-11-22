@@ -109,6 +109,7 @@ import { gracefulStopWalSession, openWalSession, type SnapshotConfig, type WalSe
 import { appendConsumedArchive, consumedArchiveDir } from './labConsumedPrune'
 import { LabPayoutFailClosedGate } from './labClPayoutFailClosed'
 import type { ActorView } from './labActorHandle'
+import type { LabPayoutStateCore } from './labPayoutStateCore'
 import type { LabStateHandle } from './labStateHandle'
 import { createLegacyStateStore, type LabClPayoutState, type SkimEntry, type LabPendingEntryJson } from './labLegacyState'
 import {
@@ -403,6 +404,12 @@ function resolvePayIdleMs(): number {
 	return Number.isFinite(n) && n >= 50 ? Math.floor(n) : 5_000
 }
 
+/** How long the one-shot exit of a decoupled daemon waits for the running scan tick (default 90 s; tunable so the over-wait path can be exercised end to end). */
+function resolveShutdownIdleWaitMs(): number {
+	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_SHUTDOWN_IDLE_WAIT_MS)
+	return Number.isFinite(n) && n >= 100 ? Math.floor(n) : 90_000
+}
+
 /** The settled count is persisted in the same write as the consumed set (lifecycle countSettled). Exit only after that write. */
 async function noteSettledBatch(h: LabHandle): Promise<void> {
 	const max = resolveMaxSettledBatches()
@@ -414,7 +421,7 @@ async function noteSettledBatch(h: LabHandle): Promise<void> {
 			h.closeScope()
 			h.exitTick()
 			// decoupled: the scan tick may still be running; the graceful stop is only legal when it has ended (this payment tick is the caller, so it is not waited for)
-			const scanIdle = labDecoupled() ? await waitForLabMiningPoolClPayoutIdle(90_000, { exceptPay: true }) : true
+			const scanIdle = labDecoupled() ? await waitForLabMiningPoolClPayoutIdle(resolveShutdownIdleWaitMs(), { exceptPay: true }) : true
 			if (!scanIdle) process.exit(1)
 			const code = await gracefulStopWalSession(labWalSession, { stateDir: resolveSegmentedStateDir(), tickIdle: true, log: walLog })
 			process.exit(code)
@@ -1587,6 +1594,17 @@ const resolveMinVdrBalanceReserveWei = (): bigint => {
 	return BigInt(raw)
 }
 
+/**
+ * Poison-batch quarantine (review F-B2): keys of a batch that came back with receipt status 0, or that were refused / failed twice, are not offered to the next wallet of the line (it would burn wallet
+ * after wallet on the same poison). They stay pending, are excluded from every wallet's selection until the process restarts, and an ALERT names them. An operator looks.
+ */
+const labQuarantine = new Set<string>()
+const labFailStreak = new Map<string, number>()
+function quarantineKeys(wallet: string, keys: string[], why: string): void {
+	for (const k of keys) labQuarantine.add(k)
+	logger(Colors.red(`[labMiningPoolClPayout] ALERT quarantined ${keys.length} event key(s) after ${why} (wallet ${wallet}); no wallet will claim them until a restart; first key ${keys[0]}`))
+}
+
 /** The oldest `batchEntries` payable pending entries of the wallet's line that no wallet holds. Synchronous: the caller claims them in the same block. */
 function selectForWallet(h: PoolActor, ws: PoolWalletState, hubIsReserved: (k: string) => boolean): SkimEntry[] {
 	const freezeH = h.scalar('freezeH')?.height
@@ -1600,7 +1618,7 @@ function selectForWallet(h: PoolActor, ws: PoolWalletState, hubIsReserved: (k: s
 	const byPos = (a: SkimEntry, b: SkimEntry): number => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex
 	for (const e of h.pendingValues()) {
 		if (classifyPendingLine(e.blockNumber, freezeH) !== ws.w.line) continue
-		if (hubIsReserved(e.eventKey.toLowerCase())) continue
+		if (hubIsReserved(e.eventKey.toLowerCase()) || labQuarantine.has(e.eventKey.toLowerCase())) continue
 		if (holdBefore != null && e.blockNumber <= holdBefore) continue
 		if (ws.w.line === 'history' && invC && (labCommittedHistoryCursor == null || e.blockNumber > labCommittedHistoryCursor)) continue
 		if (out.length >= cap && byPos(e, out[out.length - 1]!) >= 0) continue
@@ -1717,13 +1735,25 @@ async function poolWalletPassBody(ws: PoolWalletState): Promise<boolean> {
 					() => submitWithdrawBatchDurably(lifeDeps(gasPrice), { redeem: redeemAddr, pool: labMiningPool, amount: liveTotal, eventKeys: live.map((e) => e.eventKey.toLowerCase()), line: w.line }),
 					'[labMiningPoolClPayout]'
 				)
+				const liveKeys = live.map((e) => e.eventKey.toLowerCase())
+				const streakKey = liveKeys.join(',')
 				if (outcome === 'settled') {
 					ws.settledBatches++
+					labFailStreak.delete(streakKey)
 					await noteSettledBatch(h)
+				} else if (outcome === 'reverted') quarantineKeys(w.id, liveKeys, 'a receipt with status 0')
+				else if (outcome === 'refused') {
+					const n = (labFailStreak.get(streakKey) ?? 0) + 1
+					labFailStreak.set(streakKey, n)
+					if (n >= 2) quarantineKeys(w.id, liveKeys, `${n} refusals before broadcast`)
 				}
 				return outcome === 'settled'
 			} catch (e: unknown) {
 				logger(Colors.red(`[labMiningPoolClPayout] wallet ${w.id}: withdrawNative failed: ${(e as Error)?.message ?? e}`))
+				const streakKey = live.map((x) => x.eventKey.toLowerCase()).join(',')
+				const n = (labFailStreak.get(streakKey) ?? 0) + 1
+				labFailStreak.set(streakKey, n)
+				if (n >= 2) quarantineKeys(w.id, live.map((x) => x.eventKey.toLowerCase()), `${n} failed attempts`)
 				return false
 			} finally {
 				h.closeScope()
@@ -1873,12 +1903,16 @@ function resolveWalMaxFrameBytes(): number | undefined {
  * (the wallet of its line whose address is the old single SIGNER_ADDRESS). A slot of a wallet that is not in the file, a legacy record without exactly one matching wallet, or slots present
  * while no pool file is given REFUSE the start (fail-closed; nothing is guessed). The refusal names the record and points at the offline in-flight resolver.
  */
-async function setupPools(session: NonNullable<typeof labWalSession>): Promise<void> {
+type PoolPlan = { cfg: PoolConfig; migrate?: { wallet: PoolWallet; legacy: Record<string, unknown> } }
+/**
+ * The refusals of the pool start-up as a pure check on the recovered core (nothing is written): run BEFORE a version 2 state is converted to version 3, so a refused start leaves the plain
+ * version 2 directory exactly as it was (an old build can still start from it).
+ */
+function planPools(core: LabPayoutStateCore): PoolPlan | undefined {
 	const file = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_FILE?.trim()
-	const core = session.core
 	if (!file) {
 		if (core.slotCount > 0) throw new Error(`wallet slots hold in-flight batches (${[...core.slotEntries()].map(([w]) => w).join(',')}) but no pool file is configured; resolve them with the offline in-flight resolver or configure the pools`)
-		return
+		return undefined
 	}
 	const minRaw = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_MIN_ACTIVE)
 	const cfg = loadPoolConfig(file, { minActive: Number.isInteger(minRaw) && minRaw >= 1 ? minRaw : 2 })
@@ -1886,20 +1920,30 @@ async function setupPools(session: NonNullable<typeof labWalSession>): Promise<v
 	const ids = new Set(cfg.wallets.map((w) => w.id))
 	for (const [w] of core.slotEntries()) if (!ids.has(w)) throw new Error(`the state holds an in-flight slot of wallet ${w}, which is not in the pool file (sha256 ${cfg.sha256}); refusing to start`)
 	const legacy = core.getInFlight() as Record<string, unknown> | null
-	if (legacy) {
-		const addr = (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_ADDRESS ?? '').trim().toLowerCase()
-		const cands = cfg.wallets.filter((w) => w.line === legacy.line && w.address.toLowerCase() === addr)
-		if (cands.length !== 1) {
-			throw new Error(
-				`a legacy single in-flight record (idempotencyKey ${String(legacy.idempotencyKey)}, line ${String(legacy.line)}, ${((legacy.eventKeys as unknown[]) ?? []).length} event keys) matches ${cands.length} wallet(s) of the pool file by line and the old SIGNER_ADDRESS (${addr || 'unset'}); refusing to start. Resolve it with the offline in-flight resolver first`
-			)
-		}
+	if (!legacy) return { cfg }
+	const addr = (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_SIGNER_ADDRESS ?? '').trim().toLowerCase()
+	const oldKeyArray = (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_KEY_ARRAY ?? '').trim()
+	// the record's idempotency key was derived from the old key array: only the wallet with the SAME address and key array can resume it (any other would refuse the resume before any send)
+	const cands = cfg.wallets.filter((w) => w.line === legacy.line && w.address.toLowerCase() === addr && w.keyArray === oldKeyArray)
+	if (cands.length !== 1) {
+		throw new Error(
+			`a legacy single in-flight record (idempotencyKey ${String(legacy.idempotencyKey)}, line ${String(legacy.line)}, ${((legacy.eventKeys as unknown[]) ?? []).length} event keys, signer address ${addr || 'unset'}) matches ${cands.length} wallet(s) of the pool file by line, the old SIGNER_ADDRESS and the old KEY_ARRAY (${oldKeyArray || 'unset'}); refusing to start. Resolve it with the offline in-flight resolver first`
+		)
+	}
+	return { cfg, migrate: { wallet: cands[0]!, legacy } }
+}
+
+/** P4 start-up after the session is open: migrate a legacy single in-flight record into its wallet's slot (two commits: the slot first, then the legacy record is cleared; a crash between them is repaired by the same code on the next start) and create the wallet loops. */
+async function setupPools(session: NonNullable<typeof labWalSession>, plan: PoolPlan | undefined): Promise<void> {
+	if (!plan) return
+	const { cfg, migrate } = plan
+	if (migrate) {
 		if (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_POOLS_DRY_RUN === '1') {
-			logger(Colors.cyan(`[labMiningPoolClPayout] pools dry-run: the legacy in-flight record ${String(legacy.idempotencyKey)} would move into the slot of wallet ${cands[0]!.id}; nothing was changed`))
+			logger(Colors.cyan(`[labMiningPoolClPayout] pools dry-run: the legacy in-flight record ${String(migrate.legacy.idempotencyKey)} would move into the slot of wallet ${migrate.wallet.id}; nothing was changed`))
 			process.exit(0)
 		}
-		const h = session.hub.actor(`pay:${cands[0]!.id}`)
-		h.setSlot(cands[0]!.id, legacy)
+		const h = session.hub.actor(`pay:${migrate.wallet.id}`)
+		h.setSlot(migrate.wallet.id, migrate.legacy)
 		await h.commit('intent')
 		const old = session.handle
 		old.enterTick()
@@ -1909,7 +1953,7 @@ async function setupPools(session: NonNullable<typeof labWalSession>): Promise<v
 		} finally {
 			old.exitTick()
 		}
-		logger(Colors.cyan(`[labMiningPoolClPayout] migrated the legacy in-flight record ${String(legacy.idempotencyKey)} into the slot of wallet ${cands[0]!.id}`))
+		logger(Colors.cyan(`[labMiningPoolClPayout] migrated the legacy in-flight record ${String(migrate.legacy.idempotencyKey)} into the slot of wallet ${migrate.wallet.id}`))
 	}
 	labPool = { cfg, wallets: cfg.wallets.map((w) => ({ w, running: false, wakeQueued: false, passes: 0, settledBatches: 0 })) }
 	logger(Colors.cyan(`[labMiningPoolClPayout] pools: ${cfg.wallets.map((w) => `${w.id}(${w.line},${w.state})`).join(' ')} file sha256=${cfg.sha256}`))
@@ -1917,6 +1961,7 @@ async function setupPools(session: NonNullable<typeof labWalSession>): Promise<v
 
 /** WAL-mode start: recover (or bootstrap) the state, then the same start check and first tick as the legacy path. A failure refuses to start (exit 1). */
 async function startWalMode(): Promise<void> {
+	let poolPlan: PoolPlan | undefined
 	try {
 		labWalSession = await openWalSession({
 			stateDir: resolveSegmentedStateDir(),
@@ -1926,9 +1971,10 @@ async function startWalMode(): Promise<void> {
 			maxFrameBytes: resolveWalMaxFrameBytes(),
 			snapshot: resolveSnapshotConfig(),
 			openPauseMs: resolveWalOpenPauseMs(),
+			beforeConvert: (core) => void (poolPlan = planPools(core)),
 		})
 		sessionBackfillFloor = labWalSession.sessionBackfillFloor
-		await setupPools(labWalSession)
+		await setupPools(labWalSession, poolPlan)
 		if (labStopRequested) {
 			logger(Colors.yellow('[labMiningPoolClPayout] stop requested while the WAL session was opening; no tick is started (the shutdown converts the opened session)'))
 			return

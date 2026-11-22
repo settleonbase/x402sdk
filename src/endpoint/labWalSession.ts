@@ -93,6 +93,8 @@ export async function openWalSession(opts: {
 	/** Refuse (fatally) any single event above this size; default the log's 16 MiB. Tunable so the over-limit stop can be exercised end to end. */
 	maxFrameBytes?: number
 	snapshot?: SnapshotConfig
+	/** Called with the recovered core BEFORE a version 2 state is converted to version 3 and before any event: a throw refuses the start and leaves the version 2 directory untouched (pool start-up checks). */
+	beforeConvert?: (core: LabPayoutStateCore) => void
 	/** Test seam (default 0 = none): pause this long after recovery and before the start-up alignment, so a stop request can be made to arrive while the session is opening, every time. */
 	openPauseMs?: number
 }): Promise<WalSession> {
@@ -121,6 +123,7 @@ export async function openWalSession(opts: {
 	// F-B1-1: a state that is still a version 2 snapshot (the first WAL start after a plain daemon, or after a graceful stop) becomes a version 3 snapshot BEFORE the first event is written. Until the
 	// manifest says version 3 an old build reads the directory without complaint and ignores the log, so no event may exist while the manifest is still version 2. The step is atomic (new generation, then
 	// the manifest commit); a crash before it leaves the plain version 2 state and no log.
+	opts.beforeConvert?.(rec.core)
 	if (rec.manifestVersion === 2) {
 		const src = rec.core.freezeForSnapshot()
 		const up = await writeSnapshotCooperative(src, { dir: opts.stateDir, mode: 'wal' })

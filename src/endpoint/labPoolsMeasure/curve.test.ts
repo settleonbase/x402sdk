@@ -97,6 +97,8 @@ export type CurveResult = {
 	duplicatePaid: number
 	cpuMs: number | null
 	exit: number | null
+	/** Machine 1-minute load average sampled every 5 s during the run (min / mean / max): other work on the machine stretches the timings. */
+	load: { samples: number; min: number; mean: number; max: number }
 }
 
 export async function runCurve(o: Opts): Promise<CurveResult> {
@@ -209,7 +211,11 @@ export async function runCurve(o: Opts): Promise<CurveResult> {
 		child.stdout.on('data', onData)
 		child.stderr.on('data', onData)
 		const runStart = Number(process.hrtime.bigint() / 1_000_000n)
+		const loadSamples: number[] = [os.loadavg()[0]!]
+		const loadTimer = setInterval(() => loadSamples.push(os.loadavg()[0]!), 5000)
 		const exit = await new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)))
+		clearInterval(loadTimer)
+		loadSamples.push(os.loadavg()[0]!)
 		const evs = parseEvents(lines)
 		const stateAfter = recoverPayoutState(stateDir, { readOnly: true }).core
 		// ---- metrics
@@ -277,6 +283,7 @@ export async function runCurve(o: Opts): Promise<CurveResult> {
 			duplicatePaid: dup,
 			cpuMs: cpu ? Number(cpu.attrs.cpuUserMs) + Number(cpu.attrs.cpuSysMs) : null,
 			exit,
+			load: { samples: loadSamples.length, min: Math.min(...loadSamples), mean: loadSamples.reduce((a, b) => a + b, 0) / loadSamples.length, max: Math.max(...loadSamples) },
 		}
 		if (o.outDir) {
 			fs.mkdirSync(path.join(o.outDir, 'raw-lines'), { recursive: true })
@@ -293,9 +300,9 @@ export async function runCurve(o: Opts): Promise<CurveResult> {
 
 const f = (x: number | null | undefined, d = 0): string => (x == null || !Number.isFinite(x) ? 'n/a' : x.toFixed(d))
 export function table(rs: CurveResult[]): string {
-	const rows = [['mode', 'W_rt', 'W_hist', 'rt paid/field-h', 'hist paid/field-h', 'x vs W=1', 'pend growth/h', 'pend age slope/h', 'scan lag slope/h', 'paused rt/hist', 'max RPC', 'dup paid', 'slots end']]
+	const rows = [['mode', 'W_rt', 'W_hist', 'rt paid/field-h', 'hist paid/field-h', 'x vs W=1', 'pend growth/h', 'pend age slope/h', 'scan lag slope/h', 'paused rt/hist', 'max RPC', 'dup paid', 'slots end', 'load mean/max']]
 	const base = rs.find((r) => r.rt === 1)?.rtPaidPerFieldHour
-	for (const r of rs) rows.push([r.mode, String(r.rt), String(r.hist), f(r.rtPaidPerFieldHour), f(r.histPaidPerFieldHour), base ? f(r.rtPaidPerFieldHour / base, 2) : 'n/a', f(r.pendingGrowthPerFieldHour), f(r.pendingAgeSlopePerFieldHour), f(r.scanLagSlopePerFieldHour), `${r.pausedMarks.rt}/${r.pausedMarks.hist}`, String(r.maxConcurrentRpc), String(r.duplicatePaid), String(r.slotsAtEnd)])
+	for (const r of rs) rows.push([r.mode, String(r.rt), String(r.hist), f(r.rtPaidPerFieldHour), f(r.histPaidPerFieldHour), base ? f(r.rtPaidPerFieldHour / base, 2) : 'n/a', f(r.pendingGrowthPerFieldHour), f(r.pendingAgeSlopePerFieldHour), f(r.scanLagSlopePerFieldHour), `${r.pausedMarks.rt}/${r.pausedMarks.hist}`, String(r.maxConcurrentRpc), String(r.duplicatePaid), String(r.slotsAtEnd), `${f(r.load.mean, 1)}/${f(r.load.max, 1)}`])
 	const w = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)))
 	return rows.map((r) => r.map((c, i) => c.padEnd(w[i]!)).join('  ')).join('\n')
 }

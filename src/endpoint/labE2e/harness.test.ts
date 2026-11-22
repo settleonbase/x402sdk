@@ -27,6 +27,8 @@ export type RunOpts = {
 	env?: Record<string, string>
 	/** Kill the child with SIGKILL when this returns true for a log line / signer request (checked live). */
 	killWhen?: (ev: { kind: 'log'; line: string } | { kind: 'signer'; method: string; params: Record<string, unknown> | undefined }) => boolean
+	/** Send SIGTERM (a graceful stop) when this returns true for a log line / signer request (checked live). */
+	termWhen?: (ev: { kind: 'log'; line: string } | { kind: 'signer'; method: string; params: Record<string, unknown> | undefined }) => boolean
 	/** Give up after this long (ms). */
 	timeoutMs?: number
 }
@@ -196,7 +198,7 @@ function childEnv(ctx: Pick<Ctx, 'root' | 'dir' | 'stateFile' | 'stateDir' | 'ch
 	}
 }
 
-export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_ROOT ?? DEFAULT_ROOT, opts: { walMode?: boolean; decoupled?: boolean; pools?: { realtime: number; history: number; sendDelayMs?: number } } = {}): Promise<ScenarioResult> {
+export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_ROOT ?? DEFAULT_ROOT, opts: { walMode?: boolean; decoupled?: boolean; pools?: { realtime: number; history: number; sendDelayMs?: number; legacyMatch?: boolean; keyArrayOfRt1?: string } } = {}): Promise<ScenarioResult> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `labe2e-${s.name.replace(/[^a-z0-9]+/gi, '_').slice(0, 24)}-`))
 	const chain = new FakeChain()
 	const beacon = new FakeBeacon()
@@ -214,6 +216,11 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 			const mk = (line: 'realtime' | 'history', n: number, base: number): Record<string, string>[] =>
 				Array.from({ length: n }, (_, i) => ({ id: `${line === 'realtime' ? 'rt' : 'hi'}${i + 1}`, socket: '', keyArray: `lab_e2e_${line}_${i + 1}`, address: `0x${(base + i).toString(16).padStart(40, '0')}`, state: 'active' }))
 			const lists = { realtime: mk('realtime', opts.pools.realtime, 0x1000), history: mk('history', opts.pools.history, 0x2000) }
+			if (opts.pools.legacyMatch) {
+				// wallet rt1 is the old single wallet: same address and key array as the plain daemon used (its in-flight record can move into rt1's slot)
+				lists.realtime[0]!.address = SIGNER_ADDRESS
+				lists.realtime[0]!.keyArray = opts.pools.keyArrayOfRt1 ?? KEY_ARRAY
+			}
 			for (const w of [...lists.realtime, ...lists.history]) {
 				const sg = new FakeSigner(chain)
 				sg.address = w.address!
@@ -221,6 +228,7 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 				await sg.start(dir, `sg-${w.id}`)
 				w.socket = sg.socketPath
 				poolSigners.set(w.id!, sg)
+				if (opts.pools.legacyMatch && w.id === 'rt1') sg.byKey = signer.byKey // the old wallet's signer journal is the same one (idempotency across the switch)
 			}
 			poolsFile = path.join(dir, 'pools.json')
 			fs.writeFileSync(poolsFile, JSON.stringify(lists))
@@ -299,6 +307,7 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 						if (!l) continue
 						lines.push(l)
 						if (o.killWhen?.({ kind: 'log', line: normalizeLine(l) })) kill()
+						if (o.termWhen?.({ kind: 'log', line: normalizeLine(l) })) term()
 					}
 				}
 				child.stdout.on('data', onData)
@@ -310,12 +319,23 @@ export async function runScenario(s: Scenario, root = process.env.E2E_REPORTER_R
 					timedOut = true
 					kill()
 				}, o.timeoutMs ?? 120_000)
-				const signerCount0 = signer.requests.length
+				// every signer (the single one and, in pool runs, each wallet's) is watched; each request is offered to the hooks once
+				const watched = [signer, ...poolSigners.values()].map((sg) => ({ sg, next: sg.requests.length }))
+				let termSent = false
+				const term = (): void => {
+					if (!termSent && !killed) {
+						termSent = true
+						child.kill('SIGTERM')
+					}
+				}
 				const poll = setInterval(() => {
-					if (!o.killWhen) return
-					for (let i = signerCount0; i < signer.requests.length; i++) {
-						const r = signer.requests[i]!
-						if (o.killWhen({ kind: 'signer', method: r.method, params: r.params })) kill()
+					if (!o.killWhen && !o.termWhen) return
+					for (const wch of watched) {
+						while (wch.next < wch.sg.requests.length) {
+							const r = wch.sg.requests[wch.next++]!
+							if (o.killWhen?.({ kind: 'signer', method: r.method, params: r.params })) kill()
+							if (o.termWhen?.({ kind: 'signer', method: r.method, params: r.params })) term()
+						}
 					}
 				}, 5)
 				const res = await new Promise<RunResult>((resolve) => {

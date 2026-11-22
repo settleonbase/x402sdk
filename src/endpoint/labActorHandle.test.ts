@@ -14,6 +14,10 @@ import { recoverPayoutState } from './labPayoutRecovery'
 import { writeSnapshotCooperative } from './labSnapshotWriter'
 import { scanWal, WalWriter, type WalEvent } from './labWal'
 import { canonicalJson } from './labClPayoutStateStore'
+import { resumeLabWithdrawInFlight, submitWithdrawBatchDurably, type LabLifecycleDeps } from './labClPayoutBatchLifecycle'
+import { LabPayoutFailClosedGate } from './labClPayoutFailClosed'
+import { settleKeysAndAdvance } from './labInvariantC'
+import { LAB_MINING_POOL_FIXED } from './labMiningPoolPayoutSigner'
 
 type E = { eventKey: string; amount: string; blockNumber: number; withdrawalIndex: number; pubkey: string }
 type S = Record<string, unknown>
@@ -307,6 +311,108 @@ test('A7: cursorHighWater is a maximum (F-A0-1): an actor whose cursor commits l
 		p1.setScalar('inFlightWithdraw', { idempotencyKey: 'k1', eventKeys: [] })
 		assert.throws(() => p2.setScalar('inFlightWithdraw', { idempotencyKey: 'k2', eventKeys: [] }), /owns \(one writer until per-wallet slots\)|one writer/)
 		assert.throws(() => p2.delScalar('inFlightWithdraw'), /one writer/)
+	} finally {
+		w.done()
+	}
+})
+
+test('A8: the in-flight batch of the payer is not touched by a rescan of the same blocks, and a rescan prepared before the settle cannot bring a paid key back (the reserved hook is not needed for the single slot: the keys stay pending until the settle, and consumed wins at commit)', async () => {
+	const w = await world()
+	try {
+		const scan = w.hub.actor('scan')
+		const pay = w.hub.actor('pay')
+		scan.pendingAdd([entry(1, 100), entry(2, 101), entry(3, 102)])
+		await scan.commit('scan')
+		const before = canonicalJson([...w.core.pendingEntries()].map((e) => ({ ...e })).sort((a, b) => (a.eventKey < b.eventKey ? -1 : 1)))
+		// the payer holds a batch of keys 1..3 in flight (intent committed)
+		pay.setScalar('inFlightWithdraw', { idempotencyKey: 'k', eventKeys: [key(1), key(2), key(3)], amountWei: '3000', line: 'realtime' })
+		await pay.commit('intent')
+		// a rescan of the same blocks (plus a new key): the held keys are already pending, nothing about them changes
+		scan.pendingAdd([entry(1, 100), entry(2, 101), entry(3, 102), entry(4, 103)])
+		await scan.commit('scan')
+		const after = canonicalJson([...w.core.pendingEntries()].filter((e) => e.eventKey !== key(4)).map((e) => ({ ...e })).sort((a, b) => (a.eventKey < b.eventKey ? -1 : 1)))
+		assert.equal(after, before, 'the in-flight keys are untouched by the rescan')
+		assert.equal(w.core.pendingHas(key(4)), true)
+		// a rescan prepared BEFORE the settle commits AFTER it: the keys are consumed by then and must not return to pending
+		scan.pendingAdd([entry(5, 104)])
+		const late = w.hub.actor('scan2')
+		late.pendingAdd([entry(1, 100), entry(2, 101), entry(3, 102)]) // sees them as pending: a no-op in its view
+		pay.setScalar('inFlightWithdraw', undefined as never)
+		settleKeysAndAdvance(pay as never, [key(1), key(2), key(3)], false)
+		await pay.commit('settle')
+		await late.commit('scan')
+		await scan.commit('scan')
+		for (const k of [key(1), key(2), key(3)]) {
+			assert.equal(w.core.pendingHas(k), false, `${k} stays settled`)
+			assert.equal(w.core.consumedHas(k), true)
+		}
+		assert.equal(w.core.getInFlight(), null)
+	} finally {
+		w.done()
+	}
+})
+
+test('A9: an exception inside the batch scope after the send (here in settle, before its commit) discards the uncommitted settle writes; the next pass in the SAME process finds the committed in-flight record WITH its hash, asks for the receipt, settles once, and never sends again', async () => {
+	const w = await world()
+	try {
+		const h = w.hub.actor('pay')
+		w.hub.actor('scan').pendingAdd([entry(1, 100), entry(2, 101)])
+		await w.hub.actor('scan').commit('scan')
+		const sends = new Map<string, string>() // the signer's idempotency journal
+		let broadcasts = 0
+		let throwInSettle = true
+		const logs: string[] = []
+		const deps: LabLifecycleDeps = {
+			gate: new LabPayoutFailClosedGate((m) => logs.push(m)),
+			getInFlight: () => (h.scalar('inFlightWithdraw') as never) ?? null,
+			setInFlight: (v) => {
+				if (v) h.setScalar('inFlightWithdraw', v as never)
+				else h.delScalar('inFlightWithdraw')
+			},
+			persist: (step) => h.commit(step),
+			countSettled: () => h.incScalar('settledBatchCount', 1),
+			send: async (rec) => {
+				const prior = sends.get(rec.idempotencyKey)
+				if (prior) return { hash: prior }
+				broadcasts++
+				const hash = '0x' + broadcasts.toString(16).padStart(64, '0')
+				sends.set(rec.idempotencyKey, hash)
+				return { hash }
+			},
+			waitReceipt: async () => ({ status: 1 }),
+			settle: (keys) => {
+				for (const k of keys) {
+					h.pendingDel(k) // partial writes before the failure
+					if (throwInSettle) throw new Error('boom inside settle')
+					h.consumedAdd(k)
+				}
+			},
+			confirmBeforeSend: async () => undefined,
+			log: (l) => logs.push(l),
+		}
+		const req = { redeem: '0x' + '11'.repeat(20), pool: LAB_MINING_POOL_FIXED, amount: 2000n, eventKeys: [key(1), key(2)], line: 'realtime' as const }
+		h.openScope('batch')
+		await assert.rejects(() => submitWithdrawBatchDurably(deps, req), /boom inside settle/)
+		h.closeScope() // what the reporter's finally does
+		assert.equal(broadcasts, 1)
+		assert.ok(w.hub.stats.discardedOps >= 1, 'the uncommitted settle writes were discarded')
+		const rec = w.core.getInFlight() as { hash?: string } | null
+		assert.ok(rec && rec.hash, 'the committed in-flight record has its hash (intent and hash steps were committed before the failure)')
+		assert.equal(w.core.pendingHas(key(1)), true, 'nothing of the failed settle reached the core')
+		assert.equal(w.core.consumedHas(key(1)), false)
+		// the next pass, same process, same actor: resume
+		throwInSettle = false
+		h.openScope('batch')
+		const out = await resumeLabWithdrawInFlight(deps)
+		h.closeScope()
+		assert.equal(out, 'settled')
+		assert.equal(broadcasts, 1, 'no second broadcast')
+		assert.equal(w.core.getInFlight(), null)
+		for (const k of [key(1), key(2)]) {
+			assert.equal(w.core.consumedHas(k), true)
+			assert.equal(w.core.pendingHas(k), false)
+		}
+		assert.equal(w.core.getScalar('settledBatchCount'), 1, 'counted once')
 	} finally {
 		w.done()
 	}
