@@ -1600,9 +1600,11 @@ function isolatePoolWallet(ws: PoolWalletState, code: number, reason: string): v
 	logger(Colors.red(`[labMiningPoolClPayout] ALERT wallet ${ws.w.id} isolated (${ws.isolated}); the other wallets keep paying`))
 }
 
+/** The VDR balance the pool never touches (wei). Required, no default; `0` is a valid value; anything that is not a plain non-negative decimal integer (negative, fractional, hex, text) refuses the start. */
 const resolveMinVdrBalanceReserveWei = (): bigint => {
 	const raw = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI?.trim()
 	if (raw === undefined || raw === '') throw new Error('[labMiningPoolClPayout] pool mode needs CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI (no default)')
+	if (!/^\d+$/.test(raw)) throw new Error(`[labMiningPoolClPayout] CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI must be a non-negative integer in wei (digits only, 0 is valid); got "${raw.slice(0, 40)}"`)
 	return BigInt(raw)
 }
 
@@ -1985,7 +1987,9 @@ async function setupPools(session: NonNullable<typeof labWalSession>, plan: Pool
 		logger(Colors.cyan(`[labMiningPoolClPayout] migrated the legacy in-flight record ${String(migrate.legacy.idempotencyKey)} into the slot of wallet ${migrate.wallet.id}`))
 	}
 	labPool = { cfg, wallets: cfg.wallets.map((w) => ({ w, running: false, wakeQueued: false, passes: 0, settledBatches: 0 })) }
-	logger(Colors.cyan(`[labMiningPoolClPayout] pools: ${cfg.wallets.map((w) => `${w.id}(${w.line},${w.state})`).join(' ')} file sha256=${cfg.sha256} minVdrBalanceReserveWei=${resolveMinVdrBalanceReserveWei()}`))
+	logger(Colors.cyan(`[labMiningPoolClPayout] pools: ${cfg.wallets.map((w) => `${w.id}(${w.line},${w.state})`).join(' ')} file sha256=${cfg.sha256}`))
+	// one machine-readable line for the health check read-back (+2/+10/+30 minutes): the EFFECTIVE value
+	logger(Colors.cyan(`[labMiningPoolClPayout] config minVdrBalanceReserveWei=${resolveMinVdrBalanceReserveWei()}`))
 }
 
 /** WAL-mode start: recover (or bootstrap) the state, then the same start check and first tick as the legacy path. A failure refuses to start (exit 1). */

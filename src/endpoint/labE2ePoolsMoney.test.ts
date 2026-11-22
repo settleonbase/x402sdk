@@ -1,0 +1,275 @@
+/**
+ * The money guard of the wallet pools with MIN_VDR_BALANCE_RESERVE_WEI = 0 (project decision: the reserve is 0, so the claim rule is the ONLY guard: claimable = the VDR's real balance minus what every wallet of
+ * both lines has claimed but not booked or has in flight; a failed balance read means no claim). REAL reporter in pool mode, fake chain whose balance FALLS when a withdrawNative is mined, per-wallet fake signers.
+ *   A  balance for only N batches, pool 2x2: chain-side cumulative payout <= the initial balance; at EVERY send the sent-but-unbooked plus booked total <= the balance; "refuse batch" appears, no wallet is
+ *      isolated, the keys the balance cannot cover stay pending, every key at most once to the wei
+ *   B  balance read failing for a whole run: zero signer requests, no slot; after the read works again everything is paid once
+ *   C  the realtime and the history wallet race for a balance that covers exactly one batch: exactly one batch is paid, the other wallet refuses, total <= balance, nothing isolated
+ *   D  with a low balance, kill -9 after a send, a lost ACK and a late receipt: no key twice, total <= balance
+ *   input: negative, fractional, hex or text values refuse the start (exit 1, nothing converted); 0 starts and is read back in `config minVdrBalanceReserveWei=0`
+ */
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { ethers } from 'ethers'
+import { recoverPayoutState } from './labPayoutRecovery'
+import { runScenario, type Ctx, type Scenario, type ScenarioResult } from './labE2e/harness.test'
+import { eventKeyOf, headPlan, seedValidators } from './labE2e/scenarios.test'
+
+const OTHER = '0x00000000000000000000000000000000000000aa'
+function mulberry32(a: number): () => number {
+	return () => {
+		a |= 0
+		a = (a + 0x6d2b79f5) | 0
+		let t = Math.imul(a ^ (a >>> 15), 1 | a)
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+	}
+}
+type World = { expected: Map<string, bigint>; totalWei: bigint }
+function buildWorld(ctx: Ctx, seed: number): World {
+	const rnd = mulberry32(seed)
+	const expected = new Map<string, bigint>()
+	let total = 0n
+	for (let block = 100; block <= 400; block++) {
+		const n = rnd() < 0.3 ? 0 : 1 + Math.floor(rnd() * 4)
+		for (let i = 0; i < n; i++) {
+			const validatorIndex = Math.floor(rnd() * 7)
+			const toOther = rnd() < 0.07
+			const amountGwei = BigInt(1_000_000 + Math.floor(rnd() * 9_000_000))
+			ctx.chain.addWithdrawal(block, { index: i, validatorIndex, amountGwei, ...(toOther ? { address: OTHER } : {}) })
+			if (validatorIndex < 6 && !toOther) {
+				expected.set(eventKeyOf(block, i), amountGwei * 1_000_000_000n)
+				total += amountGwei * 1_000_000_000n
+			}
+		}
+	}
+	return { expected, totalWei: total }
+}
+const BASE_ENV = {
+	CONET_LAB_MINING_POOL_CL_PAYOUT_FLUSH_BATCH_ENTRIES: '12',
+	CONET_LAB_MINING_POOL_CL_PAYOUT_CHUNKS_PER_TICK: '12',
+	CONET_LAB_MINING_POOL_CL_PAYOUT_TX_WAIT_MS: '15000',
+}
+const HEADS = [250, 300, 350, 400, 400, 400, 400, 400, 400, 400, 400, 400]
+
+async function run(name: string, rt: number, hist: number, body: (ctx: Ctx, w: World) => Promise<void>, env: Record<string, string> = {}): Promise<{ res: ScenarioResult; world: World; slots: number; pending: number }> {
+	let world!: World
+	let slots = -1
+	let pending = -1
+	const s: Scenario = {
+		name,
+		env: { ...BASE_ENV, ...env },
+		body: async (ctx) => {
+			seedValidators(ctx)
+			world = buildWorld(ctx, 31337)
+			headPlan(ctx, HEADS)
+			await body(ctx, world)
+			const core = recoverPayoutState(ctx.stateDir, { readOnly: true }).core
+			slots = core.slotCount
+			pending = core.pendingSize
+		},
+	}
+	const res = await runScenario(s, undefined, { walMode: true, decoupled: true, pools: { realtime: rt, history: hist, sendDelayMs: 15 } })
+	return { res, world, slots, pending }
+}
+const minedTotal = (ctx: Ctx): bigint => [...ctx.chain.sent.values()].filter((t) => t.mined && t.status === 1).reduce((a, t) => a + t.amountWei, 0n)
+function atMostOnce(res: ScenarioResult, world: World, label: string): void {
+	for (const [k, n] of Object.entries(res.paymentsPerEventKey)) {
+		assert.equal(n, 1, `${label}: key ${k} in ${n} transactions`)
+		assert.ok(world.expected.has(k), `${label}: unexpected key ${k}`)
+	}
+	// every transaction's amount is the sum of its keys to the wei
+	for (const t of res.chainSent) assert.ok(BigInt(t.amountWei) > 0n)
+}
+
+/** Records, at every send the pool signers accept, the running total of everything sent so far (booked or not): it must never exceed the initial balance. */
+function trackSent(ctx: Ctx, initial: bigint): { max: () => bigint } {
+	let running = 0n
+	let max = 0n
+	for (const sg of ctx.poolSigners.values())
+		sg.afterRecord = (tx) => {
+			void tx
+			// the amount of the transaction just recorded
+			const last = [...ctx.chain.sent.values()].at(-1)
+			if (last) running += last.amountWei
+			if (running > max) max = running
+		}
+	void initial
+	return { max: () => max }
+}
+
+test('A: balance for about 35% of what is owed, pool 2x2: payout and everything in flight never exceed the balance; refuse batch appears; nobody is isolated; the uncovered keys stay pending; every key at most once', { timeout: 300_000 }, async () => {
+	let initial = 0n
+	let sentMax = 0n
+	let paid = 0n
+	let balanceEnd = 0n
+	const r = await run('pm_a', 2, 2, async (ctx, w) => {
+		initial = (w.totalWei * 35n) / 100n
+		ctx.chain.balanceWei = initial
+		const t = trackSent(ctx, initial)
+		ctx.chain.onRequest = async () => void (await new Promise((res) => setTimeout(res, 1)))
+		await ctx.run({ ticks: 14, timeoutMs: 240_000 })
+		sentMax = t.max()
+		paid = minedTotal(ctx)
+		balanceEnd = ctx.chain.balanceWei
+	})
+	assert.ok(sentMax <= initial, `at some send the running total sent (${sentMax}) exceeded the balance (${initial})`)
+	assert.ok(paid <= initial, `chain-side payout ${paid} > initial balance ${initial}`)
+	assert.ok(balanceEnd >= 0n, 'the contract balance never went negative')
+	assert.ok(paid > 0n, 'something was paid')
+	assert.ok(r.res.logs.flat().some((l) => l.includes('refuse batch')), 'a batch was refused for lack of balance')
+	assert.ok(!r.res.logs.flat().some((l) => /wallet \S+ isolated/.test(l)), 'no wallet was isolated by the shortage')
+	assert.ok(r.pending > 0, 'the keys the balance could not cover are still pending')
+	assert.equal(r.slots, 0)
+	atMostOnce(r.res, r.world, 'A')
+	process.stderr.write(`money A: initial=${initial} paid=${paid} maxSentRunning=${sentMax} pendingLeft=${r.pending}\n`)
+})
+
+test('B: balance reads failing for a whole run: zero signer requests and no slot; once the read works everything is paid, every key once', { timeout: 300_000 }, async () => {
+	let failing = true
+	let slotsDuring = -1
+	let sendsDuring = -1
+	const r = await run('pm_b', 2, 1, async (ctx) => {
+		ctx.chain.onRequest = async (m) => (m === 'eth_getBalance' && failing ? { status: 500 } : undefined)
+		await ctx.run({ ticks: 12, timeoutMs: 200_000 })
+		slotsDuring = recoverPayoutState(ctx.stateDir, { readOnly: true }).core.slotCount
+		sendsDuring = [...ctx.poolSigners.values()].reduce((a, sg) => a + sg.requests.filter((q) => q.method === 'signer_sendTransaction').length, 0)
+		failing = false
+		await ctx.run({ ticks: 12, timeoutMs: 200_000 })
+	})
+	assert.equal(sendsDuring, 0, 'no send while the balance cannot be read')
+	assert.equal(slotsDuring, 0, 'no slot was created while the balance cannot be read')
+	assert.deepEqual(Object.keys(r.res.paymentsPerEventKey).sort(), [...r.world.expected.keys()].sort(), 'afterwards every payable key was paid')
+	atMostOnce(r.res, r.world, 'B')
+	assert.equal(r.slots, 0)
+	assert.equal(r.pending, 0)
+})
+
+test('C: the realtime wallet and the history wallet race for a balance that covers exactly ONE batch: exactly one batch is paid, the other refuses, total <= balance, nobody is isolated', { timeout: 300_000 }, async () => {
+	let paid = 0n
+	let initial = 0n
+	let pendingKeys = 0
+	let batches = 0
+	const s: Scenario = {
+		name: 'pm_c',
+		env: { ...BASE_ENV },
+		body: async (ctx) => {
+			seedValidators(ctx)
+			headPlan(ctx, [300, 300, 300, 300, 300, 300, 300, 300])
+			ctx.chain.head = 300
+			const amount = 5_000_000_000_000_000n // 0.005 CNET per entry; a batch of 12 = 0.06 CNET
+			const mk = (i: number, block: number): Record<string, unknown> => ({ eventKey: ethers.keccak256(ethers.toUtf8Bytes(`pm-c-${i}`)), amount: amount.toString(), blockNumber: block, withdrawalIndex: i, pubkey: ctx.labPubkeys[0] })
+			ctx.seedState({
+				lastBackfillProcessedBlock: 300,
+				historyCursor: 300,
+				realtimeCursor: 300,
+				lastLiveHeadScanned: 300,
+				freezeH: { height: 300, hash: ctx.chain.blockHash(300), frozenAt: new Date().toISOString() },
+				pending: [...Array.from({ length: 12 }, (_, i) => mk(i, 200 + i)), ...Array.from({ length: 12 }, (_, i) => mk(100 + i, 310 + i))], // 12 history (<= H) and 12 realtime (> H)
+				consumedEventKeys: {},
+				exitedPubkeys: {},
+			})
+			initial = 12n * amount + 1_000_000_000_000_000n // one batch plus a bit, not two
+			ctx.chain.balanceWei = initial
+			await ctx.run({ ticks: 8, timeoutMs: 200_000 })
+			paid = minedTotal(ctx)
+			batches = ctx.chain.sent.size
+			pendingKeys = recoverPayoutState(ctx.stateDir, { readOnly: true }).core.pendingSize
+		},
+	}
+	const res = await runScenario(s, undefined, { walMode: true, decoupled: true, pools: { realtime: 1, history: 1, sendDelayMs: 15 } })
+	assert.equal(batches, 1, `exactly one batch was sent (${batches})`)
+	assert.ok(paid <= initial, `paid ${paid} > balance ${initial}`)
+	assert.equal(pendingKeys, 12, 'the other line\'s 12 keys are still pending')
+	assert.ok(res.logs.flat().some((l) => l.includes('refuse batch')), 'the other wallet refused')
+	assert.ok(!res.logs.flat().some((l) => /wallet \S+ isolated/.test(l)))
+	for (const [, n] of Object.entries(res.paymentsPerEventKey)) assert.equal(n, 1)
+	assert.equal(res.exits[res.exits.length - 1]!.code, 0)
+})
+
+test('D1: low balance and kill -9 right after a send: the restart resumes, no key twice, total <= balance', { timeout: 300_000 }, async () => {
+	let initial = 0n
+	let paid = 0n
+	const r = await run('pm_d1', 2, 1, async (ctx, w) => {
+		initial = (w.totalWei * 50n) / 100n
+		ctx.chain.balanceWei = initial
+		const rt1 = ctx.poolSigners.get('rt1')!
+		let fired = 0
+		rt1.afterRecord = () => {
+			if (fired++ === 0) ctx.currentChild?.kill('SIGKILL')
+		}
+		await ctx.run({ ticks: 12, timeoutMs: 120_000 })
+		rt1.afterRecord = undefined
+		await ctx.run({ ticks: 12, timeoutMs: 200_000 })
+		paid = minedTotal(ctx)
+	})
+	assert.equal(r.res.exits[0]!.signal, 'SIGKILL')
+	assert.ok(paid <= initial, `paid ${paid} > ${initial}`)
+	atMostOnce(r.res, r.world, 'D1')
+	assert.equal(r.slots, 0)
+})
+
+test('D2: low balance and a lost ACK across a restart: the recorded send is recovered, no key twice, total <= balance', { timeout: 300_000 }, async () => {
+	let initial = 0n
+	let paid = 0n
+	const r = await run('pm_d2', 2, 1, async (ctx, w) => {
+		initial = (w.totalWei * 50n) / 100n
+		ctx.chain.balanceWei = initial
+		const sg = ctx.poolSigners.get('rt2')!
+		sg.mode = 'lose-ack'
+		await ctx.run({ ticks: 12, timeoutMs: 120_000, killWhen: () => sg.acksLost >= 1 })
+		assert.ok(sg.acksLost >= 1)
+		sg.mode = 'ok'
+		await ctx.run({ ticks: 12, timeoutMs: 200_000 })
+		paid = minedTotal(ctx)
+		assert.ok(sg.duplicateSends + sg.getTransactionCalls >= 1, 'recovered through the signer')
+	})
+	assert.ok(paid <= initial, `paid ${paid} > ${initial}`)
+	atMostOnce(r.res, r.world, 'D2')
+	assert.equal(r.slots, 0)
+})
+
+test('D3: low balance and a late receipt in-process: the slot is kept and resumed, no key twice, total <= balance', { timeout: 300_000 }, async () => {
+	let initial = 0n
+	let paid = 0n
+	const r = await run(
+		'pm_d3',
+		2,
+		1,
+		async (ctx, w) => {
+			initial = (w.totalWei * 50n) / 100n
+			ctx.chain.balanceWei = initial
+			let slow: string | undefined
+			ctx.chain.receiptRule = (tx, ask) => {
+				slow ??= tx.idempotencyKey
+				return tx.idempotencyKey === slow && ask <= 12 ? 'none' : 'mined'
+			}
+			await ctx.run({ ticks: 12, timeoutMs: 200_000 })
+			paid = minedTotal(ctx)
+			assert.ok(ctx.chain.emptyReceipts >= 1)
+		},
+		{ CONET_LAB_MINING_POOL_CL_PAYOUT_TX_WAIT_MS: '15000' }
+	)
+	assert.ok(paid <= initial, `paid ${paid} > ${initial}`)
+	atMostOnce(r.res, r.world, 'D3')
+	assert.equal(r.slots, 0)
+})
+
+test('input: negative, fractional, hex and text reserve values refuse the start (exit 1, the message names the variable); 0 starts and is read back as `config minVdrBalanceReserveWei=0`', { timeout: 300_000 }, async () => {
+	const outcomes: Record<string, { code: number | null; msg: boolean }> = {}
+	let zeroLog = false
+	await run('pm_input', 2, 1, async (ctx) => {
+		for (const bad of ['-1', '1.5', '0x10', 'abc', '1e18']) {
+			const r = await ctx.run({ ticks: 3, timeoutMs: 60_000, env: { CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI: bad } })
+			outcomes[bad] = { code: r.code, msg: r.lines.some((l) => l.includes('MIN_VDR_BALANCE_RESERVE_WEI must be a non-negative integer')) }
+		}
+		const ok = await ctx.run({ ticks: 3, timeoutMs: 60_000, env: { CONET_LAB_MINING_POOL_CL_PAYOUT_MIN_VDR_BALANCE_RESERVE_WEI: '0' } })
+		zeroLog = ok.lines.some((l) => l.includes('config minVdrBalanceReserveWei=0'))
+		assert.equal(ok.code, 0)
+	})
+	for (const [bad, o] of Object.entries(outcomes)) {
+		assert.equal(o.code, 1, `value "${bad}" must refuse the start`)
+		assert.ok(o.msg, `the refusal for "${bad}" names the variable and the rule`)
+	}
+	assert.ok(zeroLog, 'the effective value 0 is read back on its own line')
+})
