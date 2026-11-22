@@ -52,7 +52,14 @@ export async function rehearse(stateDir: string, out: string): Promise<void> {
 			scan.pendingAdd(Array.from({ length: 512 }, (_, i) => ({ eventKey: '0x' + (0xabc00000000 + k++).toString(16).padStart(64, '0'), amount: '1000000000000000', blockNumber: 2_100_000 + round, withdrawalIndex: i, pubkey: '0x' + 'ab'.repeat(48) }) as never))
 			await scan.commit('scan')
 			for (const [wi, w] of wallets.entries()) {
-				const batch = [...w.pendingValues()].slice(wi * 100, wi * 100 + 100)
+				// like the daemon's selection: iterate the pending view without materialising it (no array of 1.7M entries), keep the first 100 after a skip of wi*100
+				const batch: { eventKey: string }[] = []
+				let seen = 0
+				for (const e of w.pendingValues()) {
+					if (seen++ < wi * 100) continue
+					batch.push(e)
+					if (batch.length >= 100) break
+				}
 				for (const e of batch) {
 					w.pendingDel(e.eventKey)
 					w.consumedAdd(e.eventKey)
