@@ -1,0 +1,3 @@
+[Service]
+Environment=NODE_OPTIONS=--max-old-space-size=1536
+Environment=CONET_LAB_MINING_POOL_CL_PAYOUT_WAL=1

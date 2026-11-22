@@ -1,0 +1,42 @@
+{
+ "format": "beamio-lab-clpayout-state",
+ "generation": "gen-0000000000abcdef",
+ "previousGeneration": "gen-0000000000abcde0",
+ "writtenAt": "2026-11-22T07:00:00.000Z",
+ "segmentSize": 50000,
+ "scalars": {
+  "settledBatchCount": 2054,
+  "realtimeCursor": 2266500,
+  "historyCursor": 2019999,
+  "freezeH": 2266000
+ },
+ "scalarsSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+ "pending": {
+  "count": 1720000,
+  "keySetSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "segments": [
+   {
+    "file": "pending-000000.jsonl",
+    "lines": 3,
+    "bytes": 300,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   }
+  ]
+ },
+ "consumed": {
+  "file": "consumed.jsonl",
+  "lines": 270000,
+  "bytes": 1,
+  "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "keySetSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+ },
+ "exited": {
+  "file": "exited.jsonl",
+  "lines": 0,
+  "bytes": 0,
+  "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "keySetSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+ },
+ "version": 3,
+ "walSeq": 0
+}

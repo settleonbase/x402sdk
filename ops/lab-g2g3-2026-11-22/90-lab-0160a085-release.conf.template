@@ -1,0 +1,5 @@
+[Service]
+WorkingDirectory=@REL_NEW@
+OOMScoreAdjust=500
+MemoryMax=3G
+MemorySwapMax=0
