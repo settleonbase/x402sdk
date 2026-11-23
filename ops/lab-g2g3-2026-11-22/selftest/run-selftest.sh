@@ -168,7 +168,7 @@ grep -q 'sudo -n node\|\$SUDO node "\$HELPER_DIR/readv2.js" "\$store" "\$SD"' "$
 # ---- R2: the helper pins are checked at the START of resume-check and swap-start, and once more right before the start
 RCBLK=$(sed -n '/^resume-check)/,/^status)/p' "$C"); SSBLK=$(sed -n '/^swap-start)/,/^\*) echo "usage/p' "$C")
 printf '%s\n' "$RCBLK" | head -3 | grep -q 'helpers_verify' && ok "R2 resume-check verifies the helpers first" || bad "R2 resume-check helpers_verify"
-printf '%s\n' "$SSBLK" | head -4 | grep -q 'helpers_verify' && ok "R2 swap-start verifies the helpers first" || bad "R2 swap-start helpers_verify"
+printf '%s\n' "$SSBLK" | awk '/copy_approval_preflight/{a=NR} /helpers_verify/&&!h{h=NR} /envcheck_preflight/{e=NR} /\$SUDO install .*conf.rendered/{m=NR} END{exit (a&&h&&e&&m&&a<h&&h<e&&e<m)?0:1}' && ok "R2 swap-start validates approval, then helper pins, then envcheck before mutation" || bad "R2 swap-start preflight ordering"
 printf '%s\n' "$SSBLK" | awk '/last look before the start/{f=1} f&&/helpers_verify/{c=1} /systemctl start/{if(f&&c){ok=1}} END{exit ok?0:1}' && ok "R2 the helpers are verified again right before the start" || bad "R2 helpers_verify before the start"
 # ---- v7: nothing about the host in the repository; the host comes from a private site file
 SITEOK=$(mktemp)
@@ -183,6 +183,9 @@ chmod +x "$T/bin/stat"
 sv(){ ( export PATH="$T/bin:$PATH" SITE_ENV="$1"; . "$OPS/common.env.sh"; site_verify >/dev/null 2>&1; echo $? ); }
 svm(){ ( export PATH="$T/bin:$PATH" SITE_ENV="$1"; . "$OPS/common.env.sh"; site_verify 2>&1 | head -1 ); }
 [ "$(sv "$SITEOK")" = 0 ] && ok "v8 site_verify accepts a complete site file (root:600)" || bad "v8 site_verify complete"
+{ cat "$SITEOK"; echo "COPY_APPROVAL_ID_EXPECTED=synthetic-approval-a1b2"; } > "$SITEOK.optional"
+r=$( export PATH="$T/bin:$PATH" SITE_ENV="$SITEOK.optional"; . "$OPS/common.env.sh"; site_verify >/dev/null 2>&1 && echo "$COPY_APPROVAL_ID_EXPECTED" ); [ "$r" = synthetic-approval-a1b2 ] && ok "v8 the optional expected approval ID is accepted from the private site file" || bad "v8 optional approval ID ($r)"
+{ cat "$SITEOK.optional"; echo "COPY_APPROVAL_ID_EXPECTED=synthetic-approval-other"; } > "$SITEOK.duplicate"; [ "$(sv "$SITEOK.duplicate")" != 0 ] && ok "v8 duplicate expected approval IDs are refused" || bad "v8 duplicate approval ID accepted"
 [ "$(sv /nonexistent)" != 0 ] && ok "v8 site_verify refuses a missing site file" || bad "v8 site_verify missing file"
 [ "$(sv "$OPS/site.env.example")" != 0 ] && ok "v8 site_verify refuses the placeholder template" || bad "v8 site_verify template"
 grep -v '^SD=' "$SITEOK" > "$SITEOK.2"; [ "$(sv "$SITEOK.2")" != 0 ] && ok "v8 site_verify refuses a file with a value missing" || bad "v8 site_verify missing value"
@@ -200,7 +203,7 @@ r=$( export PATH="$T/bin:$PATH" SITE_ENV="$SITEOK.4"; . "$OPS/common.env.sh"; ec
 rd=$(mktemp -d); HASH=$( ( export PATH="$T/bin:$PATH" SITE_ENV="$SITEOK"; . "$OPS/common.env.sh"; REL_NEW=/dummy/rel; sed "s#@REL_NEW@#$REL_NEW#" "$OPS/90-lab-0160a085-release.conf.template" | shasum -a 256 | cut -c1-64 ) )
 r=$( export PATH="$T/bin:$PATH" SITE_ENV="$SITEOK"; . "$OPS/common.env.sh"; REL_NEW=/dummy/rel; DROPIN90_SHA=$HASH; render_dropins "$rd" >/dev/null 2>&1; echo $? ); [ "$r" = 0 ] && grep -q '^WorkingDirectory=/dummy/rel$' "$rd/90-lab-0160a085-release.conf.rendered" && ok "v7 render_dropins renders the template for this host and accepts the reviewed hash" || bad "v7 render_dropins ($r)"
 r=$( export PATH="$T/bin:$PATH" SITE_ENV="$SITEOK"; . "$OPS/common.env.sh"; REL_NEW=/dummy/other; DROPIN90_SHA=$HASH; render_dropins "$rd" >/dev/null 2>&1; echo $? ); [ "$r" != 0 ] && ok "v7 a rendering that differs from the reviewed hash is refused" || bad "v7 render_dropins mismatch accepted"
-rm -rf "$rd" "$SITEOK" "$SITEOK.2" "$SITEOK.3" "$SITEOK.4"
+rm -rf "$rd" "$SITEOK" "$SITEOK.2" "$SITEOK.3" "$SITEOK.4" "$SITEOK.optional" "$SITEOK.duplicate"
 # swap-start renders and verifies the drop-ins again right before it installs them
 printf '%s\n' "$SSBLK" | awk '/render_dropins/{r=NR} /\$SUDO install .*conf.rendered/{i=NR} END{exit (r&&i&&r<i)?0:1}' && ok "v8 swap-start renders the drop-ins again right before the install" || bad "v8 render before install"
 # the repo must not name the host: tokens are assembled from fragments so that this file does not contain them either

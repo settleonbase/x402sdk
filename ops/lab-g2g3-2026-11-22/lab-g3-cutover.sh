@@ -20,6 +20,7 @@
 # PM's written approval number).
 # COPY: the read-only pre-WAL copy runs only with COPY_APPROVED=yes AND a non-empty COPY_APPROVAL_ID (logged); it is not a rollback path.
 set -u
+COPY_APPROVAL_ID_EXPECTED=""
 HERE=$(cd "$(dirname "$0")" && pwd); . "$HERE/common.env.sh"
 SV=$(site_verify) || { echo "site configuration: $SV" >&2; exit 1; }
 CMD=${1:-}; LOG=$W/g3-cutover.log
@@ -90,6 +91,73 @@ done
   fi
 }
 
+COPY_APPROVAL_MSG=""
+copy_approval_preflight(){
+  COPY_APPROVAL_MSG=""
+  [ "${COPY_APPROVED:-}" = yes ] || { COPY_APPROVAL_MSG="COPY_APPROVED must be yes"; return 1; }
+  [ -n "${COPY_APPROVAL_ID:-}" ] || { COPY_APPROVAL_MSG="COPY_APPROVAL_ID is required"; return 1; }
+  [ -n "${COPY_APPROVAL_ID_EXPECTED:-}" ] || { COPY_APPROVAL_MSG="COPY_APPROVAL_ID_EXPECTED is missing from the private site configuration"; return 1; }
+  [[ "$COPY_APPROVAL_ID" =~ ^[A-Za-z0-9._:-]+$ ]] || { COPY_APPROVAL_MSG="COPY_APPROVAL_ID has an invalid format"; return 1; }
+  [ "$COPY_APPROVAL_ID" = "$COPY_APPROVAL_ID_EXPECTED" ] || { COPY_APPROVAL_MSG="COPY_APPROVAL_ID does not match the private site expectation"; return 1; }
+}
+
+# Match envcheck.py merge semantics while returning only the requested key.
+# The private env contents and the resolved deny path are never logged.
+merged_env_value(){
+  local key=$1
+  $SUDO /usr/bin/python3 -I - "$ENV0" "$D6ENV" "$key" <<'PY'
+import sys
+merged = {}
+try:
+    for path in sys.argv[1:-1]:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                name, value = line.split('=', 1)
+                name = name.strip()
+                if name.startswith('export '):
+                    name = name[7:].strip()
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                merged[name] = value
+    value = merged.get(sys.argv[-1], '')
+    if not value:
+        print('ENV_VALUE_MISSING', file=sys.stderr)
+        raise SystemExit(2)
+    print(value)
+except Exception as exc:
+    print('ENV_VALUE_READ_ERROR ' + type(exc).__name__, file=sys.stderr)
+    raise SystemExit(3)
+PY
+}
+
+prepare_envcheck_inputs(){
+  local got
+  DENY_FILE=$(merged_env_value CONET_LAB_DENY_LIST_FILE) || { echo "envcheck deny path is unavailable in the merged private env" >&2; return 1; }
+  [ -n "$DENY_FILE" ] || { echo "envcheck deny path is empty" >&2; return 1; }
+  [ -f "$PUBKEYS_FILE" ] && [ ! -L "$PUBKEYS_FILE" ] || { echo "pinned pubkeys release file is missing or not regular" >&2; return 1; }
+  if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$PUBKEYS_FILE" | awk '{print $1}') || return 1
+  else got=$(shasum -a 256 "$PUBKEYS_FILE" | awk '{print $1}') || return 1; fi
+  [ "$got" = "$PINNED_PUBKEYS_SHA" ] || { echo "pinned pubkeys release SHA mismatch" >&2; return 1; }
+}
+
+run_envcheck(){
+  local phase=$1 output rc
+  output=$($SUDO env LAB_STATE_FILE="$(dirname "$SD")/payout-state.json" /usr/bin/python3 -I "$HELPER_DIR/envcheck.py" \
+    --env "$ENV0" --env "$D6ENV" --phase "$phase" --deny "$DENY_FILE" --pubkeys-sha "$PINNED_PUBKEYS_SHA" 2>&1)
+  rc=$?
+  printf '%s\n' "$output" | tee -a "$LOG"
+  [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$output" | tail -1)" = ENVCHECK_OK ]
+}
+
+envcheck_preflight(){
+  prepare_envcheck_inputs || return 1
+  run_envcheck run
+}
+
 preflight_state_hash(){
   local mj generation previous out="$W/pre-wal-source-preflight.sha256" err="$W/pre-wal-source-preflight.err" lines
   mj=$(manifest_json) || die_pre "pre-WAL source hash probe cannot read the manifest"
@@ -107,6 +175,7 @@ preflight_state_hash(){
 
 static_checks(){
   HV=$(helpers_verify) || die_pre "helper scripts are not the pinned reviewed ones: $HV"
+  envcheck_preflight || die_pre "envcheck input or phase=run check is not green before the stop"
   preflight_state_hash
   [ "$($SUDO sha256sum /etc/systemd/system/$DUNIT | cut -c1-64)" = "$UNIT_SHA" ] || die_pre "base unit hash"
   [ "$($SUDO sha256sum $OLD_DROP | cut -c1-64)" = "$OLD_DROP_SHA" ] || die_pre "df78e6b drop-in hash"
@@ -157,6 +226,7 @@ resume-check)
 status)
   echo "unit=$(systemctl is-active $DUNIT) NRestarts=$(systemctl show $DUNIT -p NRestarts --value)"; manifest_json; gate_run status; echo "$GATE_OUT" | tail -4; exit 0;;
 stop)
+  copy_approval_preflight || die_pre "$COPY_APPROVAL_MSG"
   : > "$LOG"; : > "$W/timings.txt"; T_ALL=$(date +%s)
   rm -f "$W/S1-OK" "$W/S1-DATA.txt" "$W/S1-DATA.env" "$W/m_stop.json" "$W/m_pre.json" "$W/t_stop.txt" "$W/stop-fingerprint.txt"   # C1: nothing of an earlier round survives into this one
   log "START g3 cutover phase STOP rev=$REV"
@@ -191,8 +261,12 @@ stop)
   seg phase-stop-total $T_ALL; REPORTED=1
   log "PHASE STOP DONE: Lab is STOPPED. Lab pays nothing until swap-start (or a decision to restart df78e6b by hand after the signer check)."; exit 0;;
 swap-start)
-  T_ALL=$(date +%s); log "START g3 cutover phase SWAP-START"
+  # Validate approval and all envcheck inputs before the drop-in, daemon-reload,
+  # copy, or any other production mutation.
+  copy_approval_preflight || die_pre "$COPY_APPROVAL_MSG"
   HV=$(helpers_verify) || die_pre "helper scripts are not the pinned reviewed ones (R2): $HV"
+  envcheck_preflight || die_pre "envcheck input or phase=run check is not green before the swap"
+  T_ALL=$(date +%s); log "START g3 cutover phase SWAP-START"
   [ -s "$W/S1-OK" ] && [ -s "$W/S1-DATA.env" ] || die_pre "no $W/S1-OK or no S1-DATA.env: the manual S1 check is not recorded (ruling 2)"
   # C1: strict format, one line, result=OK, and the three numbers equal the ones `stop` measured; anything else (e.g. 'MISMATCH ... do not proceed') never converts
   s1_ok_check "$W/S1-OK" "$W/S1-DATA.env" || die_pre "$S1_MSG; nothing was converted"
@@ -205,30 +279,29 @@ swap-start)
   gate_run preswap || in_place "gate before the swap is not exactly GATE_OK with INFLIGHT=no: $(printf '%s\n' "$GATE_OUT" | tail -2 | tr '\n' ' ')"
   M_STOP=$M_NOW; NP=$(mf "$M_STOP" pending); NC=$(mf "$M_STOP" consumed)
   CONVERT_STARTED=0
-  # optional read-only copy of the current state (second insurance, NOT a rollback path)
-  if [ "${COPY_APPROVED:-no}" = yes ]; then
-    [ -n "${COPY_APPROVAL_ID:-}" ] || in_place "COPY_APPROVED=yes without COPY_APPROVAL_ID"
-    T0=$(date +%s); CP=/var/tmp/lab-v2-pre-wal-$(date -u +%Y%m%dT%H%M%SZ); log "pre-WAL copy approved by: $COPY_APPROVAL_ID -> $CP"
-    GEN=$(mf "$M_STOP" generation); PREV=$(mf "$M_STOP" previousGeneration)
-    $SUDO install -d -m 0700 -o "$OPERATOR_USER" -g "$OPERATOR_USER" "$CP" || fail_after_stop "cannot create the pre-WAL copy directory"
-    $SUDO cp -a "$SD/manifest.json" "$CP/" && $SUDO cp -a "$SD/$GEN" "$CP/" && { [ -z "$PREV" ] || $SUDO cp -a "$SD/$PREV" "$CP/"; } || fail_after_stop "pre-WAL copy failed"
-    $SUDO chown -R "$OPERATOR_USER:$OPERATOR_USER" "$CP" || fail_after_stop "cannot assign the pre-WAL copy to the operator"
-    chmod -R go-rwx "$CP" || fail_after_stop "cannot restrict the pre-WAL copy permissions to the operator"
-    chmod -R a-w "$CP" || fail_after_stop "cannot make the pre-WAL copy read-only"
-    if ! state_tree_hashes user "$CP" "$GEN" "$PREV" > "$W/pre-wal-copy.sha256" 2> "$W/pre-wal-copy-hash.err"; then
-      fail_after_stop "pre-WAL copy hash/list failed: $(tail -3 "$W/pre-wal-copy-hash.err" | tr '\n' ' ')"
-    fi
-    [ -s "$W/pre-wal-copy.sha256" ] || fail_after_stop "pre-WAL copy hash/list is empty"
-    if ! state_tree_hashes sudo "$SD" "$GEN" "$PREV" > "$W/pre-wal-source.sha256" 2> "$W/pre-wal-source-hash.err"; then
-      fail_after_stop "pre-WAL source hash/list failed: $(tail -3 "$W/pre-wal-source-hash.err" | tr '\n' ' ')"
-    fi
-    [ -s "$W/pre-wal-source.sha256" ] || fail_after_stop "pre-WAL source hash/list is empty"
-    if ! diff -u "$W/pre-wal-copy.sha256" "$W/pre-wal-source.sha256" > "$W/pre-wal-diff.txt"; then
-      fail_after_stop "pre-WAL copy differs from the source or comparison failed (see pre-wal-diff.txt)"
-    fi
-    $SUDO /usr/bin/python3 -I "$HELPER_DIR/verify-state-digests-ro.py" $CP > "$W/digests-copy.txt" 2>&1; grep -qx 'RESULT ALL_DIGESTS_OK' "$W/digests-copy.txt" || fail_after_stop "verify-state-digests-ro on the copy is not ALL_DIGESTS_OK"
-    log "pre-WAL copy done: files=$(wc -l < "$W/pre-wal-copy.sha256") bytes=$(du -sb $CP | cut -f1)"; seg copy $T0
-  else log "pre-WAL copy SKIPPED (COPY_APPROVED not set to yes): rollback relies on the graceful downgrade and the offline tool only"; fi
+  # The approved read-only copy is required for this entry; missing approval
+  # was rejected before mutation above, so this block never silently skips.
+  T0=$(date +%s); CP=/var/tmp/lab-v2-pre-wal-$(date -u +%Y%m%dT%H%M%SZ); log "pre-WAL copy approved by: $COPY_APPROVAL_ID -> $CP"
+  GEN=$(mf "$M_STOP" generation); PREV=$(mf "$M_STOP" previousGeneration)
+  $SUDO install -d -m 0700 -o "$OPERATOR_USER" -g "$OPERATOR_USER" "$CP" || fail_after_stop "cannot create the pre-WAL copy directory"
+  $SUDO cp -a "$SD/manifest.json" "$CP/" && $SUDO cp -a "$SD/$GEN" "$CP/" && { [ -z "$PREV" ] || $SUDO cp -a "$SD/$PREV" "$CP/"; } || fail_after_stop "pre-WAL copy failed"
+  $SUDO chown -R "$OPERATOR_USER:$OPERATOR_USER" "$CP" || fail_after_stop "cannot assign the pre-WAL copy to the operator"
+  chmod -R go-rwx "$CP" || fail_after_stop "cannot restrict the pre-WAL copy permissions to the operator"
+  chmod -R a-w "$CP" || fail_after_stop "cannot make the pre-WAL copy read-only"
+  if ! state_tree_hashes user "$CP" "$GEN" "$PREV" > "$W/pre-wal-copy.sha256" 2> "$W/pre-wal-copy-hash.err"; then
+    fail_after_stop "pre-WAL copy hash/list failed: $(tail -3 "$W/pre-wal-copy-hash.err" | tr '\n' ' ')"
+  fi
+  [ -s "$W/pre-wal-copy.sha256" ] || fail_after_stop "pre-WAL copy hash/list is empty"
+  if ! state_tree_hashes sudo "$SD" "$GEN" "$PREV" > "$W/pre-wal-source.sha256" 2> "$W/pre-wal-source-hash.err"; then
+    fail_after_stop "pre-WAL source hash/list failed: $(tail -3 "$W/pre-wal-source-hash.err" | tr '\n' ' ')"
+  fi
+  [ -s "$W/pre-wal-source.sha256" ] || fail_after_stop "pre-WAL source hash/list is empty"
+  if ! diff -u "$W/pre-wal-copy.sha256" "$W/pre-wal-source.sha256" > "$W/pre-wal-diff.txt"; then
+    fail_after_stop "pre-WAL copy differs from the source or comparison failed (see pre-wal-diff.txt)"
+  fi
+  $SUDO /usr/bin/python3 -I "$HELPER_DIR/verify-state-digests-ro.py" "$CP" > "$W/digests-copy.txt" 2>&1 || fail_after_stop "verify-state-digests-ro on the copy failed"
+  grep -qx 'RESULT ALL_DIGESTS_OK' "$W/digests-copy.txt" || fail_after_stop "verify-state-digests-ro on the copy is not ALL_DIGESTS_OK"
+  log "pre-WAL copy done: files=$(wc -l < "$W/pre-wal-copy.sha256") bytes=$(du -sb "$CP" | cut -f1)"; seg copy $T0
   # drop-in swap and read-backs (the state is still plain version 2 here: a failure may roll back, B4 rule)
   T0=$(date +%s); log "DROP-IN SWAP (90 -> new release, 94 -> NODE_OPTIONS + WAL=1)"
   RD=$(render_dropins "$W") || fail_after_stop "drop-ins (rendered again right before the install): $RD"
@@ -242,7 +315,7 @@ swap-start)
   systemctl show $DUNIT -p Environment --value | tr ' ' '\n' | grep -qx 'NODE_OPTIONS=--max-old-space-size=1536' || fail_after_stop "NODE_OPTIONS readback"
   systemctl show $DUNIT -p Environment --value | tr ' ' '\n' | grep -qx 'CONET_LAB_MINING_POOL_CL_PAYOUT_WAL=1' || fail_after_stop "WAL readback"
   [ "$($SUDO sha256sum $D6ENV | cut -c1-64)" = "$ENV_SHA" ] || fail_after_stop "Lab env file changed"
-  $SUDO env LAB_STATE_FILE="$(dirname "$SD")/payout-state.json" /usr/bin/python3 -I "$HELPER_DIR/envcheck.py" --env "$ENV0" --env "$D6ENV" --phase run 2>&1 | tail -2 | tee -a "$LOG" | grep -q ENVCHECK_OK || fail_after_stop "envcheck run"
+  run_envcheck run || fail_after_stop "envcheck run after drop-in read-back"
   LAB_SIGNER_UNIT="$SIGNER_UNIT" LAB_CLAIM_UNIT="$CLAIM_UNIT" /usr/bin/python3 -I "$HELPER_DIR/gatecheck.py" --mem-floor-kb 3072000 --signer-restarts 0 --claim-restarts 0 2>&1 | tail -2 | tee -a "$LOG" | grep -q LABRUN_OK || fail_after_stop "gatecheck"
   /usr/bin/python3 -I "$HELPER_DIR/beaconhealth.py" --beacon "$BEACON_URL" 2>&1 | tail -1 | tee -a "$LOG" | grep -q BEACON_OK || fail_after_stop "beaconhealth"
   seg dropin-swap-and-readbacks $T0

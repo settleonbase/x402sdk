@@ -7,9 +7,11 @@
 SUDO="${SUDO:-sudo -n}"
 SITE_ENV="${SITE_ENV:-}"
 SITE_REQUIRED="DROPIN_A_NAME DROPIN_B_NAME DROPIN_C_NAME REL_BASE DUNIT DROPDIR D6ENV ENV0 SD LOC SVC_UID SVC_GID OPERATOR_USER W SIGNER_UNIT CLAIM_UNIT ORACLE_TIMER ORACLE_SERVICE BEACON_URL DROPIN90_SHA UNIT_SHA OLD_DROP_SHA D91_SHA D92_SHA D93_SHA ENV_SHA"
+SITE_OPTIONAL="COPY_APPROVAL_ID_EXPECTED"
+SITE_ALLOWED="$SITE_REQUIRED $SITE_OPTIONAL"
 SITE_MSG=""
 site_load() {
-  local st body line name val
+  local st body line name val seen_copy_approval=0
   SITE_MSG=""
   [ -n "$SITE_ENV" ] || { SITE_MSG="SITE_ENV is not set (see site.env.example)"; return 1; }
   st=$($SUDO stat -c '%U %a' "$SITE_ENV" 2>/dev/null) || { SITE_MSG="the site file cannot be examined"; return 1; }
@@ -22,7 +24,11 @@ site_load() {
     else
       SITE_MSG="a line of the site file is not NAME=value (no code is accepted)"; return 1
     fi
-    case " $SITE_REQUIRED " in *" $name "*) ;; *) SITE_MSG="the site file names $name, which is not a site value (fixed constants cannot be set from the site file)"; return 1;; esac
+    case " $SITE_ALLOWED " in *" $name "*) ;; *) SITE_MSG="the site file names $name, which is not a site value (fixed constants cannot be set from the site file)"; return 1;; esac
+    if [ "$name" = COPY_APPROVAL_ID_EXPECTED ]; then
+      [ "$seen_copy_approval" -eq 0 ] || { SITE_MSG="COPY_APPROVAL_ID_EXPECTED may occur only once"; return 1; }
+      seen_copy_approval=1
+    fi
     printf -v "$name" '%s' "$val"
   done <<< "$body"
   return 0
@@ -91,6 +97,8 @@ helpers_verify() {
 }
 ALT=https://mainnet.conet.network/api/eth-rpc
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PINNED_PUBKEYS_SHA=5aee231a3d9337cb6b65d6d4d0b39293fcdc475c89737d5ea147bace4cb2584d
+PUBKEYS_FILE="$OPS_DIR/../../deployments/conet-""lab-""mining-pool-pubkeys.json"
 # B1: the gate is true ONLY if the helper exits 0, its LAST line is exactly GATE_OK and it reports INFLIGHT=no. (The first drafts used `grep -q G`: GATE_STOP also contains a G, so the gate never stopped anything.)
 # usage: gate_run <label> [extra gate-value-ro.py args]; the helper output is kept in $W/gate-<label>.txt and in GATE_OUT.
 gate_run() {
