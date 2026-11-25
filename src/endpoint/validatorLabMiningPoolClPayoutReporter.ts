@@ -264,6 +264,11 @@ type SkimEntry = {
 	pubkey: string
 }
 
+type LabPayoutMode = 'scan-only' | 'payout'
+
+// Latched at startup; payout needs a deliberate configuration and process restart.
+let labMode: LabPayoutMode = 'scan-only'
+let latchedLabMode: LabPayoutMode | undefined
 let labStarted = false
 let labTimer: ReturnType<typeof setTimeout> | undefined
 let labInFlight = false
@@ -524,6 +529,14 @@ function loadPendingMap(state: LabClPayoutState): Map<string, SkimEntry> {
 	const map = new Map<string, SkimEntry>()
 	for (const raw of state.pending ?? []) {
 		const e = skimEntryFromJson(raw)
+		if (labMode === 'scan-only' && (!e || map.has(e.eventKey) ||
+			typeof raw.eventKey !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(raw.eventKey) ||
+			typeof raw.pubkey !== 'string' || !/^0x[0-9a-fA-F]{96}$/.test(raw.pubkey) ||
+			typeof raw.amount !== 'string' || !/^[1-9][0-9]*$/.test(raw.amount) ||
+			!Number.isSafeInteger(raw.blockNumber) || raw.blockNumber < 0 ||
+			!Number.isSafeInteger(raw.withdrawalIndex) || raw.withdrawalIndex < 0)) {
+			throw new Error('Lab scan-only refused invalid or duplicate persisted pending entry')
+		}
 		if (!e) continue
 		map.set(e.eventKey, e)
 	}
@@ -531,9 +544,18 @@ function loadPendingMap(state: LabClPayoutState): Map<string, SkimEntry> {
 }
 
 function persistPending(state: LabClPayoutState, pending: Map<string, SkimEntry>): void {
-	state.pending = [...pending.values()]
+	const ordered = [...pending.values()]
 		.sort((a, b) => a.blockNumber - b.blockNumber || a.withdrawalIndex - b.withdrawalIndex)
-		.map(skimEntryToJson)
+	if (labMode === 'scan-only') {
+		const retained = state.pending ?? []
+		const retainedKeys = new Set(retained.map((e) => e.eventKey.toLowerCase()))
+		for (const key of retainedKeys) {
+			if (!pending.has(key)) throw new Error('Lab scan-only refused removal of a persisted pending entry')
+		}
+		state.pending = retained.concat(ordered.filter((e) => !retainedKeys.has(e.eventKey)).map(skimEntryToJson))
+	} else {
+		state.pending = ordered.map(skimEntryToJson)
+	}
 	writeState(state)
 }
 
@@ -638,6 +660,13 @@ function labEnabled(): boolean {
 	return ['1', 'true', 'yes'].includes(String(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT || '').toLowerCase())
 }
 
+function resolveLabPayoutMode(): LabPayoutMode {
+	const mode = process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_MODE ?? 'scan-only'
+	if (mode !== 'scan-only' && mode !== 'payout') throw new Error('invalid Lab payout mode')
+	if (mode === 'payout' && labDryRun()) throw new Error('Lab payout mode conflicts with DRY_RUN')
+	return mode
+}
+
 function labDryRun(): boolean {
 	const v = (process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_DRY_RUN || process.env.CONET_VALIDATOR_DRY_RUN || '').trim().toLowerCase()
 	return v === '1' || v === 'true' || v === 'yes'
@@ -653,9 +682,26 @@ function readStateFromDisk(): LabClPayoutState {
 	const dir = resolveSegmentedStateDir()
 	const floor = resolveLabScanFloorBlock()
 	const dirStatus = inspectSegmentedDir(dir)
+	if (labMode === 'scan-only' && dirStatus !== 'committed') {
+		throw new Error('Lab scan-only requires existing committed V2 state')
+	}
 	if (dirStatus === 'committed') {
 		const state = readSegmentedState(dir) as unknown as LabClPayoutState
-		migrateLegacyStateFields(state)
+		if (labMode === 'scan-only') {
+			const freeze = state.freezeH
+			const history = state.historyCursor
+			const realtime = state.realtimeCursor
+			if (!freeze || !Number.isSafeInteger(freeze.height) || freeze.height < 0 ||
+				typeof freeze.hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(freeze.hash) ||
+				history == null || !Number.isSafeInteger(history) || history < 0 || history > freeze.height ||
+				realtime == null || !Number.isSafeInteger(realtime) || realtime < freeze.height ||
+				!Number.isSafeInteger(state.lastBackfillProcessedBlock) || state.lastBackfillProcessedBlock < 0) {
+				throw new Error('Lab scan-only requires existing valid dual cursors and freeze anchor')
+			}
+			loadPendingMap(state)
+		} else {
+			migrateLegacyStateFields(state)
+		}
 		// Startup cursor guard: a stored cursor below its persisted high-water mark means a rollback; refuse to start.
 		const hw = state.cursorHighWater
 		if (hw) {
@@ -720,7 +766,7 @@ function initLabSessionState(): LabClPayoutState {
 	sessionBackfillFloor = resolveSessionBackfillFloor(state)
 	// R1: a scan floor above the history seed would silently skip blocks between them. Refuse to start instead.
 	assertNoSkippedHistory(resolveLabScanFloorBlock(), state.lastBackfillProcessedBlock)
-	alignBackfillCursorForSession(state, sessionBackfillFloor)
+	if (labMode === 'payout') alignBackfillCursorForSession(state, sessionBackfillFloor)
 	writeState(state)
 	return state
 }
@@ -765,7 +811,7 @@ function writeStateOrThrow(state: LabClPayoutState): void {
 		backfill: Math.max(hw.backfill ?? -1, state.lastBackfillProcessedBlock ?? -1),
 		listen: Math.max(hw.listen ?? -1, state.lastListeningEndBlock ?? -1),
 	}
-	const pruned = pruneConsumedEventKeys(state)
+	const pruned = labMode === 'payout' ? pruneConsumedEventKeys(state) : 0
 	// Cap hits every flush; avoid journal spam (log only large prunes).
 	if (pruned >= 1_000) {
 		logger(
@@ -775,7 +821,7 @@ function writeStateOrThrow(state: LabClPayoutState): void {
 		)
 	}
 	// Streamed, segmented write. The whole state is never JSON.stringify'd as one string.
-	writeSegmentedState(dir, state)
+	writeSegmentedState(dir, state, { retainInFlightBlobs: labMode === 'scan-only' })
 }
 
 function loadManifestIfNeeded(force = false): boolean {
@@ -1041,6 +1087,7 @@ function makeLabLifecycleDeps(
 		stopBeforeSend: () => shouldStopAfterSettled(state.settledBatchCount ?? 0, resolveMaxSettledBatches()),
 		halt: (code, reason) => haltDaemon(state, pending, code, reason),
 		send: async (rec) => {
+			if (labMode !== 'payout' || labDryRun()) throw new Error('Lab no-send mode blocks signer transport')
 			// One send. No recovery and no retry here: the lifecycle holds an unknown outcome (B-2).
 			const sent = await sendConfiguredLabWithdrawNative({
 				redeem: rec.redeem,
@@ -1147,6 +1194,8 @@ async function flushPendingLabBatches(
 	state: LabClPayoutState,
 	pending: Map<string, SkimEntry>
 ): Promise<void> {
+	// No flush preparation, recovery, settlement, retry or send in scan-only.
+	if (labMode !== 'payout' || labDryRun()) return
 	if (!pending.size && !state.inFlightWithdraw) {
 		if (clearGasWait(state)) persistPending(state, pending)
 		return
@@ -1638,20 +1687,26 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 		logger(Colors.yellow('[labMiningPoolClPayout] disabled (set CONET_LAB_MINING_POOL_CL_PAYOUT=1)'))
 		return
 	}
+	const mode = latchedLabMode ?? resolveLabPayoutMode()
+	if (mode === 'payout' && labDryRun()) throw new Error('Lab payout mode conflicts with DRY_RUN')
 	if (!loadManifestIfNeeded(true)) return
+	if (mode === 'scan-only' && inspectSegmentedDir(resolveSegmentedStateDir()) !== 'committed') {
+		throw new Error('Lab scan-only requires existing committed V2 state')
+	}
+	labMode = latchedLabMode = mode
 	// Refuses to start when another live process holds the state dir (throws, daemon exits).
 	assertPinnedRedeem(process.env.CONET_VALIDATOR_DEPOSIT_REDEEM, CONET_VALIDATOR_DEPOSIT_REDEEM)
 	labStateLock = acquireStateDirLock(resolveSegmentedStateDir())
 	labSessionState = initLabSessionState()
 	// Start check: a one-shot limit already reached exits cleanly before the first tick.
-	if (shouldStopAfterSettled(labSessionState.settledBatchCount ?? 0, resolveMaxSettledBatches())) {
+	if (labMode === 'payout' && shouldStopAfterSettled(labSessionState.settledBatchCount ?? 0, resolveMaxSettledBatches())) {
 		logger(Colors.cyan('[labMiningPoolClPayout] MAX_SETTLED_BATCHES already reached at start; exiting 0 before any tick'))
 		process.exit(0)
 	}
 	labStarted = true
 	logger(
 		Colors.cyan(
-			`[labMiningPoolClPayout] starting dual-cursor+withdrawNative pubkeys=${labPubkeySet.size} tick=${resolveTickMs()}ms ` +
+			`[labMiningPoolClPayout] starting dual-cursor mode=${labMode} pubkeys=${labPubkeySet.size} tick=${resolveTickMs()}ms ` +
 				`${startupConfigLine()} ` +
 				`realtimeReserved=${resolveRealtimeReservedBatches()} ` +
 				`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} txWaitTimeoutMs=${resolveTxWaitTimeoutMs()} pendingPool=on`
@@ -1673,6 +1728,7 @@ export function stopValidatorLabMiningPoolClPayoutReporter(): void {
 
 /** Persist listening checkpoint before process exit (next restart backfills from lastListeningEndBlock+1). */
 export async function flushLabMiningPoolListeningCheckpoint(): Promise<void> {
+	if (!labStateLock) return
 	try {
 		const state = labSessionState ?? readStateFromDisk()
 		const provider = createLabRpcProvider()

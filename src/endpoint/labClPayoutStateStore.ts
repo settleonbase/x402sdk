@@ -91,6 +91,8 @@ export type WriteHooks = {
 }
 
 export type WriteOptions = {
+	/** Scan-only must preserve pre-existing non-current in-flight evidence. */
+	retainInFlightBlobs?: boolean
 	segmentSize?: number
 	hooks?: WriteHooks
 	now?: Date
@@ -632,7 +634,7 @@ export function commitGeneration(prepared: PreparedGeneration, opts: WriteOption
 	fsyncDirBestEffort(dir)
 	const keep: Array<string | null> = [generation, toCommit.previousGeneration]
 	const removed = pruneGenerations(dir, keep)
-	pruneInFlightBlobs(dir, toCommit.inFlightKeys?.id ?? null)
+	if (!opts.retainInFlightBlobs) pruneInFlightBlobs(dir, toCommit.inFlightKeys?.id ?? null)
 	return { generation, previousGeneration: toCommit.previousGeneration, removed }
 }
 
