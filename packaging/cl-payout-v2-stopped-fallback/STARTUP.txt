@@ -1,0 +1,17 @@
+STOPPED PAYMENT FALLBACK CANDIDATE — NOT A PAYMENT SERVICE
+
+This package always parks the CL payout reporter. It requires an existing absolute
+CONET_VALIDATOR_CL_REWARD_PAYOUT_STATE_FILE, validates the supported state format,
+persists signerControl.stop=true when needed, holds the existing writer lease, and
+starts no scan, payout, RPC, or signer workers. SIGTERM/SIGINT drains and releases
+the lease. It never reads the ordinary RPC URL or payout-enable switches.
+
+Start only with the package-local WebSocket-ban preload:
+  node -r ./signer/dist/src/noWebSocket.js ./resident-entry.mjs
+
+This is a local fallback candidate, not deployment approval or a healthy-payment
+service. Its writer lease prevents another cooperating package instance from
+starting while parked. The persistent STOP field makes older strict readers reject
+the upgraded state. A legacy single-cursor file is migrated to v2 only after strict
+validation and a semantic pending-row preservation check. Files above the fixed
+320 MiB read cap are refused before any state write.

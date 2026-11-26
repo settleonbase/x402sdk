@@ -3681,6 +3681,149 @@ export function startValidatorClRewardPayoutReporter(): void {
 	}
 }
 
+/**
+ * Hard-off resident for a stopped-payment fallback package. It takes the existing
+ * cross-process writer lease, validates the exact persisted schema, sets the
+ * durable STOP bit (migrating only the supported legacy schema), and keeps the
+ * lease for its lifetime. It never starts scan or payout workers and does not
+ * consult payment-enable or RPC environment variables.
+ */
+export function startStoppedPaymentFallback(): 'STOP_ALREADY_TRUE' | 'STOP_PERSISTED' | 'LEGACY_MIGRATED_AND_STOPPED' {
+	if (payoutStarted || reporterStopping || reporterStopPromise || residentStateWriterLease || activeStateWriterLease || stateWriteUncertain) {
+		throw new Error('STOPPED_FALLBACK_STATE_WRITER_ALREADY_ACTIVE')
+	}
+	const file = resolveStateFile()
+	const lease = acquireStateWriterLease(file)
+	residentStateWriterLease = lease
+	activeStateWriterLease = lease
+	let writeStarted = false
+	try {
+		assertStateWriterLeaseCurrent()
+		const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+		let text: Buffer
+		try {
+			const before = fs.fstatSync(fd)
+			// Covers the documented 261 MB ledger size with headroom while bounding
+			// JSON parse/stringify memory use. Larger files fail closed before write.
+			const maxBytes = 320 * 1024 * 1024
+			if (!before.isFile() || before.nlink !== 1 || before.size < 2) {
+				throw new Error('STOPPED_FALLBACK_STATE_FILE_METADATA_INVALID')
+			}
+			if (before.size > maxBytes) throw new Error('STOPPED_FALLBACK_STATE_FILE_TOO_LARGE')
+			const buffer = Buffer.alloc(before.size + 1)
+			let length = 0
+			while (length < buffer.length) {
+				const count = fs.readSync(fd, buffer, length, buffer.length - length, null)
+				if (count === 0) break
+				length += count
+			}
+			const after = fs.fstatSync(fd)
+			if (length !== before.size || after.dev !== before.dev || after.ino !== before.ino ||
+				after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs ||
+				after.mode !== before.mode || after.uid !== before.uid || after.nlink !== before.nlink) {
+				throw new Error('STOPPED_FALLBACK_STATE_FILE_CHANGED_DURING_READ')
+			}
+			text = buffer.subarray(0, length)
+		} finally {
+			fs.closeSync(fd)
+		}
+		assertStateWriterLeaseCurrent()
+		let raw: unknown
+		try {
+			raw = JSON.parse(text.toString('utf8'))
+		} catch {
+			throw new Error('STOPPED_FALLBACK_STATE_PARSE_FAILED')
+		}
+		const floor = Math.max(-1, resolveDeployBlockFloor() - 1)
+		assertLoadableState(raw, floor)
+		if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('STOPPED_FALLBACK_STATE_ROOT_INVALID')
+		const original = raw as Record<string, unknown>
+		let next: DualCursorState
+		let result: 'STOP_ALREADY_TRUE' | 'STOP_PERSISTED' | 'LEGACY_MIGRATED_AND_STOPPED'
+		if (original.version === undefined) {
+			const legacy = original as LegacyClPayoutState
+			const migratedBase = migrateLegacyToDualCursor(legacy, resolveDeployBlockFloor())
+			const migrated: DualCursorState = {
+				...migratedBase,
+				...(legacy.firstBatchSettledWei !== undefined ? { firstBatchSettledWei: legacy.firstBatchSettledWei } : {}),
+				...(legacy.gasWaitStartedAt !== undefined ? { gasWaitStartedAt: legacy.gasWaitStartedAt } : {}),
+				...(legacy.updatedAt !== undefined ? { updatedAt: legacy.updatedAt } : {}),
+				...(legacy.scanTargetBlock !== undefined ? { scanTargetBlock: legacy.scanTargetBlock } : {}),
+			}
+			const oldPending = Array.isArray(original.pending) ? original.pending as Array<Record<string, unknown>> : []
+			const pendingPreserved = migrated.pending.length === oldPending.length && oldPending.every((row, index) => {
+				const nextRow = migrated.pending[index]
+				try {
+					return BigInt(String(row.guardianId)) === BigInt(nextRow.guardianId) &&
+						BigInt(String(row.amount)) === BigInt(nextRow.amount) &&
+						String(row.eventKey).toLowerCase() === nextRow.eventKey.toLowerCase() &&
+						Number(row.blockNumber) === nextRow.blockNumber &&
+						Number(row.withdrawalIndex) === nextRow.withdrawalIndex &&
+						(row.scanLine ?? 'historical') === (nextRow.scanLine ?? 'historical') &&
+						(row.enqueuedAtMs === undefined || row.enqueuedAtMs === nextRow.enqueuedAtMs)
+				} catch {
+					return false
+				}
+			})
+			if (!pendingPreserved) {
+				throw new Error('STOPPED_FALLBACK_LEGACY_PENDING_MISMATCH')
+			}
+			if ((original.firstBatchSettledWei !== undefined && migrated.firstBatchSettledWei !== original.firstBatchSettledWei) ||
+				(original.gasWaitStartedAt !== undefined && migrated.gasWaitStartedAt !== original.gasWaitStartedAt) ||
+				(original.updatedAt !== undefined && migrated.updatedAt !== original.updatedAt) ||
+				(original.scanTargetBlock !== undefined && migrated.scanTargetBlock !== original.scanTargetBlock)) {
+				throw new Error('STOPPED_FALLBACK_LEGACY_PAYLOAD_MISMATCH')
+			}
+			next = { ...migrated, signerControl: { stop: true } }
+			result = 'LEGACY_MIGRATED_AND_STOPPED'
+		} else {
+			const control = original.signerControl as SignerControlState | undefined
+			if (control?.stop === true) {
+				next = original as unknown as DualCursorState
+				result = 'STOP_ALREADY_TRUE'
+			} else {
+				next = {
+					...(original as unknown as DualCursorState),
+					signerControl: { ...(control ?? {}), stop: true },
+				}
+				result = 'STOP_PERSISTED'
+			}
+		}
+		if (result !== 'STOP_ALREADY_TRUE') {
+			assertLoadableState(next, floor)
+			writeStarted = true
+			atomicWriteState(file, next)
+			lease.updateLedgerIdentity()
+			stateCache = { file, state: next }
+			reporterCacheVersion += 1
+			reporterCacheHasDurableWriteProof = true
+			invalidatePreaggregatedProjection('stopped-fallback-commit')
+		}
+		residentWriterAcceptingMutations = false
+		return result
+	} catch (error) {
+		if (writeStarted || error instanceof StateWriteUncertainError) {
+			stateWriteUncertain = error instanceof StateWriteUncertainError
+				? error
+				: new StateWriteUncertainError('stopped fallback commit uncertain; writer lease retained', true, { cause: error })
+			residentStateWriterLease = lease
+			residentWriterAcceptingMutations = false
+			throw stateWriteUncertain
+		}
+		try {
+			lease.release()
+			residentStateWriterLease = null
+		} catch (releaseError) {
+			stateWriteUncertain = new StateWriteUncertainError('stopped fallback refusal; lease release uncertain', false, { cause: releaseError })
+			residentStateWriterLease = lease
+			throw stateWriteUncertain
+		}
+		throw error
+	} finally {
+		activeStateWriterLease = null
+	}
+}
+
 export async function stopValidatorClRewardPayoutReporter(): Promise<void> {
 	if (reporterStopPromise) return reporterStopPromise
 	reporterStopping = true
