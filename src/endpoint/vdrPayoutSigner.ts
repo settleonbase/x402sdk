@@ -1,4 +1,5 @@
 import { request as httpRequest } from 'node:http'
+import type { IncomingMessage } from 'node:http'
 import { ethers } from 'ethers'
 
 /** Live reporter settle signature. View calls are not signed. */
@@ -41,8 +42,62 @@ export type VdrSignerTx = {
 	idempotencyKey: string
 }
 
-type RpcError = { code?: number; message?: string }
-type RpcBody = { result?: { hash?: unknown }; error?: RpcError }
+export class SignerOutcomeUnknownError extends Error {
+	constructor(reason: string) {
+		super(`signer outcome unknown: ${reason}`)
+		this.name = 'SignerOutcomeUnknownError'
+	}
+}
+
+/** Parse only a complete, correlated JSON-RPC success. Any other reply may follow an accepted send. */
+export function parseSignerSendResponse(raw: string): { hash: string } {
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(raw)
+	} catch {
+		throw new SignerOutcomeUnknownError('malformed_json')
+	}
+	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new SignerOutcomeUnknownError('invalid_shape')
+	const body = parsed as Record<string, unknown>
+	if (body.jsonrpc !== '2.0' || body.id !== 1) throw new SignerOutcomeUnknownError('uncorrelated_response')
+	if (Object.hasOwn(body, 'error')) throw new SignerOutcomeUnknownError('rpc_error')
+	if (!body.result || typeof body.result !== 'object' || Array.isArray(body.result)) throw new SignerOutcomeUnknownError('missing_result')
+	const hash = (body.result as Record<string, unknown>).hash
+	if (typeof hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(hash)) throw new SignerOutcomeUnknownError('invalid_tx_hash')
+	return { hash }
+}
+
+/** Settle one complete HTTP response; disconnects and partial replies stay UNKNOWN. */
+export function readSignerHttpResponse(res: IncomingMessage): Promise<{ hash: string }> {
+	return new Promise((resolve, reject) => {
+		let settled = false
+		const chunks: Buffer[] = []
+		const fail = (reason: string) => {
+			if (settled) return
+			settled = true
+			reject(new SignerOutcomeUnknownError(reason))
+		}
+		res.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)))
+		res.on('aborted', () => fail('response_aborted'))
+		res.on('error', () => fail('response_error'))
+		res.on('end', () => {
+			if (res.statusCode === undefined || res.statusCode < 200 || res.statusCode >= 300) {
+				fail('http_status_unknown')
+				return
+			}
+			let result: { hash: string }
+			try {
+				result = parseSignerSendResponse(Buffer.concat(chunks).toString('utf8'))
+			} catch (error) {
+				fail(error instanceof SignerOutcomeUnknownError ? error.message.replace(/^signer outcome unknown: /, '') : 'response_parse_error')
+				return
+			}
+			if (settled) return
+			settled = true
+			resolve(result)
+		})
+	})
+}
 
 export function readVdrSignerConfig(
 	env: NodeJS.ProcessEnv = process.env
@@ -110,10 +165,10 @@ export function signerSendOnce(tx: VdrSignerTx, socketPath: string): Promise<{ h
 	})
 	return new Promise((resolve, reject) => {
 		let settled = false
-		const fail = (message: string) => {
+		const fail = (reason: string) => {
 			if (settled) return
 			settled = true
-			reject(new Error(message))
+			reject(new SignerOutcomeUnknownError(reason))
 		}
 		const req = httpRequest(
 			{
@@ -125,39 +180,14 @@ export function signerSendOnce(tx: VdrSignerTx, socketPath: string): Promise<{ h
 					'content-length': Buffer.byteLength(body),
 				},
 			},
-			(res) => {
-				const chunks: Buffer[] = []
-				res.on('data', (chunk: Buffer) => chunks.push(chunk))
-				res.on('end', () => {
-					let parsed: RpcBody
-					try {
-						parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as RpcBody
-					} catch {
-						fail('signer response was not JSON')
-						return
-					}
-					if (parsed.error) {
-						fail(parsed.error.message || 'signer refused')
-						return
-					}
-					const hash = parsed.result?.hash
-					if (typeof hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
-						fail('signer response had no transaction hash')
-						return
-					}
-					if (settled) return
-					settled = true
-					resolve({ hash })
-				})
-			}
+			(res) => { void readSignerHttpResponse(res).then(resolve, reject) }
 		)
 		req.setTimeout(60_000, () => {
+			fail('request_timeout')
 			req.destroy()
-			fail('signer socket timed out')
 		})
-		req.on('error', (err: NodeJS.ErrnoException) => {
-			fail(`signer socket failed: ${err.message}`)
-		})
+		req.on('error', () => fail('request_error'))
+		req.on('abort', () => fail('request_aborted'))
 		req.end(body)
 	})
 }

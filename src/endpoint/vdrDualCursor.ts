@@ -63,6 +63,22 @@ export type SettleIntent = {
 	note?: string
 }
 
+export type SignerPermitState = {
+	id: string
+	status: 'available' | 'consumed'
+	intentId: string
+	idempotencyKey: string
+	requestFingerprint: string
+	replaces?: {
+		idempotencyKey: string
+		txHash: string
+		requestFingerprint: string
+	}
+}
+
+/** Optional durable signer control. Missing state is fail-closed. */
+export type SignerControlState = { stop: boolean; permit?: SignerPermitState }
+
 /** Inclusive block range [from, to] that the realtime line already scanned and committed under an earlier boundary. */
 export type RealtimeSpan = { from: number; to: number }
 
@@ -108,6 +124,7 @@ export type DualCursorState = {
 	realtimeCursor: number
 	pending: PendingEntryJson[]
 	settleIntents: SettleIntent[]
+	signerControl?: SignerControlState
 	gasWaitStartedAt?: string
 	/**
 	 * Cumulative wei successfully settled under first-batch CAP_B (persists across restart).
@@ -137,6 +154,7 @@ export type LegacyClPayoutState = {
 	historicalCursor?: number
 	realtimeCursor?: number
 	settleIntents?: SettleIntent[]
+	signerControl?: SignerControlState
 	metrics?: DualCursorMetrics
 }
 
@@ -245,6 +263,7 @@ export function migrateLegacyToDualCursor(
 			realtimeCursor: rtCursor,
 			pending: pending.filter(Boolean) as PendingEntryJson[],
 			settleIntents: Array.isArray(raw.settleIntents) ? raw.settleIntents : [],
+			signerControl: raw.signerControl as SignerControlState | undefined,
 			gasWaitStartedAt:
 				typeof raw.gasWaitStartedAt === 'string' && raw.gasWaitStartedAt.trim()
 					? raw.gasWaitStartedAt.trim()
@@ -620,6 +639,7 @@ export function splitEntriesForFlush(
 /**
  * Single-payer scheduling: realtime batches first up to quota, then at least
  * historicalFloor historical batches so history never starves.
+ * Caller must pass a state whose open-intent-owned pending keys were filtered first.
  */
 export function planFlushOrder(
 	state: DualCursorState,
@@ -719,11 +739,13 @@ export function prepareSettleIntent(input: {
 }
 
 export function attachIntentToState(state: DualCursorState, intent: SettleIntent): DualCursorState {
-	// Same key only: a replaced intent with the same fingerprint stays as an audit record (see markIntentReplacedFailed).
-	const others = state.settleIntents.filter((i) => i.idempotencyKey !== intent.idempotencyKey)
+	// Existing IDs are never overwritten automatically. Even a failed intent requires an explicit recovery decision.
+	if (state.settleIntents.some((i) => i.idempotencyKey === intent.idempotencyKey)) {
+		throw new Error('SETTLE_INTENT_IDEMPOTENCY_CONFLICT')
+	}
 	return {
 		...state,
-		settleIntents: [...others, intent],
+		settleIntents: [...state.settleIntents, intent],
 		updatedAt: new Date().toISOString(),
 	}
 }
@@ -926,29 +948,53 @@ export function recordRealtimeLatency(state: DualCursorState, samplesMs: number[
 	}
 }
 
-/** Crash-safe persist: write temp → fsync → rename. */
+export class StateWriteUncertainError extends Error {
+	readonly renamed: boolean
+
+	constructor(message: string, renamed: boolean, options?: ErrorOptions) {
+		super(message, options)
+		this.name = 'StateWriteUncertainError'
+		this.renamed = renamed
+	}
+}
+
+/** Persist intent/state bytes, refusing to report success if file or directory durability is unknown. */
 export function atomicWriteState(filePath: string, state: DualCursorState): void {
 	const dir = path.dirname(filePath)
 	fs.mkdirSync(dir, { recursive: true })
 	const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`
-	const body = JSON.stringify(state, null, 2) + '\n'
-	const fd = fs.openSync(tmp, 'w')
+	const body = Buffer.from(JSON.stringify(state, null, 2) + '\n', 'utf8')
+	let fd: number | undefined
+	let tempCreated = false
+	let renamed = false
 	try {
-		fs.writeSync(fd, body)
+		fd = fs.openSync(tmp, 'wx')
+		tempCreated = true
+		const written = fs.writeSync(fd, body, 0, body.length, null)
+		if (written !== body.length) throw new Error(`short state write: ${written}/${body.length}`)
 		fs.fsyncSync(fd)
-	} finally {
 		fs.closeSync(fd)
-	}
-	fs.renameSync(tmp, filePath)
-	try {
+		fd = undefined
+		fs.renameSync(tmp, filePath)
+		renamed = true
 		const dirFd = fs.openSync(dir, 'r')
 		try {
 			fs.fsyncSync(dirFd)
 		} finally {
 			fs.closeSync(dirFd)
 		}
-	} catch {
-		/* some FS ignore dir fsync */
+	} catch (error) {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd) } catch { /* preserve the original write error */ }
+		}
+		if (tempCreated && !renamed) {
+			try { fs.unlinkSync(tmp) } catch { /* best-effort cleanup of this call's exclusive temp */ }
+		}
+		throw new StateWriteUncertainError(
+			`state write durability uncertain (renamed=${renamed})`,
+			renamed,
+			{ cause: error }
+		)
 	}
 }
 

@@ -34,8 +34,13 @@ let stopping = false;
 const stopAll = () => {
 	if (stopping) return;
 	stopping = true;
-	reporter.stopValidatorClRewardPayoutReporter();
-	setTimeout(() => process.exit(0), 1500);
+	const forcedExit = setTimeout(() => process.exit(2), 1500);
+	void reporter.stopValidatorClRewardPayoutReporter().then(() => {
+		clearTimeout(forcedExit);
+		process.exit(0);
+	}, () => {
+		process.exit(2);
+	});
 };
 process.on('SIGTERM', stopAll);
 process.on('SIGINT', stopAll);
