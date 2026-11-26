@@ -31,7 +31,7 @@
  * Pending pool + gas gate (aligned with validatorClRewardPayoutReporter):
  *   - Scanned skim entries merge into a persisted pending pool; scan checkpoint advances without settle.
  *   - Flush when eth_gasPrice ≤ max (default 2 gwei); failed batches stay in pending.
- *   - If gas stays above max longer than force-wait (default 3 min), flush at live gasPrice anyway.
+ *   - Above-cap gas remains pending; there is no automatic force-flush bypass.
  *
  * State format v2 (labClPayoutStateStore.ts): segmented directory "<stateFile without .json>.v2".
  *   - Reads fail closed. A verification error throws. An existing file never becomes an empty state.
@@ -88,6 +88,7 @@ import { partitionByGuardianBeneficiary } from './labFlushGuardian'
 import { mapWithConcurrency, resolveReadConcurrency, settle } from './labParallel'
 import { selectFlushCandidates } from './labFlushSelect'
 import {
+	assertSegmentedCommitFenceClear,
 	inspectSegmentedDir,
 	legacyStateFileExists,
 	readSegmentedState,
@@ -97,7 +98,6 @@ import {
 import {
 	assertPinnedRedeem,
 	gasLimitFromEnv,
-	gasWaitForceFromEnv,
 	maxGasWeiFromEnv,
 	startupConfigLine,
 } from './labStartupConfig'
@@ -113,6 +113,8 @@ import {
 
 /** Fixed lane for Lab executor payouts (signer EOA is opaque behind socket). */
 const LAB_MINING_POOL_ONCHAIN_LANE = 'lab-mining-pool-executor-payout'
+/** No approved lifetime send-budget value is currently bound to this candidate. Keep payout fail-closed. */
+const LAB_PAYOUT_TOTAL_SEND_ATTEMPT_HARD_CAP: number | null = null
 
 function resolveLabRpcUrl(): string {
 	return (
@@ -126,12 +128,6 @@ function resolveLabRpcUrl(): string {
 function resolveRpcHttpTimeoutMs(): number {
 	const n = Number(process.env.CONET_RPC_HTTP_TIMEOUT_MS || 30_000)
 	return Number.isFinite(n) && n >= 5_000 ? Math.min(300_000, Math.floor(n)) : 30_000
-}
-
-/** Max wait for a single withdrawNative receipt after signer broadcast. */
-function resolveTxWaitTimeoutMs(): number {
-	const n = Number(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_TX_WAIT_MS || 120_000)
-	return Number.isFinite(n) && n >= 15_000 ? Math.min(600_000, Math.floor(n)) : 120_000
 }
 
 function createLabRpcProvider(): ethers.JsonRpcProvider {
@@ -156,30 +152,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 			}
 		)
 	})
-}
-
-/**
- * Wait for a signer-broadcast hash with a hard deadline.
- * On timeout leave entries in pending (caller must not mark consumed).
- * NOTE: withdrawNative does not set consumedRewardEventKey.
- * Lab consumption is the local consumedEventKeys map plus a confirmed signer receipt.
- */
-async function waitForSignerReceiptByHash(
-	provider: ethers.JsonRpcProvider,
-	hash: string,
-	timeoutMs: number
-): Promise<ethers.TransactionReceipt> {
-	const started = Date.now()
-	while (Date.now() - started < timeoutMs) {
-		try {
-			const receipt = await provider.getTransactionReceipt(hash)
-			if (receipt) return receipt
-		} catch {
-			/* retry */
-		}
-		await new Promise((resolve) => setTimeout(resolve, 1_500))
-	}
-	throw new Error(`signer tx receipt timed out hash=${hash}`)
 }
 
 /** The Lab redeem is pinned (round-4 F5). The env override is checked at startup, not used. */
@@ -247,6 +219,9 @@ type LabClPayoutState = {
 	gasWaitStartedAt?: string
 	/** Settled withdrawNative batches (persisted). Used by the optional one-shot limit MAX_SETTLED_BATCHES. */
 	settledBatchCount?: number
+	/** Lifetime signer-call budget. Missing legacy values mean UNKNOWN and disable new sends. */
+	labPayoutSendAttempts?: number
+	labPayoutSendAttemptLimit?: number
 	/** Monotonic high-water of the persisted cursors. A write or a startup below it is refused (cursor guard). */
 	cursorHighWater?: { backfill?: number; listen?: number }
 	/** withdrawNative batch composed and not yet settled (B-2). Written before the signer is asked to send. */
@@ -339,11 +314,6 @@ function resolveMaxGasPriceWei(): bigint {
 	return maxGasWeiFromEnv(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_MAX_GAS_PRICE_WEI, process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_MAX_GAS_PRICE_GWEI).value
 }
 
-/** After this many ms waiting on high gas, force flush at live gasPrice (default 3 min). */
-function resolveGasWaitForceMs(): number {
-	return gasWaitForceFromEnv(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_GAS_WAIT_FORCE_MS).value
-}
-
 /** Same default and ceiling as the running legacy resolveWithdrawGasLimit. */
 function resolvePayoutGasLimit(): number {
 	return gasLimitFromEnv(process.env.CONET_LAB_MINING_POOL_CL_PAYOUT_GAS_LIMIT).value
@@ -402,10 +372,12 @@ function noteSettledBatch(state: LabClPayoutState): void {
 
 function haltDaemon(state: LabClPayoutState, pending: Map<string, SkimEntry>, code: number, reason: string): void {
 	logger(Colors.red(`[labMiningPoolClPayout] HALT (exit ${code}): ${reason}`))
-	try {
-		persistPending(state, pending)
-	} catch {
-		/* the state was already persisted by the lifecycle write; exit regardless */
+	if (!labGate.tripped) {
+		try {
+			persistPending(state, pending)
+		} catch {
+			/* the state was already persisted by the lifecycle write; exit regardless */
+		}
 	}
 	stopValidatorLabMiningPoolClPayoutReporter()
 	process.exit(code)
@@ -479,23 +451,25 @@ function clearGasWait(state: LabClPayoutState): boolean {
 	return true
 }
 
-function formatWaitCountdown(elapsedMs: number, forceMs: number): string {
-	const leftMs = Math.max(0, forceMs - elapsedMs)
-	const elapsedSec = Math.floor(elapsedMs / 1000)
-	const leftSec = Math.ceil(leftMs / 1000)
-	const forceSec = Math.floor(forceMs / 1000)
-	return `${elapsedSec}s/${forceSec}s (force in ${leftSec}s)`
-}
-
 async function readGasPriceWei(provider: ethers.JsonRpcProvider): Promise<bigint> {
+	let fee: ethers.FeeData | null = null
 	try {
-		const fee = await provider.getFeeData()
-		if (fee.gasPrice != null && fee.gasPrice > 0n) return fee.gasPrice
-		if (fee.maxFeePerGas != null && fee.maxFeePerGas > 0n) return fee.maxFeePerGas
+		fee = await provider.getFeeData()
 	} catch {
-		/* fall through */
+		// A transport failure may use the explicit eth_gasPrice fallback below.
 	}
-	const hex = (await provider.send('eth_gasPrice', [])) as string
+	if (fee) {
+		for (const candidate of [fee.gasPrice, fee.maxFeePerGas]) {
+			if (candidate == null) continue
+			if (typeof candidate !== 'bigint' || candidate < 0n) throw new Error('invalid fee data; refusing payout')
+			return candidate
+		}
+	}
+	const response: unknown = await provider.send('eth_gasPrice', [])
+	if (typeof response !== 'string' || !/^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/.test(response)) {
+		throw new Error('invalid eth_gasPrice response; refusing payout')
+	}
+	const hex = response
 	return BigInt(hex)
 }
 
@@ -791,6 +765,8 @@ function writeState(state: LabClPayoutState): void {
 }
 
 function writeStateOrThrow(state: LabClPayoutState): void {
+	// Check before timestamp/cursor changes, archive append, or consumed-key pruning.
+	assertSegmentedCommitFenceClear(resolveSegmentedStateDir())
 	const legacyFile = resolveStateFile()
 	const dir = resolveSegmentedStateDir()
 	if (inspectSegmentedDir(dir) !== 'committed' && legacyStateFileExists(legacyFile)) {
@@ -1085,6 +1061,17 @@ function makeLabLifecycleDeps(
 			state.settledBatchCount = (state.settledBatchCount ?? 0) + 1
 		},
 		stopBeforeSend: () => shouldStopAfterSettled(state.settledBatchCount ?? 0, resolveMaxSettledBatches()),
+		getSendBudget: () => {
+			const used = state.labPayoutSendAttempts
+			const limit = state.labPayoutSendAttemptLimit
+			const approvedLimit = LAB_PAYOUT_TOTAL_SEND_ATTEMPT_HARD_CAP
+			if (used == null || limit == null || approvedLimit == null) return null
+			return { used, limit, configuredLimit: approvedLimit }
+		},
+		setSendBudget: (used, limit) => {
+			state.labPayoutSendAttempts = used
+			state.labPayoutSendAttemptLimit = limit
+		},
 		halt: (code, reason) => haltDaemon(state, pending, code, reason),
 		send: async (rec) => {
 			if (labMode !== 'payout' || labDryRun()) throw new Error('Lab no-send mode blocks signer transport')
@@ -1103,21 +1090,16 @@ function makeLabLifecycleDeps(
 						`recovered=${sent.recoveredFromJournal ? 1 : 0} n=${rec.eventKeys.length} gasPrice=${ethers.formatUnits(gasPriceWei, 'gwei')}gwei`
 				)
 			)
-			return { hash: sent.hash }
+			return { hash: sent.hash, idempotencyKey: sent.idempotencyKey, requestFingerprint: sent.requestFingerprint }
 		},
+		// No production lookup adapter currently proves journal requestHash against the durable intent.
+		// Missing proof is UNKNOWN; it never authorizes another signer call or settlement.
+		lookupSignerJournal: async () => ({ kind: 'unknown' }),
 		// Round-5 F1: read on every new composition, before the intent is persisted. Not cached per process.
 		confirmBeforeSend: async () => {
 			await verifyLabSignerBoundAddress(process.env)
 		},
-		waitReceipt: async (hash) => {
-			try {
-				const receipt = await waitForSignerReceiptByHash(provider, hash, resolveTxWaitTimeoutMs())
-				return { status: receipt.status === 1 ? 1 : 0 }
-			} catch {
-				// Timeout: unresolved. The caller keeps the in-flight record and sends nothing new.
-				return null
-			}
-		},
+		waitReceipt: async () => ({ kind: 'unknown' }),
 		settle: (keys) => {
 			labSettledEntriesTotal += keys.length
 			for (const k of keys) {
@@ -1209,35 +1191,14 @@ async function flushPendingLabBatches(
 	}
 
 	const maxGas = resolveMaxGasPriceWei()
-	const gasDustWei = 50_000_000n // 0.05 gwei
 	const gasPrice = await readGasPriceWei(provider)
-	const forceMs = resolveGasWaitForceMs()
-	let forceFlush = false
-
-	if (gasPrice > maxGas + gasDustWei) {
-		const now = Date.now()
-		if (!state.gasWaitStartedAt) {
-			state.gasWaitStartedAt = new Date(now).toISOString()
-			persistPending(state, pending)
-		}
-		const startedMs = Date.parse(state.gasWaitStartedAt)
-		const elapsedMs = Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : forceMs
-		if (elapsedMs < forceMs) {
-			logger(
-				Colors.yellow(
-					`[labMiningPoolClPayout] skip flush: gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei > max=${ethers.formatUnits(maxGas, 'gwei')} gwei ` +
-						`wait ${formatWaitCountdown(elapsedMs, forceMs)} pending=${pending.size}`
-				)
-			)
-			return
-		}
-		forceFlush = true
+	if (gasPrice > maxGas) {
 		logger(
 			Colors.yellow(
-				`[labMiningPoolClPayout] force flush: gas wait ${Math.floor(elapsedMs / 1000)}s ≥ ${Math.floor(forceMs / 1000)}s; ` +
-					`ignoring max=${ethers.formatUnits(maxGas, 'gwei')} gwei, using live gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei (pending=${pending.size})`
+				`[labMiningPoolClPayout] hold flush: gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei > max=${ethers.formatUnits(maxGas, 'gwei')} gwei; no state write or force-flush authorization`
 			)
 		)
+		return
 	} else if (clearGasWait(state)) {
 		persistPending(state, pending)
 	}
@@ -1250,8 +1211,8 @@ async function flushPendingLabBatches(
 			() => resumeLabWithdrawInFlight(makeLabLifecycleDeps(state, pending, provider, gasPrice)),
 			'[labMiningPoolClPayout]'
 		)
-		if (flight === 'pending') return
 		if (flight === 'settled') noteSettledBatch(state)
+		else if (flight !== 'none') return
 	}
 
 	const flushMax = resolveFlushMaxEntries()
@@ -1404,7 +1365,7 @@ async function flushPendingLabBatches(
 				`A2 rtFirst=${scheduled.realtimeFirst} hist=${scheduled.historyCount} reserved=${reserved} ` +
 				`rtLatency tipGap=${lat.tipGapBlocks} histProgress remaining=${prog.remaining} pct=${prog.pct}% ` +
 				`(maxEntries=${flushMax} batchEntries=${batchEntries} maxBatches=${maxBatches}) ` +
-				`gasPrice=${ethers.formatUnits(gasPrice, 'gwei')}gwei${forceFlush ? ' force=1' : ''}`
+				`gasPrice=${ethers.formatUnits(gasPrice, 'gwei')}gwei`
 		)
 	)
 
@@ -1689,14 +1650,22 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 	}
 	const mode = latchedLabMode ?? resolveLabPayoutMode()
 	if (mode === 'payout' && labDryRun()) throw new Error('Lab payout mode conflicts with DRY_RUN')
+	if (mode === 'payout' && LAB_PAYOUT_TOTAL_SEND_ATTEMPT_HARD_CAP === null) {
+		throw new Error('Lab payout mode disabled: no approved lifetime signer-send budget')
+	}
+	const stateDir = resolveSegmentedStateDir()
+	// Check before lock reclamation or any startup write; the same check runs again after lock acquisition.
+	assertSegmentedCommitFenceClear(stateDir)
 	if (!loadManifestIfNeeded(true)) return
-	if (mode === 'scan-only' && inspectSegmentedDir(resolveSegmentedStateDir()) !== 'committed') {
+	if (mode === 'scan-only' && inspectSegmentedDir(stateDir) !== 'committed') {
 		throw new Error('Lab scan-only requires existing committed V2 state')
 	}
 	labMode = latchedLabMode = mode
 	// Refuses to start when another live process holds the state dir (throws, daemon exits).
 	assertPinnedRedeem(process.env.CONET_VALIDATOR_DEPOSIT_REDEEM, CONET_VALIDATOR_DEPOSIT_REDEEM)
-	labStateLock = acquireStateDirLock(resolveSegmentedStateDir())
+	labStateLock = acquireStateDirLock(stateDir)
+	// A durable fence may appear between the pre-lock check and lock acquisition.
+	assertSegmentedCommitFenceClear(stateDir)
 	labSessionState = initLabSessionState()
 	// Start check: a one-shot limit already reached exits cleanly before the first tick.
 	if (labMode === 'payout' && shouldStopAfterSettled(labSessionState.settledBatchCount ?? 0, resolveMaxSettledBatches())) {
@@ -1709,7 +1678,7 @@ export function startValidatorLabMiningPoolClPayoutReporter(): void {
 			`[labMiningPoolClPayout] starting dual-cursor mode=${labMode} pubkeys=${labPubkeySet.size} tick=${resolveTickMs()}ms ` +
 				`${startupConfigLine()} ` +
 				`realtimeReserved=${resolveRealtimeReservedBatches()} ` +
-				`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} txWaitTimeoutMs=${resolveTxWaitTimeoutMs()} pendingPool=on`
+				`rpcHttpTimeoutMs=${resolveRpcHttpTimeoutMs()} payoutRecovery=UNKNOWN_UNTIL_SIGNER_JOURNAL_ADAPTER pendingPool=on`
 		)
 	)
 	void labPayoutTick().finally(() => scheduleNextLabTick())
@@ -1728,11 +1697,16 @@ export function stopValidatorLabMiningPoolClPayoutReporter(): void {
 
 /** Persist listening checkpoint before process exit (next restart backfills from lastListeningEndBlock+1). */
 export async function flushLabMiningPoolListeningCheckpoint(): Promise<void> {
-	if (!labStateLock) return
+	if (!labStateLock || labInFlight || labGate.tripped || labStarted) return
 	try {
+		// A SIGTERM checkpoint must not run during a tick, after an unknown commit, or while a new tick can start.
+		const stateDir = resolveSegmentedStateDir()
+		assertSegmentedCommitFenceClear(stateDir)
 		const state = labSessionState ?? readStateFromDisk()
 		const provider = createLabRpcProvider()
 		const liveHead = Number(await provider.getBlockNumber())
+		if (labInFlight || labGate.tripped || labStarted) return
+		assertSegmentedCommitFenceClear(stateDir)
 		if (Number.isFinite(liveHead)) {
 			tryPersistListeningCheckpoint(state, liveHead)
 		}

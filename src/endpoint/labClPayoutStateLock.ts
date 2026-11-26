@@ -8,10 +8,13 @@
  * is refused (fail closed). Node built-ins only.
  */
 import fs from 'node:fs'
+import path from 'node:path'
 import { randomBytes } from 'node:crypto'
+import { assertSegmentedCommitFenceClear, SEGMENTED_COMMIT_FENCE_FILE } from './labClPayoutStateStore'
 
 export type StateDirLock = {
 	file: string
+	stateDir: string
 	token: string
 	release: () => void
 }
@@ -54,7 +57,19 @@ function readHolder(file: string): { pid: number; token: string } | null {
 	return { pid: -1, token: '' }
 }
 
-function releaseIfOwner(file: string, token: string): void {
+function commitFenceBlocksRelease(stateDir: string): boolean {
+	try {
+		assertSegmentedCommitFenceClear(stateDir)
+		return false
+	} catch {
+		// This also observes the process-local UNKNOWN latch if the marker was unlinked
+		// but the following directory fsync failed. Retain the lock on every uncertain result.
+		return true
+	}
+}
+
+function releaseIfOwner(file: string, token: string, stateDir: string): void {
+	if (commitFenceBlocksRelease(stateDir)) return
 	const holder = readHolder(file)
 	if (holder && holder.token === token) {
 		try {
@@ -83,7 +98,7 @@ function installExitHook(): void {
  * A reclaim file that already exists refuses the start. A reclaim file left by a crash is never removed
  * automatically: an operator removes it only after confirming that no writer is running.
  */
-function reclaimStaleLock(file: string, stale: { pid: number; token: string }): void {
+function reclaimStaleLock(file: string, stale: { pid: number; token: string }, stateDir: string): void {
 	const reclaim = `${file}.reclaim`
 	let fd: number
 	try {
@@ -113,6 +128,9 @@ function reclaimStaleLock(file: string, stale: { pid: number; token: string }): 
 	try {
 		const again = readHolder(file)
 		if (again && again.token === stale.token) {
+			// The stale token may still be current while its writer records a durability fence.
+			// Recheck immediately before removing the lock; a fence means preserve this lock.
+			assertSegmentedCommitFenceClear(stateDir)
 			try {
 				fs.rmSync(file, { force: true })
 			} catch {
@@ -134,7 +152,10 @@ function reclaimStaleLock(file: string, stale: { pid: number; token: string }): 
  */
 export function acquireStateDirLock(stateDir: string): StateDirLock {
 	const file = stateDirLockPath(stateDir)
+	// Refuse before inspecting/reclaiming a dead lock from an uncertain generation.
+	assertSegmentedCommitFenceClear(stateDir)
 	for (let attempt = 0; attempt < 3; attempt++) {
+		assertSegmentedCommitFenceClear(stateDir)
 		const token = randomBytes(12).toString('hex')
 		try {
 			const fd = fs.openSync(file, 'wx', 0o600)
@@ -145,9 +166,12 @@ export function acquireStateDirLock(stateDir: string): StateDirLock {
 			} finally {
 				fs.closeSync(fd)
 			}
-			const lock: StateDirLock = { file, token, release: () => releaseIfOwner(file, token) }
+			const lock: StateDirLock = { file, stateDir, token, release: () => releaseIfOwner(file, token, stateDir) }
 			held.set(file, lock)
 			installExitHook()
+			// A fence may appear between the initial check and successful lock creation.
+			// Leave this lock held if it did; process exit also preserves it while fenced.
+			assertSegmentedCommitFenceClear(stateDir)
 			return lock
 		} catch (e) {
 			if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
@@ -168,7 +192,7 @@ export function acquireStateDirLock(stateDir: string): StateDirLock {
 			)
 		}
 		// Holder is dead. Reclaim only under the reclaim file, and only if the token is still the stale one.
-		reclaimStaleLock(file, holder)
+		reclaimStaleLock(file, holder, stateDir)
 	}
 	throw new Error(`could not acquire lab state lock: ${file}`)
 }

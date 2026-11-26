@@ -6,7 +6,8 @@
  * on every tick, so the payout daemon stops paying. This store never builds one big string.
  *
  * On-disk layout (stateDir = legacy state file path without a trailing ".json", plus ".v2"):
- *   manifest.json                 the only commit point (tmp + fsync + rename)
+ *   manifest.json                 the commit point (tmp + fsync + durable fence + rename)
+ *   commit-uncertain.json          persistent fail-closed marker; never auto-cleared on uncertainty
  *   gen-<UTC>-<rand12>/           one directory per write generation, never referenced until committed
  *     pending-NNNNNN.jsonl        one pending entry (JSON object) per line, segmentSize lines per file
  *     consumed.jsonl              one consumedEventKeys key (JSON string) per line; value is always true
@@ -25,6 +26,7 @@ import { createHash, randomBytes } from 'node:crypto'
 export const SEGMENTED_STATE_FORMAT = 'beamio-lab-clpayout-state' as const
 export const SEGMENTED_STATE_VERSION = 2 as const
 export const SEGMENTED_MANIFEST_FILE = 'manifest.json'
+export const SEGMENTED_COMMIT_FENCE_FILE = 'commit-uncertain.json'
 export const DEFAULT_PENDING_SEGMENT_SIZE = 100_000
 /** V8 max string length on 64-bit builds. The legacy single file must stay below this for one JSON.parse. */
 export const V8_MAX_STRING_LENGTH = 536_870_888
@@ -321,23 +323,50 @@ function newGenerationId(now: Date): string {
 	return `gen-${stamp.slice(0, 8)}T${stamp.slice(9)}-${randomBytes(6).toString('hex')}`
 }
 
+const uncertainCommitDirs = new Set<string>()
+
+export class SegmentedCommitDurabilityUnknownError extends Error {
+	readonly code = 'LAB_STATE_COMMIT_DURABILITY_UNKNOWN'
+
+	constructor(dir: string, cause?: unknown) {
+		super('labClPayoutStateStore: commit durability unknown for ' + dir + '; persistent fence requires operator recovery')
+		this.name = 'SegmentedCommitDurabilityUnknownError'
+		if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause
+	}
+}
+
+/** A fence is never cleared automatically; a visible manifest is not proof of durable commit. */
+export function assertSegmentedCommitFenceClear(dir: string): void {
+	const key = path.resolve(dir)
+	if (uncertainCommitDirs.has(key)) throw new SegmentedCommitDurabilityUnknownError(key)
+	const fence = path.join(dir, SEGMENTED_COMMIT_FENCE_FILE)
+	try {
+		fs.lstatSync(fence)
+		uncertainCommitDirs.add(key)
+		throw new SegmentedCommitDurabilityUnknownError(key)
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return
+		throw e
+	}
+}
+
+/** Persist the fence before the manifest rename; it contains references, never event payloads. */
+function writeCommitFence(dir: string, body: Record<string, unknown>): void {
+	const file = path.join(dir, SEGMENTED_COMMIT_FENCE_FILE)
+	const fd = fs.openSync(file, 'wx', 0o600)
+	try {
+		writeAllSync(fd, Buffer.from(JSON.stringify(body, null, 2) + '\n', 'utf8'))
+		fs.fsyncSync(fd)
+	} finally {
+		fs.closeSync(fd)
+	}
+	fsyncDirStrict(dir)
+}
+
 function writeAllSync(fd: number, buf: Buffer): void {
 	let off = 0
 	while (off < buf.length) {
 		off += fs.writeSync(fd, buf, off, buf.length - off)
-	}
-}
-
-function fsyncDirBestEffort(dir: string): void {
-	try {
-		const fd = fs.openSync(dir, 'r')
-		try {
-			fs.fsyncSync(fd)
-		} finally {
-			fs.closeSync(fd)
-		}
-	} catch {
-		/* not supported on every platform; the file-level fsync already happened */
 	}
 }
 
@@ -519,6 +548,7 @@ export function segmentedDirForLegacy(legacyFile: string): string {
  * orphan: entries exist but there is no manifest. Never treat this as an empty state.
  */
 export function inspectSegmentedDir(dir: string): InspectStatus {
+	assertSegmentedCommitFenceClear(dir)
 	if (!pathExistsStrict(dir)) return 'absent'
 	if (pathExistsStrict(path.join(dir, SEGMENTED_MANIFEST_FILE))) return 'committed'
 	return fs.readdirSync(dir).length > 0 ? 'orphan' : 'absent'
@@ -538,6 +568,7 @@ export function legacyStateFileExists(file: string): boolean {
  * until commitGeneration() renames the manifest. On failure the generation dir is removed.
  */
 export function writeGeneration(dir: string, input: SegmentedStateInput, opts: WriteOptions = {}): PreparedGeneration {
+	assertSegmentedCommitFenceClear(dir)
 	const segmentSize = normalizeSegmentSize(opts.segmentSize)
 	const st = normalizeForWrite(input)
 	const now = opts.now ?? new Date()
@@ -598,31 +629,50 @@ function readCommittedGenerationId(dir: string): string | null {
 }
 
 /**
- * Commit point. The manifest is written to a tmp file, fsynced, then renamed over manifest.json.
- * Before the rename, any failure removes the prepared generation. After the rename, nothing here throws.
+ * Commit point. The manifest is staged and fsynced, then fenced before rename.
+ * A post-rename directory-fsync failure is durability UNKNOWN: the fence and both generations remain,
+ * and no pruning occurs until the commit and fence removal are durably synced.
  */
 export function commitGeneration(prepared: PreparedGeneration, opts: WriteOptions = {}): CommitResult {
 	const { dir, generation, genDir } = prepared
 	const manifestPath = path.join(dir, SEGMENTED_MANIFEST_FILE)
-	const tmp = `${manifestPath}.tmp.${process.pid}`
-	let previous: string | null = null
-	let toCommit: SegmentedManifest
+	const tmp = manifestPath + '.tmp.' + process.pid
+	assertSegmentedCommitFenceClear(dir)
+	let previous: SegmentedManifest | null = null
+	let toCommit: SegmentedManifest | undefined
+	let fenceAttempted = false
 	try {
-		previous = readCommittedGenerationId(dir)
+		if (pathExistsStrict(manifestPath)) previous = readManifest(dir)
 		toCommit = {
 			...prepared.manifest,
-			previousGeneration: previous !== null && previous !== generation ? previous : null,
+			previousGeneration: previous !== null && previous.generation !== generation ? previous.generation : null,
 		}
-		// The manifest must not name a generation whose directory entries can still be lost.
-		// Make the segment renames inside genDir durable, then genDir's own entry in dir.
-		// Unlike the post-rename fsync below, a failure here aborts the commit.
+		// Make generation data and its directory entry durable before naming it in the manifest.
 		fsyncDirStrict(genDir)
 		fsyncDirStrict(dir)
 		opts.hooks?.beforeCommit?.(toCommit)
-		writeFileDurable(tmp, `${JSON.stringify(toCommit, null, 2)}\n`)
+		const manifestText = JSON.stringify(toCommit, null, 2) + '\n'
+		writeFileDurable(tmp, manifestText)
 		opts.hooks?.beforeManifestRename?.(tmp)
+		fenceAttempted = true
+		uncertainCommitDirs.add(path.resolve(dir))
+		writeCommitFence(dir, {
+			format: 'beamio-lab-clpayout-commit-fence',
+			version: 1,
+			createdAt: new Date().toISOString(),
+			previousGeneration: previous?.generation ?? null,
+			previousManifestSha256: previous === null ? null : sha256Hex(fs.readFileSync(manifestPath)),
+			candidateGeneration: toCommit.generation,
+			candidateManifestSha256: sha256Hex(manifestText),
+			previousInFlightId: previous?.inFlightKeys?.id ?? null,
+			candidateInFlightId: toCommit.inFlightKeys?.id ?? null,
+		})
 		fs.renameSync(tmp, manifestPath)
 	} catch (e) {
+		if (fenceAttempted) {
+			// The durable fence and both generations are retained for operator recovery.
+			throw new SegmentedCommitDurabilityUnknownError(dir, e)
+		}
 		try {
 			fs.rmSync(tmp, { force: true })
 		} catch {
@@ -631,11 +681,27 @@ export function commitGeneration(prepared: PreparedGeneration, opts: WriteOption
 		removeGenerationDir(dir, genDir)
 		throw e
 	}
-	fsyncDirBestEffort(dir)
-	const keep: Array<string | null> = [generation, toCommit.previousGeneration]
+	try {
+		// A failure here is distinct from a pre-rename failure: the new manifest may be visible,
+		// but its directory entry is not known durable. Keep the fence and skip all pruning.
+		fsyncDirStrict(dir)
+	} catch (e) {
+		throw new SegmentedCommitDurabilityUnknownError(dir, e)
+	}
+	try {
+		fs.unlinkSync(path.join(dir, SEGMENTED_COMMIT_FENCE_FILE))
+		fsyncDirStrict(dir)
+		uncertainCommitDirs.delete(path.resolve(dir))
+	} catch (e) {
+		// The commit was synced, but fence removal is uncertain. Hold this process; a restart
+		// either sees the durable commit or the conservative fence.
+		uncertainCommitDirs.add(path.resolve(dir))
+		throw new SegmentedCommitDurabilityUnknownError(dir, e)
+	}
+	const keep: Array<string | null> = [generation, toCommit!.previousGeneration]
 	const removed = pruneGenerations(dir, keep)
-	if (!opts.retainInFlightBlobs) pruneInFlightBlobs(dir, toCommit.inFlightKeys?.id ?? null)
-	return { generation, previousGeneration: toCommit.previousGeneration, removed }
+	if (!opts.retainInFlightBlobs) pruneInFlightBlobs(dir, toCommit!.inFlightKeys?.id ?? null)
+	return { generation, previousGeneration: toCommit!.previousGeneration, removed }
 }
 
 /** Write a generation and commit it. A pre-commit failure leaves the previous committed state readable. */
@@ -706,6 +772,7 @@ function parseManifest(raw: unknown, label: string): SegmentedManifest {
 
 /** Read and validate manifest.json. Throws if missing or invalid. */
 export function readManifest(dir: string): SegmentedManifest {
+	assertSegmentedCommitFenceClear(dir)
 	const file = path.join(dir, SEGMENTED_MANIFEST_FILE)
 	let text: string
 	try {
@@ -848,6 +915,7 @@ function pruneInFlightBlobs(dir: string, keepId: string | null): string[] {
 
 /** Verify and load one committed generation named by an already-validated manifest. */
 export function readGenerationFromManifest(dir: string, manifest: SegmentedManifest): SegmentedState {
+	assertSegmentedCommitFenceClear(dir)
 	const genDir = path.join(dir, manifest.generation)
 	if (!pathExistsStrict(genDir)) throw bad(genDir, 'generation directory missing')
 	if (sha256Hex(canonicalJson(manifest.scalars)) !== manifest.scalarsSha256) {

@@ -5,6 +5,7 @@
  * Compile with tsconfig.test.json (tests are excluded from the main build) and run with node --test.
  */
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -14,6 +15,8 @@ import { assertNoRemigration, nextHistoryWindow, pruneOrder } from './labMiningP
 import { parseArgs, runMigration } from './labClPayoutStateMigrate'
 import {
 	canonicalJson,
+	SEGMENTED_COMMIT_FENCE_FILE,
+	SegmentedCommitDurabilityUnknownError,
 	dryRunLegacyMigration,
 	inspectSegmentedDir,
 	keySetHash,
@@ -591,6 +594,82 @@ function withDirFsyncSpy(opts: { failDirs: boolean }, fn: (dirInodes: number[]) 
 		;(fs as any).fsyncSync = real
 	}
 }
+
+test('post-rename directory fsync failure persists a cross-process fence and preserves both generations', () => {
+	withRoot((root) => {
+		const dir = path.join(root, 'state.v2')
+		const keyA = hexKey('in-flight-a', 1)
+		const keyB = hexKey('in-flight-b', 1)
+		const stateA = {
+			...makeState({ pending: 3, consumed: 4, exited: 1 }),
+			labPayoutSendAttempts: 7,
+			labPayoutSendAttemptLimit: 10,
+			inFlightWithdraw: { eventKeys: [keyA], idempotencyKey: 'intent-a', status: 'unknown', attempt: 1 },
+		}
+		const stateB = {
+			...makeState({ pending: 4, consumed: 5, exited: 1 }),
+			labPayoutSendAttempts: 8,
+			labPayoutSendAttemptLimit: 10,
+			inFlightWithdraw: { eventKeys: [keyB], idempotencyKey: 'intent-b', status: 'unknown', attempt: 2 },
+		}
+		const old = writeSegmentedState(dir, stateA, { segmentSize: 2, retainInFlightBlobs: true })
+		const oldManifest = readManifest(dir)
+		const parentIno = fs.statSync(dir).ino
+		const realFsync = fs.fsyncSync
+		let parentSyncs = 0
+		let injected = false
+		;(fs as any).fsyncSync = (fd: number) => {
+			const st = fs.fstatSync(fd)
+			if (st.isDirectory() && st.ino === parentIno) {
+				parentSyncs++
+				// 1: pre-commit parent sync; 2: durable fence; 3: post-rename sync.
+				if (parentSyncs === 3) {
+					injected = true
+					throw Object.assign(new Error('simulated EIO after manifest rename'), { code: 'EIO' })
+				}
+			}
+			return realFsync(fd)
+		}
+		try {
+			assert.throws(
+				() => writeSegmentedState(dir, stateB, { segmentSize: 2, retainInFlightBlobs: true }),
+				(e: unknown) => e instanceof SegmentedCommitDurabilityUnknownError &&
+					(e as SegmentedCommitDurabilityUnknownError).code === 'LAB_STATE_COMMIT_DURABILITY_UNKNOWN'
+			)
+		} finally {
+			;(fs as any).fsyncSync = realFsync
+		}
+		assert.equal(injected, true, 'failure was injected at the post-rename parent fsync')
+		const visible = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'))
+		assert.equal(visible.previousGeneration, old.generation)
+		assert.notEqual(visible.generation, old.generation, 'new manifest is visible')
+		const fence = JSON.parse(fs.readFileSync(path.join(dir, SEGMENTED_COMMIT_FENCE_FILE), 'utf8'))
+		assert.equal(fence.previousGeneration, old.generation)
+		assert.equal(fence.candidateGeneration, visible.generation)
+		assert.equal(fence.previousInFlightId, oldManifest.inFlightKeys?.id)
+		assert.equal(fence.candidateInFlightId, visible.inFlightKeys?.id)
+		assert.ok(listGenerationDirs(dir).includes(old.generation), 'previous generation is preserved')
+		assert.ok(listGenerationDirs(dir).includes(visible.generation), 'candidate generation is preserved')
+		assert.ok(fs.existsSync(path.join(dir, 'inflight', fence.previousInFlightId)), 'previous in-flight blob is preserved')
+		assert.ok(fs.existsSync(path.join(dir, 'inflight', fence.candidateInFlightId)), 'candidate in-flight blob is preserved')
+		assert.throws(() => readSegmentedState(dir), /commit durability unknown/)
+		assert.throws(() => readManifest(dir), /commit durability unknown/)
+		assert.throws(() => readGenerationFromManifest(dir, visible), /commit durability unknown/)
+		assert.throws(() => writeSegmentedState(dir, stateB, { segmentSize: 2 }), /commit durability unknown/)
+		const storeJs = path.join(__dirname, 'labClPayoutStateStore.js')
+		const storeModule = fs.existsSync(storeJs) ? storeJs : path.join(__dirname, 'labClPayoutStateStore.ts')
+		const childArgs: string[] = []
+		const tsHook = process.env.LAB_STATE_TEST_TS_HOOK
+		if (tsHook) childArgs.push('--require', tsHook)
+		childArgs.push('-e',
+			"const s=require(process.argv[1]);try{s.readSegmentedState(process.argv[2]);process.exit(0)}catch(e){process.stderr.write(String(e.code||e.name));process.exit(31)}",
+			storeModule, dir)
+		const child = spawnSync(process.execPath, childArgs, { encoding: 'utf8', timeout: 5_000 })
+		assert.equal(child.status, 31, 'fresh process must refuse the fence')
+		assert.equal(child.stderr, 'LAB_STATE_COMMIT_DURABILITY_UNKNOWN')
+		assert.equal(fs.existsSync(path.join(dir, SEGMENTED_COMMIT_FENCE_FILE)), true, 'no automatic fence cleanup')
+	})
+})
 
 test('C3: genDir and its parent dir are fsynced before the manifest is staged', () => {
 	withRoot((root) => {

@@ -10,6 +10,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { acquireStateDirLock, stateDirLockPath } from './labClPayoutStateLock'
+import { assertSegmentedCommitFenceClear, SEGMENTED_COMMIT_FENCE_FILE } from './labClPayoutStateStore'
 
 function withRoot(fn: (root: string) => void): void {
 	const base = process.env.LAB_STATE_TEST_ROOT?.trim() || os.tmpdir()
@@ -43,6 +44,30 @@ test('B-1: a second process cannot take the state-dir lock; the refusal names th
 		const again = acquireStateDirLock(stateDir)
 		again.release()
 		assert.equal(fs.existsSync(stateDirLockPath(stateDir)), false, 'released lock file is removed')
+	})
+})
+
+test('commit durability fence blocks stale-lock reclaim and the exit hook preserves the writer lock', () => {
+	withRoot((root) => {
+		const stateDir = path.join(root, 'state.v2')
+		fs.mkdirSync(stateDir)
+		const lockModule = path.join(__dirname, 'labClPayoutStateLock.js')
+		const lockSource = path.join(__dirname, 'labClPayoutStateLock.ts')
+		const modulePath = fs.existsSync(lockModule) ? lockModule : lockSource
+		const childArgs: string[] = []
+		const tsHook = process.env.LAB_STATE_TEST_TS_HOOK
+		if (tsHook) childArgs.push('--require', tsHook)
+		childArgs.push('-e',
+			"const fs=require('node:fs');const path=require('node:path');const m=require(process.argv[1]);const d=process.argv[2];m.acquireStateDirLock(d);fs.writeFileSync(path.join(d,process.argv[3]),'synthetic fence\\n');process.exit(0)",
+			modulePath, stateDir, SEGMENTED_COMMIT_FENCE_FILE)
+		const child = spawnSync(process.execPath, childArgs, { encoding: 'utf8', timeout: 5_000 })
+		assert.equal(child.status, 0, child.stderr)
+		const lockFile = stateDirLockPath(stateDir)
+		const original = JSON.parse(fs.readFileSync(lockFile, 'utf8')) as { pid: number; token: string }
+		assert.notEqual(original.pid, process.pid)
+		assert.equal(fs.existsSync(path.join(stateDir, SEGMENTED_COMMIT_FENCE_FILE)), true)
+		assert.throws(() => acquireStateDirLock(stateDir), /commit durability unknown/)
+		assert.deepEqual(JSON.parse(fs.readFileSync(lockFile, 'utf8')), original, 'fenced dead lock is not reclaimed')
 	})
 })
 
@@ -133,5 +158,49 @@ test('B-1 (TOCTOU): a racing reclaimer of the same stale lock is refused; exactl
 			winner.release()
 		}
 		assert.equal(fs.existsSync(lockFile), false)
+	})
+})
+
+test('a fence created after the stale token re-read prevents reclaim from removing the old lock', () => {
+	withRoot((root) => {
+		const stateDir = path.join(root, 'state.v2')
+		fs.mkdirSync(stateDir)
+		const lockFile = stateDirLockPath(stateDir)
+		const fenceFile = path.join(stateDir, SEGMENTED_COMMIT_FENCE_FILE)
+		const stale = { pid: 999999, token: 'STALE-TOKEN' }
+		fs.writeFileSync(lockFile, `${JSON.stringify(stale)}\n`)
+		const fsMut = fs as unknown as { readFileSync: (...args: unknown[]) => unknown }
+		const origRead = fsMut.readFileSync.bind(fs) as (...args: unknown[]) => unknown
+		let lockReads = 0
+		fsMut.readFileSync = (file: unknown, ...rest: unknown[]): unknown => {
+			const value = origRead(file, ...rest)
+			if (file === lockFile && ++lockReads === 2) {
+				fs.writeFileSync(fenceFile, 'synthetic durable-fence race\n')
+			}
+			return value
+		}
+		try {
+			assert.throws(() => acquireStateDirLock(stateDir), /commit durability unknown/)
+		} finally {
+			fsMut.readFileSync = origRead
+		}
+		assert.equal(lockReads, 2, 'the fence was inserted immediately after the reclaim token re-read')
+		assert.deepEqual(JSON.parse(fs.readFileSync(lockFile, 'utf8')), stale, 'the original lock is preserved')
+		assert.equal(fs.existsSync(fenceFile), true)
+		assert.equal(fs.existsSync(`${lockFile}.reclaim`), false)
+	})
+})
+
+test('release retains the lock when the fence is unlinked but process-local durability is UNKNOWN', () => {
+	withRoot((root) => {
+		const stateDir = path.join(root, 'state.v2')
+		fs.mkdirSync(stateDir)
+		const fenceFile = path.join(stateDir, SEGMENTED_COMMIT_FENCE_FILE)
+		const lock = acquireStateDirLock(stateDir)
+		fs.writeFileSync(fenceFile, 'synthetic fence before failed parent fsync\n')
+		assert.throws(() => assertSegmentedCommitFenceClear(stateDir), /commit durability unknown/)
+		fs.rmSync(fenceFile)
+		lock.release()
+		assert.equal(fs.existsSync(lock.file), true, 'the in-memory UNKNOWN latch retains the lock without a marker')
 	})
 })
