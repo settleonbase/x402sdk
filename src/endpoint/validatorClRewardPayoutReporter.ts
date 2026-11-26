@@ -61,6 +61,7 @@ function resolveValidatorDepositRedeemAddress(): string | null {
 import {
 	buildVdrSignerTx,
 	readVdrSignerConfig,
+	signerSendOnce,
 	type VdrSignerTx,
 } from './vdrPayoutSigner'
 import {
@@ -139,10 +140,19 @@ export function __setFlushTestHooks(h: FlushTestHooks | null): void {
 	flushTestHooks = h ?? {}
 }
 
+/** Stage-1 candidate remains hard-disabled; activation requires a separately reviewed source change. */
+const CLAIM_REAL_SIGNER_TRANSPORT_ENABLED = false
+
+function signerTransportAvailable(): boolean {
+	return typeof flushTestHooks.signerSend === 'function' || CLAIM_REAL_SIGNER_TRANSPORT_ENABLED
+}
+
 async function sendSignerTx(tx: VdrSignerTx, socketPath: string): Promise<{ hash: string }> {
 	if (flushTestHooks.signerSend) return flushTestHooks.signerSend(tx)
-	void socketPath
-	throw new Error('SIGNER_TRANSPORT_DISABLED_IN_THIS_CANDIDATE')
+	if (!CLAIM_REAL_SIGNER_TRANSPORT_ENABLED) {
+		throw new Error('SIGNER_TRANSPORT_DISABLED_IN_THIS_CANDIDATE')
+	}
+	return signerSendOnce(tx, socketPath)
 }
 
 function makeReadContract(addr: string, provider: ethers.JsonRpcProvider): ethers.Contract {
@@ -1162,7 +1172,7 @@ export function mutateState(fn: (latest: DualCursorState) => DualCursorState): P
 function hasAvailableSyntheticSignerPermit(state: DualCursorState): boolean {
 	const control = state.signerControl
 	return Boolean(
-		flushTestHooks.signerSend && control && control.stop === false && control.permit?.status === 'available'
+		signerTransportAvailable() && control && control.stop === false && control.permit?.status === 'available'
 	)
 }
 
@@ -1170,7 +1180,7 @@ function availablePermitReplacesIntent(state: DualCursorState, intent: SettleInt
 	const control = state.signerControl
 	const permit = control?.permit
 	return Boolean(
-		flushTestHooks.signerSend && control?.stop === false && permit?.status === 'available' && permit.replaces &&
+		signerTransportAvailable() && control?.stop === false && permit?.status === 'available' && permit.replaces &&
 		permit.replaces.idempotencyKey === intent.idempotencyKey &&
 		permit.replaces.txHash === intent.txHash &&
 		permit.replaces.requestFingerprint === intent.requestFingerprint
@@ -1180,7 +1190,7 @@ function availablePermitReplacesIntent(state: DualCursorState, intent: SettleInt
 function hasConsumedPermitForIntent(state: DualCursorState, idempotencyKey: string): boolean {
 	const control = state.signerControl
 	const permit = control?.permit
-	if (!flushTestHooks.signerSend || control?.stop !== false || !permit || permit.status !== 'consumed' || permit.idempotencyKey !== idempotencyKey) return false
+	if (!signerTransportAvailable() || control?.stop !== false || !permit || permit.status !== 'consumed' || permit.idempotencyKey !== idempotencyKey) return false
 	const intent = state.settleIntents.find((item) => item.idempotencyKey === idempotencyKey)
 	return Boolean(
 		intent && intent.intentId === permit.intentId && intent.requestFingerprint === permit.requestFingerprint
@@ -1200,7 +1210,7 @@ async function mutatePaymentState(
 	const state = await mutateState((latest) => {
 		const control = latest.signerControl
 		const permit = control?.permit
-		if (!flushTestHooks.signerSend || control?.stop !== false || !permit || permit.status !== 'consumed' ||
+		if (!signerTransportAvailable() || control?.stop !== false || !permit || permit.status !== 'consumed' ||
 			permit.intentId !== intent.intentId || permit.idempotencyKey !== intent.idempotencyKey ||
 			permit.requestFingerprint !== intent.requestFingerprint || !hasConsumedPermitForIntent(latest, intent.idempotencyKey)) return latest
 		allowed = true
@@ -2044,7 +2054,7 @@ async function persistIntentBeforeSign(
 		await mutateState((latest) => {
 			const control = latest.signerControl
 			const permit = control?.permit
-			if (!flushTestHooks.signerSend || !control || control.stop !== false || !permit || permit.status !== 'available') {
+			if (!signerTransportAvailable() || !control || control.stop !== false || !permit || permit.status !== 'available') {
 				blocked = true
 				return latest
 			}
